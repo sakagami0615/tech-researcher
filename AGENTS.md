@@ -12,7 +12,7 @@
 - 出力：日本語のレポートを GitHub Issues に公開し、Projects に登録する
 - 履歴：収集・分析結果を SQLite に保存する
 
-仕様の正は `docs/spec/requirements.md` と、そこから参照する上流文書（`concept.md`：コンセプト、`epics.md`：エピック、`user-stories.md`：ユーザストーリー）。要件・仕様を判断するときは必ず参照する。開発ルールの正は `docs/dev/`。このファイルはプロジェクト概要と各ドキュメントへの入口のみを持つ。
+仕様の正は `docs/spec/requirements.md` と、そこから参照する上流文書（`concept.md`：コンセプト、`epics.md`：エピック、`user-stories.md`：ユーザストーリー）。実現方式の決定事項は `docs/spec/decisions.md`、詳細設計は `docs/spec/design/` に置く。要件・仕様を判断するときは必ず参照する。開発ルールの正は `docs/dev/`。このファイルはプロジェクト概要と各ドキュメントへの入口のみを持つ。
 
 ## 開発ドキュメント
 
