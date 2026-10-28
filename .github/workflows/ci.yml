@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.0"
+      - name: 依存を入れる
+        run: uv sync --locked
+      - name: 整形の確認
+        run: uv run ruff format --check
+      - name: 静的検査
+        run: uv run ruff check
+      # 単体テストと、記録した出力による契約テスト。llm と network は pyproject.toml の設定で外れる
+      - name: テスト
+        run: uv run pytest
