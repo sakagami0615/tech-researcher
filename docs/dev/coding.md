@@ -4,7 +4,7 @@
 
 ## 技術方針
 
-- Claude Code と Codex の両方で開発できる構成にする（優先は Claude Code とする）。定期実行は Claude Code で行い、Codex での実行は MVP に含めない（[decisions.md](../spec/decisions.md) D-05）
+- Claude Code と Codex の両方で開発できる構成にする（優先は Claude Code とする）。定期実行の AI の段階（評価・要約と失敗時の調査）は、Codex ではなく Claude Code で行う。Codex での実行は MVP に含めない（[decisions.md](../spec/decisions.md) D-04・D-05）
 - Python を中心に、CLI・API・AIエージェントを役割に応じて使い分ける
 - 収集処理は [`last30days-skill`](https://github.com/mvanhorn/last30days-skill) のスクリプトを最大限再利用する
 - 日次・週次は別スキルとし、共通処理は共有モジュールに置く
