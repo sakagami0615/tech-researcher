@@ -54,7 +54,7 @@
 ├── deploy/
 │   ├── crontab.example               # 日次 6:00・週次 月曜 7:00（D-09）
 │   └── env/
-│       ├── worker.env.example        # 変数名だけ。値は書かない
+│       ├── worker.env.example        # 変数名だけ。値は書かない（トークン、投稿先のリポジトリと Projects の指定。D-20）
 │       └── agent.env.example
 ├── bin/
 │   ├── setup-third-party.sh          # D-01 のセットアップ（submodule の取得と sparse-checkout、指示ファイルがないことの確認）
@@ -498,7 +498,7 @@ ${TR_DATA_DIR}/
 | テスト | pytest | D-07 が pytest を前提にしている |
 | 整形・静的検査 | ruff | 1つの道具で整形と検査ができる |
 | 型検査 | 入れない | 実装を小さく保つ |
-| CI | GitHub Actions で単体テストだけを流す | 手元で流し忘れても、レビューの前に気づける |
+| CI | GitHub Actions で単体テストと、記録した出力による契約テストを流す | 手元で流し忘れても、レビューの前に気づける。どちらも外部につながず速い |
 
 ### 8.2 新しい依存
 
@@ -515,7 +515,7 @@ ${TR_DATA_DIR}/
 | 種類 | 置き場所 | いつ流すか | 内容 |
 |---|---|---|---|
 | 単体 | `tests/unit/` | 常に（`pytest`、CI でも流す） | 期間の計算、設定の検証、D1〜D4・D6、無害化（report-templates.md 0.3・4.5 のテストデータ）、テンプレートの出力、重複判定（GitHub は偽の実装に差し替える）、秘匿情報の検出 |
-| 契約 | `tests/contract/` | last30days-skill を更新したとき | agent JSON（`schema_version`）の形の検証（D-01）。記録した出力でのテストは常に流し、実際の CLI を呼ぶものはマーカー `network` で分ける |
+| 契約 | `tests/contract/` | 記録した出力のテストは常に（CI でも流す）。実際の CLI を呼ぶものは last30days-skill を更新したとき | agent JSON（`schema_version`）の形の検証（D-01）。記録した出力でのテストは常に流し（CI でも流す）、実際の CLI を呼ぶものはマーカー `network` で分ける |
 | AI の回帰 | `tests/llm/` | プロンプト・CLI を変えたとき、または使われたモデルが変わったとき、運用者が手で（マーカー `llm`）。CI では流さない | D-07 の攻撃文のテスト。攻撃文を埋め込んだ入力 JSON（フィクスチャ）を、② ④ と同じ呼び出しの形（`agent/` の境界）で実際の AI に直接渡す |
 
 - `pyproject.toml` の pytest の設定で、`llm` と `network` を既定で外す
