@@ -193,7 +193,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `target` | TEXT | 対象日・対象週の月曜（JST） |
 | `period_start`・`period_end` | TEXT | その実行で使った調査期間（UTC）。設定で変わりうるため実際の値を残す（US-E5-01「調査期間」） |
 | `started_at`・`finished_at` | TEXT | 開始・終了 |
-| `status` | TEXT | `running`・`succeeded`（レポート Issue を作った、または同じ対象のレポート Issue がすでにあった。Projects 登録だけの失敗を含む）・`rejected`（不合格）・`failed`（実行エラー） |
+| `status` | TEXT | `running`・`succeeded`（レポート Issue を作った、または同じ対象のレポート Issue がすでにあった。Projects 登録だけの失敗を含む）・`rejected`（不合格）・`failed`（実行エラー）・`observed`（D-13 の観測。① の収集だけを行い、レポートを作らなかった。実行 ID の先頭は `obs-`） |
 | `failed_stage` | TEXT | `collect`・`analyze`・`verify`・`investigate`・`post`（失敗したときだけ） |
 | `error_category` | TEXT | コードが分類した短い文（report-templates.md 3.2 の「エラーの概要」） |
 | `retry_count` | INTEGER | 失敗した処理の再試行回数 |
