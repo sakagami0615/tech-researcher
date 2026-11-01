@@ -90,6 +90,7 @@ def test_repository_config_loads():
     assert feeds["github-changelog"].pages == 2
     assert feeds["vercel"].entry_date == "updated"
     assert feeds["hatena-it"].entry_date == "posted"
+    assert config.hackernews.enabled and config.github_search.enabled and config.subqueries
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -107,8 +108,8 @@ def test_all_sources_parse(base):
 
 
 def test_sources_are_optional(base):
-    base.pop("feeds", None)
-    base.pop("sources", None)
+    for name in ("feeds", "sources", "last30days"):
+        base.pop(name, None)
     config = parse_config(base)
     assert config.hackernews is None and config.feeds == () and config.subqueries == ()
 
