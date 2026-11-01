@@ -18,8 +18,12 @@ fail() {
     exit 1
 }
 
+# 初回は sparse-checkout の設定までの間だけ全ファイルが置かれる（D-01 の手順どおり。最後の確認で検出する）
 git submodule update --init -- "$SUBMODULE"
-git -C "$SUBMODULE" sparse-checkout set --no-cone "${KEEP_PATTERNS[@]}"
+# `set --no-cone` は Git 2.35 以降にしかなく、2.34 では "--no-cone" がパターンとして書き込まれる。
+# init で非 cone を指定すると、set はその設定を引き継ぐので、どちらの版でも同じ結果になる
+git -C "$SUBMODULE" sparse-checkout init --no-cone
+git -C "$SUBMODULE" sparse-checkout set "${KEEP_PATTERNS[@]}"
 
 # AI への指示になり得るファイルか（名前は大文字・小文字を区別しない）
 is_instruction_file() {
@@ -34,6 +38,11 @@ is_instruction_file() {
     return 1
 }
 
+# プロセス置換では find の失敗を拾えないので、いったんファイルに受ける
+listing="$(mktemp)"
+trap 'rm -f "$listing"' EXIT
+find "$SUBMODULE" -path "$SUBMODULE/.git" -prune -o ! -type d -print0 >"$listing"
+
 errors=0
 count=0
 while IFS= read -r -d '' path; do
@@ -46,7 +55,7 @@ while IFS= read -r -d '' path; do
         echo "setup-third-party: 対象外のファイルがあります: $SUBMODULE/$rel" >&2
         errors=$((errors + 1))
     fi
-done < <(find "$SUBMODULE" -path "$SUBMODULE/.git" -prune -o ! -type d -print0)
+done <"$listing"
 
 for required in "${REQUIRED_FILES[@]}"; do
     [[ -f "$SUBMODULE/$required" ]] || {

@@ -41,12 +41,17 @@ def git_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def git(env: dict[str, str], cwd: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+def git(env: dict[str, str], cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
 
 
-def make_parent_clone(tmp_path: Path, env: dict[str, str], files: dict[str, str]) -> Path:
-    """偽の last30days-skill を submodule に持つ親リポジトリを作り、再帰なしで clone する。"""
+def make_parent_clone(
+    tmp_path: Path, env: dict[str, str], files: dict[str, str], *clone_args: str
+) -> Path:
+    """偽の last30days-skill を submodule に持つ親リポジトリを作り、clone する。"""
     upstream = tmp_path / "upstream"
     for rel, text in files.items():
         (upstream / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -64,14 +69,16 @@ def make_parent_clone(tmp_path: Path, env: dict[str, str], files: dict[str, str]
     git(env, parent, "commit", "-q", "-m", "parent")
 
     clone = tmp_path / "clone"
-    git(env, tmp_path, "clone", "-q", str(parent), str(clone))
+    git(env, tmp_path, "clone", "-q", *clone_args, str(parent), str(clone))
     return clone
 
 
 def run_setup(clone: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     # スクリプトは自分の場所からリポジトリのルートを求めるので、ルートの外から起動する
     script = clone / "bin" / SCRIPT.name
-    return subprocess.run([str(script)], cwd=clone.parent, env=env, capture_output=True, text=True)
+    return subprocess.run(
+        [str(script)], cwd=clone.parent, env=env, capture_output=True, text=True, encoding="utf-8"
+    )
 
 
 def worktree_files(clone: Path) -> set[str]:
@@ -107,6 +114,38 @@ def test_is_idempotent(tmp_path: Path, git_env: dict[str, str]) -> None:
 
     assert result.returncode == 0, result.stderr
     assert worktree_files(clone) == EXPECTED_FILES
+
+
+def test_recovers_after_recursive_clone(tmp_path: Path, git_env: dict[str, str]) -> None:
+    # 再帰 clone では全ファイルが置かれるが、スクリプトを流せば scripts と LICENSE だけになる
+    clone = make_parent_clone(tmp_path, git_env, UPSTREAM_FILES, "--recurse-submodules")
+    assert "CLAUDE.md" in worktree_files(clone)
+
+    result = run_setup(clone, git_env)
+
+    assert result.returncode == 0, result.stderr
+    assert worktree_files(clone) == EXPECTED_FILES
+
+
+def test_keeps_new_sha_after_update_procedure(tmp_path: Path, git_env: dict[str, str]) -> None:
+    # README の SHA を変える手順：fetch・checkout・git add の後に流すと、新しい SHA のまま残る
+    clone = make_parent_clone(tmp_path, git_env, UPSTREAM_FILES)
+    assert run_setup(clone, git_env).returncode == 0
+    upstream = tmp_path / "upstream"
+    (upstream / "skills/last30days/scripts/new.py").write_text("")
+    git(git_env, upstream, "add", ".")
+    git(git_env, upstream, "commit", "-q", "-m", "new")
+    new_sha = git(git_env, upstream, "rev-parse", "HEAD")
+    sub = clone / SUBMODULE
+    git(git_env, sub, "fetch", "-q")
+    git(git_env, sub, "checkout", "-q", new_sha)
+    git(git_env, clone, "add", SUBMODULE)
+
+    result = run_setup(clone, git_env)
+
+    assert result.returncode == 0, result.stderr
+    assert git(git_env, sub, "rev-parse", "HEAD") == new_sha
+    assert worktree_files(clone) == EXPECTED_FILES | {"skills/last30days/scripts/new.py"}
 
 
 @pytest.mark.parametrize(
