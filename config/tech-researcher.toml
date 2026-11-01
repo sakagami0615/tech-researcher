@@ -7,6 +7,25 @@ period_days = 1 # 対象期間の長さ。終わりは実行日の 0:00（JST）
 [weekly]
 period_days = 7 # 終わりは実行日以前で最も近い月曜の 0:00（JST）。D-17
 
+# last30days-skill で集める情報源（D-01）
+[sources.hackernews]
+enabled = true
+display_name = "Hacker News"
+
+[sources.github_search]
+enabled = true
+display_name = "GitHub"
+
+# last30days-skill の --plan を作る元（D-01）。sources は hackernews・github。
+# 検索語は重点領域に合わせた初期値。運用で調整する
+[last30days]
+subqueries = [
+  { search_query = "LLM", ranking_query = "LLM and generative AI news", sources = ["hackernews", "github"], weight = 1.0 },
+  { search_query = "AI agent", ranking_query = "AI agents and coding agents", sources = ["hackernews", "github"], weight = 1.0 },
+  { search_query = "developer tools", ranking_query = "new developer tools", sources = ["hackernews", "github"], weight = 1.0 },
+  { search_query = "cloud infrastructure", ranking_query = "cloud and infrastructure news", sources = ["hackernews", "github"], weight = 1.0 },
+]
+
 # RSS・Atom（D-11）。kind は new（新着）か popular（人気型。D-13）。残りのフィードは後の Issue で足す
 [[feeds]]
 id = "cloudflare"

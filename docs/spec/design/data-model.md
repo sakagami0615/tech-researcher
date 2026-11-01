@@ -137,6 +137,8 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - URL の正規化の規則（ホストの小文字化、フラグメントの除去、`utm_*` などの追跡パラメータの除去、末尾の `/`、`http` から `https`）。`github.com/{owner}/{repo}` は owner・repo を小文字にそろえる
 - `source_id` の名前の付け方
 - last30days-skill の agent JSON（`schema_version` 1.4）から収集レコードへの対応表と、その契約テスト（D-01）
+  - 実装での対応（`src/tech_researcher/collect/last30days.py`）：`results[].source` の `hackernews`・`github` → `source_id` の `hackernews`・`github_search`。`url` → `url`、`title` → `title`、`summary` → `excerpt`（タイトルと同じなら空）、`published_at`（UTC の日付）→ `published_at`（UTC の 0:00、`published_precision` は `date`）と出来事 `published`、`engagement` の数値 → `attention`（`hn_points`・`hn_comments`・`github_reactions`・`github_comments`）、GitHub の URL の `owner/repo` → `meta_terms`
+  - agent JSON には HN の item ページの URL がない。そのため HN のレコードは、2.3 と違い、`url` に記事の URL（記事のない投稿は item ページ）を入れ、`link_url` は空にする
 
 ## 3. SQLite のテーブル
 
