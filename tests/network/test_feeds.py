@@ -19,7 +19,9 @@ CONFIG = load_config(Path(__file__).parents[2] / "config" / "tech-researcher.tom
 def test_configured_feed_can_be_fetched(feed):
     result = collect_feed(feed, CONFIG.limits)
     assert result.error is None
-    assert all(r.published_at for r in result.records), "公開日時のないエントリーがある"
+    assert all(r.events for r in result.records), "公開日時も投稿日時もないエントリーがある"
+    if feed.full_text != "none":
+        assert any(r.primary_text for r in result.records), "全文がない。full_text を確かめる"
     # 1週間分を見て、期間の判定まで通ることを確かめる
     target = daily_target(datetime.now(JST).date(), 7)
     items = [i for i in aggregate(result.records) if in_period(i, target)]

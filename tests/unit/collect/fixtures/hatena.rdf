@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- はてなブックマークの人気エントリー（RSS 1.0）の形。値は架空 -->
+<rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns="http://purl.org/rss/1.0/"
+ xmlns:content="http://purl.org/rss/1.0/modules/content/"
+ xmlns:dc="http://purl.org/dc/elements/1.1/"
+ xmlns:hatena="http://www.hatena.ne.jp/info/xmlns#"
+>
+<channel rdf:about="https://b.hatena.ne.jp/hotentry/it">
+<title>人気エントリー - テクノロジー</title>
+<link>https://b.hatena.ne.jp/hotentry/it</link>
+<description>最近の人気エントリー</description>
+<items><rdf:Seq><rdf:li rdf:resource="https://tech.example.jp/post"/></rdf:Seq></items>
+</channel>
+<item rdf:about="https://tech.example.jp/post">
+<title>記事のタイトル</title>
+<link>https://tech.example.jp/post</link>
+<description>記事の説明。</description>
+<content:encoded>&lt;blockquote cite="https://tech.example.jp/post"&gt;&lt;a href="https://b.hatena.ne.jp/entry/s/tech.example.jp/post"&gt;埋め込み&lt;/a&gt;&lt;/blockquote&gt;</content:encoded>
+<dc:date>2026-10-30T10:18:57Z</dc:date>
+<hatena:bookmarkcount>355</hatena:bookmarkcount>
+</item>
+</rdf:RDF>

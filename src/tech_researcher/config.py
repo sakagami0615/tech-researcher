@@ -73,15 +73,28 @@ class Qiita:
     tags: tuple[str, ...]
 
 
+# フィードのどの欄を一次情報の本文・抜粋にするか（D-14）。none は本文なし
+FEED_TEXT_FIELDS = ("content", "summary")
+
+
 @dataclass(frozen=True)
 class Feed:
-    """RSS・Atom のフィード。kind は new（新着）か popular（人気型。D-13 の初登場の判定の対象）。"""
+    """RSS・Atom のフィード。kind は new（新着）か popular（人気型。D-13 の初登場の判定の対象）。
+
+    full_text：全文が入る欄（content・summary・none）。excerpt：抜粋にする欄（content・summary）。
+    entry_date：エントリーの日時を公開日時（published）とするか、投稿日時（posted）とするか。
+    pages：WordPress のページ送り（?paged=N）で取るページ数。
+    """
 
     id: str
     display_name: str
     url: str
     kind: str
     enabled: bool
+    full_text: str = "content"
+    excerpt: str = "summary"
+    entry_date: str = "published"
+    pages: int = 1
 
 
 @dataclass(frozen=True)
@@ -304,9 +317,32 @@ def _feed(t: _Table) -> Feed:
     url = t.value("url", str)
     if not url.startswith("https://"):
         raise ConfigError(f"{t.path_of('url')}: https:// で始める（{url!r}）")
-    result = Feed(t.text("id"), t.text("display_name"), url, kind, t.value("enabled", bool))
+    full_text = _choice(t, "full_text", (*FEED_TEXT_FIELDS, "none"), "content")
+    excerpt = _choice(t, "excerpt", FEED_TEXT_FIELDS, "summary")
+    entry_date = _choice(t, "entry_date", ("published", "posted"), "published")
+    pages = t.int_at_least("pages") if "pages" in t._data else 1
+    result = Feed(
+        t.text("id"),
+        t.text("display_name"),
+        url,
+        kind,
+        t.value("enabled", bool),
+        full_text,
+        excerpt,
+        entry_date,
+        pages,
+    )
     t.done()
     return result
+
+
+def _choice(t: _Table, name: str, choices: tuple[str, ...], default: str) -> str:
+    value = t.value(name, str, required=False)
+    if value is None:
+        return default
+    if value not in choices:
+        raise ConfigError(f"{t.path_of(name)}: {'・'.join(choices)} のどれかにする（{value!r}）")
+    return value
 
 
 def _check_unique_feed_ids(feeds: tuple[Feed, ...]) -> None:

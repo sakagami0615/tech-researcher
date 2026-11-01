@@ -58,7 +58,11 @@ def test_repository_config_loads():
     config = load_config(CONFIG_PATH)
     assert config.daily_period_days == 1
     assert config.weekly_period_days == 7
-    assert [f.id for f in config.feeds] == ["cloudflare"]
+    kinds = {f.kind for f in config.feeds}
+    assert len([f for f in config.feeds if f.kind == "new" and "zenn" not in f.id]) == 17
+    assert kinds == {"new", "popular"} and all(f.enabled for f in config.feeds)
+    changelog = next(f for f in config.feeds if f.id == "github-changelog")
+    assert changelog.pages == 2
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -69,7 +73,9 @@ def test_all_sources_parse(base):
     config = parse_config(full(base))
     assert config.hackernews.enabled and not config.github_search.enabled
     assert config.github_repos.watch_repos == ("anthropics/claude-code",)
-    assert config.feeds[0].kind == "new"
+    feed = config.feeds[0]
+    assert feed.kind == "new" and feed.pages == 1
+    assert (feed.full_text, feed.excerpt, feed.entry_date) == ("content", "summary", "published")
     assert config.subqueries[0].sources == ("hackernews",)
 
 
@@ -132,6 +138,35 @@ def test_invalid_values_are_rejected(base, mutate):
     data = full(base)
     mutate(data)
     with pytest.raises(ConfigError):
+        parse_config(data)
+
+
+def test_feed_text_date_and_pages_can_be_set(base):
+    data = full(base)
+    data["feeds"][0].update(full_text="none", excerpt="content", entry_date="posted", pages=3)
+    feed = parse_config(data).feeds[0]
+    assert (feed.full_text, feed.excerpt, feed.entry_date, feed.pages) == (
+        "none",
+        "content",
+        "posted",
+        3,
+    )
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("full_text", "description"),
+        ("excerpt", "none"),
+        ("entry_date", "updated"),
+        ("pages", 0),
+        ("pages", "2"),
+    ],
+)
+def test_invalid_feed_settings_are_rejected(base, key, value):
+    data = full(base)
+    data["feeds"][0][key] = value
+    with pytest.raises(ConfigError, match=key):
         parse_config(data)
 
 
