@@ -69,3 +69,9 @@ def in_utc_date_window(published: date, days: int, as_of: date) -> bool:
 def _check_days(period_days: int) -> None:
     if isinstance(period_days, bool) or not isinstance(period_days, int) or period_days < 1:
         raise ValueError(f"period_days は1以上の整数にする: {period_days!r}")
+
+
+def spike_window(target: Target) -> Period:
+    """急上昇・新しい OSS の判定の窓（data-model.md 2.4）。対象日 6:00 から翌日 6:00（JST）。"""
+    start = datetime.combine(target.key, time(6), tzinfo=JST)
+    return Period(start, start + timedelta(days=1))
