@@ -122,3 +122,16 @@ class Item:
     links: tuple[str, ...]
     meta_terms: tuple[str, ...]
     github: GitHubRepo | None
+
+
+@dataclass(frozen=True)
+class SourceResult:
+    """1つの情報源の取得結果。error が None で records が空なら、0件の成功。
+
+    attempts は初回を含めた要求の回数（US-E6-04 の再試行回数の元）。
+    """
+
+    source_id: str
+    records: tuple[Record, ...]
+    attempts: int
+    error: str | None = None

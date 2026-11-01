@@ -58,6 +58,7 @@ def test_repository_config_loads():
     config = load_config(CONFIG_PATH)
     assert config.daily_period_days == 1
     assert config.weekly_period_days == 7
+    assert [f.id for f in config.feeds] == ["cloudflare"]
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -73,6 +74,7 @@ def test_all_sources_parse(base):
 
 
 def test_sources_are_optional(base):
+    base.pop("feeds", None)
     config = parse_config(base)
     assert config.hackernews is None and config.feeds == () and config.subqueries == ()
 

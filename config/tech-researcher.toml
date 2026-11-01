@@ -7,6 +7,14 @@ period_days = 1 # 対象期間の長さ。終わりは実行日の 0:00（JST）
 [weekly]
 period_days = 7 # 終わりは実行日以前で最も近い月曜の 0:00（JST）。D-17
 
+# RSS・Atom（D-11）。kind は new（新着）か popular（人気型。D-13）。残りのフィードは後の Issue で足す
+[[feeds]]
+id = "cloudflare"
+display_name = "Cloudflare"
+url = "https://blog.cloudflare.com/rss/"
+kind = "new"
+enabled = true
+
 # 上限（D-21、structure.md 6章）。運用で調整する
 [limits]
 http_connect_timeout_s = 10
