@@ -1,3 +1,6 @@
+import json
+import urllib.parse
+
 import pytest
 
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
@@ -21,10 +24,26 @@ def test_token_patterns_are_detected_and_masked(token, kind):
 
 
 @pytest.mark.parametrize(
+    "text, kind",
+    [
+        ("prefix" + GHP, "github_token"),
+        ("%20" + GHP, "github_token"),
+        (repr("x\n" + GHP), "github_token"),  # repr の `\n` の n が直前の文字になる
+        ("Bearer_" + GHP, "github_token"),
+        ("x" + ANT, "anthropic_key"),
+        ("token" + PAT, "github_pat"),
+    ],
+)
+def test_tokens_are_detected_regardless_of_preceding_character(text, kind):
+    scanner = SecretScanner()
+    assert [f.kind for f in scanner.find(text)] == [kind]
+    assert GHP not in scanner.mask(text) and ANT not in scanner.mask(text)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "ghp" + "_short",  # 短すぎる
-        "my" + GHP,  # 識別子の一部
         "sk" + "-ant-",
         "github" + "_pat_",
         "通常の本文 https://github.com/example/repo",
@@ -35,11 +54,37 @@ def test_ordinary_text_is_not_detected(text):
     assert not scanner.contains(text) and scanner.mask(text) == text
 
 
-def test_known_values_are_masked_everywhere():
+def test_known_values_are_masked_everywhere_even_if_short():
     secret = "dummy-known-secret-1"
-    scanner = SecretScanner([secret, "short"])
-    text = f"a {secret} b {secret} short"
-    assert scanner.mask(text) == "a [MASKED:known] b [MASKED:known] short"
+    scanner = SecretScanner([secret, "s3c"])
+    text = f"a {secret} b {secret} s3c"
+    assert scanner.mask(text) == "a [MASKED:known] b [MASKED:known] [MASKED:known]"
+
+
+def test_known_values_are_stripped_and_empty_values_ignored():
+    scanner = SecretScanner(["dummy-crlf-secret\r\n", "", "  "])
+    assert scanner.mask("x dummy-crlf-secret y") == "x [MASKED:known] y"
+    assert scanner.mask("ordinary text") == "ordinary text"
+
+
+def test_self_overlapping_known_value_leaves_no_suffix():
+    scanner = SecretScanner(["abcdabcd"])
+    assert scanner.mask("abcdabcdabcd!") == "[MASKED:known]!"
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        lambda v: v,
+        lambda v: repr(v),
+        lambda v: json.dumps(v),
+        lambda v: urllib.parse.quote(v, safe=""),
+    ],
+)
+def test_escaped_forms_of_known_values_are_masked(encode):
+    secret = "dummy\\pa\"ss'word/1"
+    masked = SecretScanner([secret]).mask(f"value={encode(secret)}")
+    assert "[MASKED:known]" in masked and "pa" not in masked.replace("[MASKED:known]", "")
 
 
 def test_overlapping_findings_are_merged_without_leaking_parts():
@@ -58,8 +103,23 @@ def test_known_secret_values_selects_secret_like_names():
     environ = {
         "GITHUB_TOKEN": "dummy-collect-token",
         "CLAUDE_CODE_OAUTH_TOKEN": "dummy-oauth-token",
+        "TR_PROJECTS_PAT": "dummy-pat",
+        "TR_ISSUE_CREDENTIAL": "dummy-cred",
         "TR_ISSUE_REPO": "example/tech-researcher",  # 投稿先は秘匿値ではない（D-20）
-        "API_KEY": "short",  # 短い値は除く
+        "PATH": "/usr/bin",  # PAT を含むが秘匿値ではない
+        "API_KEY": "s3c",  # 短い値も含める
         "HOME": "/home/example",
     }
-    assert sorted(known_secret_values(environ)) == ["dummy-collect-token", "dummy-oauth-token"]
+    assert sorted(known_secret_values(environ)) == [
+        "dummy-collect-token",
+        "dummy-cred",
+        "dummy-oauth-token",
+        "dummy-pat",
+        "s3c",
+    ]
+
+
+def test_known_secret_values_feed_the_scanner():
+    environ = {"GITHUB_TOKEN": "dummy-collect-token\r", "TR_ISSUE_REPO": "example/repo"}
+    scanner = SecretScanner(known_secret_values(environ))
+    assert scanner.mask("dummy-collect-token example/repo") == "[MASKED:known] example/repo"
