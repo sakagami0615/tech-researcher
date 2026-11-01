@@ -144,31 +144,12 @@ url = "https://www.cncf.io/feed/"
 kind = "new"
 enabled = true
 
-# Zenn（新着はトピック別。1回で20件しか載らない取りこぼしは受け入れる。D-12）
-[[feeds]]
-id = "zenn-llm"
-display_name = "Zenn（LLM）"
-url = "https://zenn.dev/topics/llm/feed"
-kind = "new"
-enabled = true
-full_text = "none"
+# Zenn の新着はトピック別（1回で20件しか載らない取りこぼしは受け入れる。D-12）。
+# トピック名を足すと、id「zenn-{トピック}」・表示名「Zenn（{トピック}）」の新着のフィードになる
+[sources.zenn]
+topics = ["llm", "ai", "aws"]
 
-[[feeds]]
-id = "zenn-ai"
-display_name = "Zenn（AI）"
-url = "https://zenn.dev/topics/ai/feed"
-kind = "new"
-enabled = true
-full_text = "none"
-
-[[feeds]]
-id = "zenn-aws"
-display_name = "Zenn（AWS）"
-url = "https://zenn.dev/topics/aws/feed"
-kind = "new"
-enabled = true
-full_text = "none"
-
+# Zenn のトレンド（人気）
 [[feeds]]
 id = "zenn-trend"
 display_name = "Zenn（トレンド）"

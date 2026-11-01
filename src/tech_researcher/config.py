@@ -5,6 +5,7 @@
 投稿先・Projects の指定・認証情報は worker.env に置くので、ここでは受け付けない。
 """
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -182,7 +183,7 @@ def parse_config(data: dict[str, Any]) -> Config:
         github_repos=_github_repos(sources),
         github_releases=_github_releases(sources),
         qiita=_qiita(sources),
-        feeds=tuple(_feed(f) for f in feeds),
+        feeds=tuple(_feed(f) for f in feeds) + _zenn_topic_feeds(sources),
         subqueries=_subqueries(last30days),
         limits=_limits(limits),
     )
@@ -313,6 +314,41 @@ def _qiita(sources: _Table | None) -> Qiita | None:
     result = Qiita(t.value("enabled", bool), t.text("display_name"), t.strings("tags"))
     t.done()
     return result
+
+
+# Zenn のトピック名の形。URL のパスに入れるので、これ以外は受け付けない
+_ZENN_TOPIC = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _zenn_topic_feeds(sources: _Table | None) -> tuple[Feed, ...]:
+    """sources.zenn.topics の各トピックを、Zenn のトピック別の新着フィードに展開する。
+
+    汎用のテンプレートにはせず Zenn 専用にした。トピックで増やす情報源は Zenn だけで、
+    Qiita の tags と同じく「名前の一覧」で書ける方が設定も検査も単純なため。
+    表示名はトピック名をそのまま使う。指定したくなったら、ここに項目を足す。
+    """
+    t = _source(sources, "zenn")
+    if t is None:
+        return ()
+    topics = t.strings("topics")
+    t.done()
+    for topic in topics:
+        if not _ZENN_TOPIC.fullmatch(topic):
+            raise ConfigError(f"{t.path_of('topics')}: 英小文字・数字・- だけにする（{topic!r}）")
+    duplicated = sorted({x for x in topics if topics.count(x) > 1})
+    if duplicated:
+        raise ConfigError(f"{t.path_of('topics')}: 重複している {', '.join(duplicated)}")
+    return tuple(
+        Feed(
+            id=f"zenn-{topic}",
+            display_name=f"Zenn（{topic}）",
+            url=f"https://zenn.dev/topics/{topic}/feed",
+            kind="new",
+            enabled=True,
+            full_text="none",  # summary は先頭の抜粋
+        )
+        for topic in topics
+    )
 
 
 def _feed(t: _Table) -> Feed:

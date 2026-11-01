@@ -108,6 +108,7 @@ def test_all_sources_parse(base):
 
 def test_sources_are_optional(base):
     base.pop("feeds", None)
+    base.pop("sources", None)
     config = parse_config(base)
     assert config.hackernews is None and config.feeds == () and config.subqueries == ()
 
@@ -212,6 +213,50 @@ def test_excerpt_default_may_overlap_full_text(base):
     data["feeds"][0].update(full_text="summary")
     feed = parse_config(data).feeds[0]
     assert (feed.full_text, feed.excerpt) == ("summary", "summary")
+
+
+def test_zenn_topics_become_feeds(base):
+    data = full(base)
+    data["sources"]["zenn"] = {"topics": ["llm", "github-copilot"]}
+    feeds = parse_config(data).feeds
+    assert feeds[0].id == "aws"  # [[feeds]] の後に足す
+    assert [(f.id, f.display_name, f.url, f.kind, f.full_text) for f in feeds[1:]] == [
+        ("zenn-llm", "Zenn（llm）", "https://zenn.dev/topics/llm/feed", "new", "none"),
+        (
+            "zenn-github-copilot",
+            "Zenn（github-copilot）",
+            "https://zenn.dev/topics/github-copilot/feed",
+            "new",
+            "none",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "topics, message",
+    [
+        (["llm", "llm"], "重複"),
+        ([""], "空でない"),
+        (["LLM"], "英小文字"),
+        (["llm/feed"], "英小文字"),
+        (["../x"], "英小文字"),
+        (["a-"], "英小文字"),
+        ("llm", "list にする"),
+    ],
+)
+def test_invalid_zenn_topics_are_rejected(base, topics, message):
+    data = full(base)
+    data["sources"]["zenn"] = {"topics": topics}
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
+def test_zenn_topic_feed_id_must_not_clash_with_feeds(base):
+    data = full(base)
+    data["feeds"].append({**FEED, "id": "zenn-llm"})
+    data["sources"]["zenn"] = {"topics": ["llm"]}
+    with pytest.raises(ConfigError, match="id が重複している zenn-llm"):
+        parse_config(data)
 
 
 def test_unknown_source_is_rejected_without_other_sources(base):
