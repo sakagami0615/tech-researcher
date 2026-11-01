@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+<title>Example Blog</title>
+<link>https://blog.example.com/</link>
+<item>
+  <title>本文つきの記事</title>
+  <link>https://blog.example.com/full</link>
+  <pubDate>Fri, 23 Oct 2026 01:00:00 +0000</pubDate>
+  <description>要約です</description>
+  <content:encoded><![CDATA[<p>本文。<a href="https://docs.example.com/spec">仕様</a>と<a href="javascript:alert(1)">x</a></p>]]></content:encoded>
+</item>
+<item>
+  <title>要約だけの記事</title>
+  <link>https://blog.example.com/summary</link>
+  <pubDate>Fri, 23 Oct 2026 20:00:00 +0900</pubDate>
+  <description><![CDATA[要約。<a href="https://github.com/O/R">repo</a>]]></description>
+</item>
+<item>
+  <title>期間より前の記事</title>
+  <link>https://blog.example.com/old</link>
+  <pubDate>Thu, 22 Oct 2026 14:59:59 +0000</pubDate>
+</item>
+<item>
+  <title>日時のない記事</title>
+  <link>https://blog.example.com/undated</link>
+</item>
+<item>
+  <title>リンクのない記事</title>
+  <pubDate>Fri, 23 Oct 2026 01:00:00 +0000</pubDate>
+</item>
+</channel>
+</rss>

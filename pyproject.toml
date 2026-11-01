@@ -5,7 +5,9 @@ description = "技術情報を集めて日次・週次レポートを GitHub Iss
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.14,<3.15"
-dependencies = []
+dependencies = [
+    "feedparser>=6.0.14",
+]
 
 [dependency-groups]
 dev = [
