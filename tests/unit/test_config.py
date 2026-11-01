@@ -54,11 +54,42 @@ def full(base):
     return data
 
 
+# D-11 の公式ブログ17本
+OFFICIAL_FEEDS = [
+    "openai",
+    "google-ai",
+    "deepmind",
+    "google-research",
+    "google-cloud",
+    "microsoft",
+    "microsoft-dev",
+    "azure-blog",
+    "azure-updates",
+    "aws-blog",
+    "aws-whats-new",
+    "github-blog",
+    "github-changelog",
+    "vercel",
+    "cloudflare",
+    "huggingface",
+    "cncf",
+]
+
+
 def test_repository_config_loads():
     config = load_config(CONFIG_PATH)
     assert config.daily_period_days == 1
     assert config.weekly_period_days == 7
-    assert [f.id for f in config.feeds] == ["cloudflare"]
+    assert {f.id: f.kind for f in config.feeds} == {
+        **dict.fromkeys(OFFICIAL_FEEDS, "new"),
+        **dict.fromkeys(["zenn-llm", "zenn-ai", "zenn-aws"], "new"),
+        **dict.fromkeys(["zenn-trend", "qiita-popular", "hatena-it"], "popular"),
+    }
+    assert all(f.enabled for f in config.feeds)
+    feeds = {f.id: f for f in config.feeds}
+    assert feeds["github-changelog"].pages == 2
+    assert feeds["vercel"].entry_date == "updated"
+    assert feeds["hatena-it"].entry_date == "posted"
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -69,12 +100,15 @@ def test_all_sources_parse(base):
     config = parse_config(full(base))
     assert config.hackernews.enabled and not config.github_search.enabled
     assert config.github_repos.watch_repos == ("anthropics/claude-code",)
-    assert config.feeds[0].kind == "new"
+    feed = config.feeds[0]
+    assert feed.kind == "new" and feed.pages == 1
+    assert (feed.full_text, feed.excerpt, feed.entry_date) == ("content", "summary", "published")
     assert config.subqueries[0].sources == ("hackernews",)
 
 
 def test_sources_are_optional(base):
     base.pop("feeds", None)
+    base.pop("sources", None)
     config = parse_config(base)
     assert config.hackernews is None and config.feeds == () and config.subqueries == ()
 
@@ -132,6 +166,96 @@ def test_invalid_values_are_rejected(base, mutate):
     data = full(base)
     mutate(data)
     with pytest.raises(ConfigError):
+        parse_config(data)
+
+
+def test_feed_text_date_and_pages_can_be_set(base):
+    data = full(base)
+    data["feeds"][0].update(full_text="none", excerpt="content", entry_date="posted", pages=3)
+    feed = parse_config(data).feeds[0]
+    assert (feed.full_text, feed.excerpt, feed.entry_date, feed.pages) == (
+        "none",
+        "content",
+        "posted",
+        3,
+    )
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("full_text", "description"),
+        ("excerpt", "none"),
+        ("entry_date", "dc_date"),
+        ("pages", 0),
+        ("pages", 6),
+        ("pages", "2"),
+        ("pages", True),
+    ],
+)
+def test_invalid_feed_settings_are_rejected(base, key, value):
+    data = full(base)
+    data["feeds"][0][key] = value
+    with pytest.raises(ConfigError, match=key):
+        parse_config(data)
+
+
+def test_full_text_and_excerpt_cannot_name_the_same_field(base):
+    data = full(base)
+    data["feeds"][0].update(full_text="content", excerpt="content")
+    with pytest.raises(ConfigError, match="full_text と同じ欄"):
+        parse_config(data)
+
+
+def test_excerpt_default_may_overlap_full_text(base):
+    # full_text = "summary" で excerpt を省略すると、抜粋なしになる（AWS What's New など）
+    data = full(base)
+    data["feeds"][0].update(full_text="summary")
+    feed = parse_config(data).feeds[0]
+    assert (feed.full_text, feed.excerpt) == ("summary", "summary")
+
+
+def test_zenn_topics_become_feeds(base):
+    data = full(base)
+    data["sources"]["zenn"] = {"topics": ["llm", "github-copilot"]}
+    feeds = parse_config(data).feeds
+    assert feeds[0].id == "aws"  # [[feeds]] の後に足す
+    assert [(f.id, f.display_name, f.url, f.kind, f.full_text) for f in feeds[1:]] == [
+        ("zenn-llm", "Zenn（llm）", "https://zenn.dev/topics/llm/feed", "new", "none"),
+        (
+            "zenn-github-copilot",
+            "Zenn（github-copilot）",
+            "https://zenn.dev/topics/github-copilot/feed",
+            "new",
+            "none",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "topics, message",
+    [
+        (["llm", "llm"], "重複"),
+        ([""], "空でない"),
+        (["LLM"], "英小文字"),
+        (["llm/feed"], "英小文字"),
+        (["../x"], "英小文字"),
+        (["a-"], "英小文字"),
+        ("llm", "list にする"),
+    ],
+)
+def test_invalid_zenn_topics_are_rejected(base, topics, message):
+    data = full(base)
+    data["sources"]["zenn"] = {"topics": topics}
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
+def test_zenn_topic_feed_id_must_not_clash_with_feeds(base):
+    data = full(base)
+    data["feeds"].append({**FEED, "id": "zenn-llm"})
+    data["sources"]["zenn"] = {"topics": ["llm"]}
+    with pytest.raises(ConfigError, match="id が重複している zenn-llm"):
         parse_config(data)
 
 

@@ -367,9 +367,9 @@
 - 集めた本文は DB に保存せず、ハッシュ・文字数と RSS の抜粋だけを残す（D-18）。本文は実行の間だけ worker 側のファイルに置き、実行が終わったら消す（[design/structure.md](design/structure.md#72-置き場所d-22) 7.2）
 - MVP で AI に渡す一次情報は次のとおり。公式 RSS に本文が載っている記事は、記事ページを取得し直さない
   - GitHub：API でリリース本文と README を取る
-  - 公式ブログの RSS に載っている本文：収集した全文をそのまま使う（Microsoft・Azure、AWS、GitHub Blog・Changelog、Cloudflare、CNCF、Google Cloud、Vercel など）
+  - 公式ブログの RSS に載っている本文：収集した全文をそのまま使う（Microsoft・Azure ブログ、AWS、GitHub Blog・Changelog、Cloudflare、CNCF、Google Cloud、Vercel など）
 - MVP では、次の公式発表は一次情報の本文なしで書く
-  - RSS に要約しか載らないもの（Google AI・DeepMind・Google Research）：RSS の要約と二次情報をもとに書く
+  - RSS に要約しか載らないもの（Google AI・DeepMind・Google Research・Azure 更新情報）：RSS の要約と二次情報をもとに書く
   - RSS にタイトルしか載らない Hugging Face：二次情報をもとに書く
   - RSS がない Anthropic：GitHub Releases と、HN などの二次情報をもとに書く（D-11）
 - 上の3つの記事ページを取得する処理（許可したドメインだけ、robots.txt の判定、本文の抽出）は、将来対応の Issue（D-08）に書く。取得の範囲・本文の保存・robots.txt の判定に使う部品は着手するときに決める。出発点とする案は次のとおり
@@ -378,8 +378,8 @@
   - robots.txt の判定：Protego（RFC 9309 対応を明記、BSD-3-Clause）を使う案。Python 標準の `urllib.robotparser` はワイルドカードに対応しておらず使えない（2026-10-24 に実測）。新しい依存の追加になるので、技術選定としてユーザーに相談する
 - OpenAI の公式ページはボット対策で拒否され（HTTP 403）、記事ページの取得を入れても本文を取れない見込み。RSS の要約と二次情報をもとに書く
 - 本文の量と取得の可否は、2026-10-24 の1回の測定による（開発機から。データセンターの IP から同じ結果になるかは未確認）
-  - RSS の1項目あたりの本文の文字数（中央値）：全文が載るもの（Microsoft・Microsoft 開発者・Azure ブログ、AWS ブログ、GitHub Blog、Cloudflare、CNCF、Google Cloud）は約8,000〜12,000字。発表自体が短いもの（GitHub Changelog、AWS What's New、Vercel、Azure 更新情報、GitHub Releases）は約250〜6,000字。要約だけのものは OpenAI 148字、Google AI 121字、DeepMind 93字、Google Research 19字。Hugging Face は0字（タイトルだけ）
-  - 公式ブログの RSS 17本のうち12本は、収集の段階で本文の全文がそろう
+  - RSS の1項目あたりの本文の文字数（中央値）：全文が載るもの（Microsoft・Microsoft 開発者・Azure ブログ、AWS ブログ、GitHub Blog、Cloudflare、CNCF、Google Cloud）は約8,000〜12,000字。発表自体が短いもの（GitHub Changelog、AWS What's New、Vercel、GitHub Releases）は約250〜6,000字。Azure 更新情報は、説明が全件255字で切れており、要約だけのものに当たる（2026-11-01 に確認）。要約だけのものは OpenAI 148字、Google AI 121字、DeepMind 93字、Google Research 19字。Hugging Face は0字（タイトルだけ）
+  - 公式ブログの RSS 17本のうち11本は、収集の段階で本文の全文がそろう
   - 記事ページの取得：blog.google・deepmind.google・huggingface.co・anthropic.com は HTTP 200 で、HTML に本文がある（約5,800〜8,200字）。openai.com は HTTP 403。robots.txt は、これらのサイトとも記事ページを許可している
   - last30days-skill はリンク先のページを取得しない。持っているのは各 API の抜粋だけ（HN は記事の URL と上位コメント、GitHub は README の先頭500字とリリース本文の先頭300字）
 - 理由：実装を小さく保ちながら、クラウド・開発ツール・リリースの記事は一次情報にもとづいて書ける。US-E2-05（Should）のうち AI 系の発表は、MVP では一部しか満たさない
