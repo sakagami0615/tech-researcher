@@ -107,16 +107,38 @@ class RunLog:
             for k, v in record.items()
             if v is not None
         }
-        line = self._scanner.mask(json.dumps(record, ensure_ascii=False))
+        line = self._masked_line(record)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
         return json.loads(line)
 
+    def _masked_line(self, record: dict) -> str:
+        """1行全体をもう一度マスクし、常に読める JSON を返す。
+
+        数値が既知の値に一致すると `"count": [MASKED:known]` のように壊れるので、そのときは
+        数値も文字列にしてマスクし直す。それでも壊れるとき（既知の値が JSON の区切りに
+        一致するなど）は、中身を残さない固定の行にする。
+        """
+        line = self._scanner.mask(json.dumps(record, ensure_ascii=False))
+        if _is_json(line):
+            return line
+        record = {k: self._scanner.mask(str(v)) for k, v in record.items()}
+        line = self._scanner.mask(json.dumps(record, ensure_ascii=False))
+        return line if _is_json(line) else json.dumps({"masked_line": True})
+
 
 def issue_fields(record: dict) -> dict:
     """Issue や ④ の入力に使うための、許可した項目だけの行。"""
     return {k: v for k, v in record.items() if k in ISSUE_FIELDS}
+
+
+def _is_json(line: str) -> bool:
+    try:
+        json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def _check_type(name: str, value: object, expected: type) -> None:

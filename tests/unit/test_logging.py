@@ -148,3 +148,13 @@ def test_whole_line_is_masked_again(tmp_path):
 def test_unknown_cadence_is_rejected(tmp_path):
     with pytest.raises(ValueError):
         RunLog(tmp_path / "a.jsonl", "obs-1", "observe", date(2026, 10, 23), SecretScanner())
+
+
+def test_numbers_matching_known_values_keep_valid_json(tmp_path):
+    scanner = SecretScanner(["1234"])
+    log = RunLog(tmp_path / "a.jsonl", "run-1", "daily", date(2026, 10, 23), scanner)
+    written = log.write("collect", "source_result", source="Zenn", count=1234, attempt=1)
+    record = lines(log)[0]
+    assert record == written
+    assert record["count"] == "[MASKED:known]" and record["attempt"] == "1"
+    assert "1234" not in log.path.read_text(encoding="utf-8")

@@ -123,3 +123,31 @@ def test_known_secret_values_feed_the_scanner():
     environ = {"GITHUB_TOKEN": "dummy-collect-token\r", "TR_ISSUE_REPO": "example/repo"}
     scanner = SecretScanner(known_secret_values(environ))
     assert scanner.mask("dummy-collect-token example/repo") == "[MASKED:known] example/repo"
+
+
+def test_concatenated_tokens_leave_no_body():
+    second = "ghp" + "_" + "y" * 36
+    masked = SecretScanner().mask(GHP + second + " end")
+    assert masked == "[MASKED:github_token] end"
+
+
+def test_form_encoded_known_value_is_masked():
+    secret = "dummy pass+word&1"
+    text = "q=" + urllib.parse.quote_plus(secret, safe="")
+    assert SecretScanner([secret]).mask(text) == "q=[MASKED:known]"
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        lambda v: repr(json.dumps({"token": v})),
+        lambda v: json.dumps(repr(v)),
+        lambda v: json.dumps(json.dumps(v)),
+        lambda v: repr(repr(v)),
+        lambda v: urllib.parse.quote(json.dumps(v), safe=""),
+    ],
+)
+def test_two_level_escaped_known_value_is_masked(encode):
+    secret = "dummy\\pa\"ss'word/1"
+    masked = SecretScanner([secret]).mask(encode(secret))
+    assert "[MASKED:known]" in masked and "pa" not in masked.replace("[MASKED:known]", "")

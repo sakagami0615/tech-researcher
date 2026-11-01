@@ -7,7 +7,7 @@
 import json
 import re
 import urllib.parse
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
 # (2) トークンの形。worker には Claude のトークンが渡らない（D-05）ので、
@@ -42,15 +42,25 @@ def known_secret_values(environ: Mapping[str, str]) -> list[str]:
     return [value for name, value in environ.items() if _SECRET_NAME.search(name.upper())]
 
 
+# 例外の repr・JSON・URL（パスとフォーム）でエスケープした形を作る関数
+_ENCODERS: tuple[Callable[[str], str], ...] = (
+    lambda v: repr(v)[1:-1],
+    lambda v: json.dumps(v)[1:-1],
+    lambda v: json.dumps(v, ensure_ascii=False)[1:-1],
+    lambda v: urllib.parse.quote(v, safe=""),
+    lambda v: urllib.parse.quote_plus(v, safe=""),
+)
+
+
 def _variants(value: str) -> set[str]:
-    """既知の値と、例外の repr・JSON・URL でエスケープされた形。"""
-    return {
-        value,
-        repr(value)[1:-1],
-        json.dumps(value)[1:-1],
-        json.dumps(value, ensure_ascii=False)[1:-1],
-        urllib.parse.quote(value, safe=""),
-    }
+    """既知の値と、そのエスケープの形（2段の重ね掛けまで。例：repr の中の JSON）。
+
+    3段以上の重ね掛けは対象外とする。既知の値（トークン）の多くは英数字と `_`・`-` だけで、
+    エスケープしても形が変わらないため、そのままの形で拾える。
+    """
+    once = {encode(value) for encode in _ENCODERS}
+    twice = {encode(v) for v in once for encode in _ENCODERS}
+    return {value} | once | twice
 
 
 class SecretScanner:
@@ -67,9 +77,9 @@ class SecretScanner:
             for start in _occurrences(text, value)
         ]
         found += [
-            Finding(kind, m.start(), m.end())
+            Finding(kind, start, end)
             for kind, pattern in TOKEN_PATTERNS.items()
-            for m in pattern.finditer(text)
+            for start, end in _pattern_occurrences(text, pattern)
         ]
         merged: list[Finding] = []
         # 同じ位置から始まるものは長い方を先にし、既知の値を優先する
@@ -101,3 +111,15 @@ def _occurrences(text: str, value: str) -> Iterable[int]:
     while start != -1:
         yield start
         start = text.find(value, start + 1)
+
+
+def _pattern_occurrences(text: str, pattern: re.Pattern[str]) -> Iterable[tuple[int, int]]:
+    """重なる一致も含めた、すべての区間。
+
+    finditer は一致を重ねないので、`ghp_…` が2つ続くと1つ目が2つ目の `ghp` まで食い、
+    2つ目の本体を取りこぼす。開始位置を1つずつ進めて探し直す。
+    """
+    m = pattern.search(text)
+    while m:
+        yield m.start(), m.end()
+        m = pattern.search(text, m.start() + 1)
