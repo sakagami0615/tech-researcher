@@ -19,7 +19,8 @@ from tech_researcher.config import Limits
 
 # 取得元を示す独自の User-Agent（D-11）
 USER_AGENT = "tech-researcher/0.1 (+https://github.com/sakagami0615/tech-researcher)"
-# 応答の本文の上限。大きすぎる応答や、少しずつ送り続ける応答で止まらないようにする
+# 応答の本文の上限（暫定）。大きすぎる応答や、少しずつ送り続ける応答で止まらないようにする。
+# 足りるかは運用で確かめて決める
 MAX_BODY_BYTES = 20_000_000
 
 
