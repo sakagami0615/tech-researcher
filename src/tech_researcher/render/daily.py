@@ -10,7 +10,7 @@ from tech_researcher.agent.daily import CATEGORIES, DailyEntry
 from tech_researcher.collect.period_filter import published_before_period
 from tech_researcher.collect.records import Item
 from tech_researcher.periods import JST, Target
-from tech_researcher.render.common import Report, day_label, identifier, source_line
+from tech_researcher.render.common import Report, day_label, identifier, plain_text, source_line
 
 CATEGORY_NAMES = dict(
     zip(
@@ -41,14 +41,15 @@ def render_daily(
     names: Mapping[str, str],
     collected: int,
     unavailable: Sequence[tuple[str, str]] = (),
-    unjudged: Sequence[str] = (),
+    unjudged: Sequence[tuple[str, Sequence[str]]] = (),
 ) -> Report:
     """検証を通った項目からレポート Issue を作る。
 
     - items は AI に渡した項目 ID から収集項目への対応、names は source_id から表示名への対応
     - collected は収集件数（0件の日の定型文に書く）
     - unavailable は取得できなかった情報源の (表示名, 理由の分類)
-    - unjudged は前日の記録がなく判定しなかった急上昇の判定の名前（1.6）
+    - unjudged は前日の記録がなく判定しなかった急上昇の (判定の名前, 記録がなかった情報源の表示名)
+      （1.6）。情報源が1つだけの判定は、表示名を空にしてよい
     """
     ordered = sorted(entries, key=lambda e: (CATEGORIES.index(e.category), e.rank))
     sections = [_header(target, run_id, len(ordered), unjudged)]
@@ -61,13 +62,17 @@ def render_daily(
         )
     sections.append(f"---\n{FOOTER}")
     if unavailable:
-        lines = "\n".join(f"- {name}：{reason}" for name, reason in unavailable)
+        lines = "\n".join(
+            f"- {plain_text(name)}：{plain_text(reason)}" for name, reason in unavailable
+        )
         sections.append(f"## 取得できなかった情報源\n\n{lines}")
     title = f"[日次] {day_label(target.key)}の技術動向"
     return Report(title, "\n\n".join(sections) + "\n", LABELS)
 
 
-def _header(target: Target, run_id: str, count: int, unjudged: Sequence[str]) -> str:
+def _header(
+    target: Target, run_id: str, count: int, unjudged: Sequence[tuple[str, Sequence[str]]]
+) -> str:
     start, end = (t.astimezone(JST) for t in (target.period.start, target.period.end))
     lines = [
         identifier("daily", target.key, run_id),
@@ -77,8 +82,17 @@ def _header(target: Target, run_id: str, count: int, unjudged: Sequence[str]) ->
     ]
     if 0 < count < FEW_ITEMS:
         lines.append(f"> ℹ️ 重要な情報が少ない日でした（掲載 {count} 件）。")
-    lines += [f"> ℹ️ {name}は、前日の記録がないため判定していません。" for name in unjudged]
+    lines += [
+        f"> ℹ️ {_judgment(name, sources)}は、前日の記録がないため判定していません。"
+        for name, sources in unjudged
+    ]
     return "\n".join(lines)
+
+
+def _judgment(name: str, sources: Sequence[str]) -> str:
+    """判定の名前に、記録がなかった情報源の表示名を並べる（例：人気型フィードへの初登場（A、B））。"""
+    text = plain_text(name)
+    return f"{text}（{'、'.join(map(plain_text, sources))}）" if sources else text
 
 
 def _toc(entries: Sequence[DailyEntry]) -> str:
@@ -140,7 +154,7 @@ def _period_event(entry: DailyEntry, target: Target, items: Mapping[str, Item]) 
         (
             i.github.star_delta_24h
             for i in group
-            if i.github and i.github.star_delta_24h is not None
+            if i.github and i.github.star_delta_24h is not None and i.github.star_delta_24h > 0
         ),
         None,
     )

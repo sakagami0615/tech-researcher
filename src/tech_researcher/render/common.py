@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, date
 from urllib.parse import urlsplit
 
+from tech_researcher.agent.daily import display_name
 from tech_researcher.collect.aggregate import candidate_links
 from tech_researcher.collect.records import Item, Record
 from tech_researcher.collect.urls import normalize_url
@@ -19,8 +20,11 @@ _WEEKDAYS = "月火水木金土日"
 _ID_VALUE = re.compile(r"[A-Za-z0-9]+(-[A-Za-z0-9]+)*")  # HTML コメントの中に -- を作らない（4.1）
 # GitHub の owner は英数字と -、repo は英数字と . _ -（0.3）
 _REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
-# リンク先の中で Markdown のリンクを閉じうる記号。正規化した URL に残るのは ( ) だけ
-_LINK_DEST = str.maketrans({"(": "%28", ")": "%29"})
+# リンク先の中で Markdown のリンクを閉じうる記号（正規化した URL に残るのは ( ) だけ）と、&。
+# GFM はリンク先の実体参照（&num; など）を復号するので、& を &amp; にして行き先を変えさせない
+_LINK_DEST = str.maketrans({"(": "%28", ")": "%29", "&": "&amp;"})
+_SPACES = re.compile(r"\s+")
+_MARKDOWN = re.compile(r"([\\`*_{}\[\]()<>#+\-.!|~&:])")
 SEPARATOR = " ／ "
 
 
@@ -47,6 +51,17 @@ def identifier(cadence: str, target: date, run_id: str) -> str:
         f"<!-- tech-researcher kind=report cadence={cadence} target={target.isoformat()} "
         f"run={run_id} -->"
     )
+
+
+def plain_text(text: str) -> str:
+    """コードが本文に差し込む名前（情報源の表示名など）を、ただの文字列として表示させる。
+
+    設定由来の値だが、多重防御として Markdown・HTML の記号をエスケープし、改行は空白に畳む。
+    @ と # は全角にする。GitHub はメンション（@名前）と参照（#数字）を描画後の文字列から探すので、
+    バックスラッシュでエスケープしても @・# として残り、通知・リンクが起きるため。
+    """
+    text = _SPACES.sub(" ", text).strip().replace("@", "＠").replace("#", "＃")
+    return _MARKDOWN.sub(r"\\\1", text)
 
 
 def repo_code(full_name: str) -> str:
@@ -78,20 +93,28 @@ def source_line(
     """
     sources: dict[str, _Source] = {}
     for item_id in item_ids:
-        for record in items[item_id].sources:
-            source = _from_record(record, names)
-            if source is not None:
-                sources.setdefault(source.url, source)
+        item = items[item_id]
+        own = [s for s in (_from_record(r, names) for r in item.sources) if s is not None]
+        if item.url not in {s.url for s in own}:
+            # 集約型（HN など）だけが指す記事は、記事そのものの URL をレコードの前に置く
+            own.insert(0, _Source(item.url, None, None))
+        for source in own:
+            sources.setdefault(source.url, source)
     primary = _primary_url(items, primary_item_id, primary_link_id)
     marked = []
     if primary is not None:
         first = sources.pop(primary, None) or _Source(primary, None, None)
         marked = [f"一次情報 {_format(first)}"]
-    return SEPARATOR.join(marked + [_format(s) for s in sources.values()])
+    parts = marked + [_format(s) for s in sources.values()]
+    if not parts:
+        raise ValueError(f"{list(item_ids)} の出典がない")
+    return SEPARATOR.join(parts)
 
 
 def _primary_url(items: Mapping[str, Item], item_id: str | None, link_id: str | None) -> str | None:
-    if link_id is not None:  # 両方あれば候補リンクを優先する（data-model.md 4.2 の初期案）
+    # 両方あれば候補リンクを優先する（data-model.md 4.2 の初期案）。D6(b) に合わせて他項目の
+    # 候補リンクも引ける。自項目の出典に限ることは D1（後の Issue）で検査する
+    if link_id is not None:
         links = {
             link.link_id: link.url for i, it in items.items() for link in candidate_links(it, i)
         }
@@ -104,11 +127,7 @@ def _from_record(record: Record, names: Mapping[str, str]) -> _Source | None:
     url = normalize_url(record.url)
     if url is None:
         return None
-    try:
-        name = names[record.source_id]
-    except KeyError:
-        raise ValueError(f"情報源 {record.source_id} の表示名が設定にない") from None
-    return _Source(url, name, _date(record))
+    return _Source(url, display_name(names, record), _date(record))
 
 
 def _date(record: Record) -> str | None:
@@ -123,6 +142,6 @@ def _date(record: Record) -> str | None:
 
 def _format(source: _Source) -> str:
     domain = urlsplit(source.url).hostname
-    text = domain if source.name is None else f"{source.name}（{domain}）"
+    text = domain if source.name is None else f"{plain_text(source.name)}（{domain}）"
     link = f"[{text}]({source.url.translate(_LINK_DEST)})"
     return link if source.date is None else f"{link} {source.date}"

@@ -96,7 +96,7 @@ def _input_item(
     github = item.github
     return {
         "id": entry.item_id,
-        "source": _name(names, first),
+        "source": display_name(names, first),
         "kind": _kind(item, event),
         "published": _published(published),
         "published_precision": published.published_precision if published else "unknown",
@@ -105,7 +105,7 @@ def _input_item(
         "attention": _attention(first.attention),
         "other_sources": [
             {
-                "source": _name(names, r),
+                "source": display_name(names, r),
                 "posted": _iso(r.posted_at),
                 "attention": _attention(r.attention),
             }
@@ -132,7 +132,8 @@ def _input_item(
     }
 
 
-def _name(names: Mapping[str, str], record: Record) -> str:
+def display_name(names: Mapping[str, str], record: Record) -> str:
+    """設定の情報源の表示名。names は source_id から表示名への対応。"""
     try:
         return names[record.source_id]
     except KeyError:

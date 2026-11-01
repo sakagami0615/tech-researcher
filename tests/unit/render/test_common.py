@@ -1,10 +1,17 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import pytest
 
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.records import Event, Record
-from tech_researcher.render.common import day_label, identifier, repo_code, source_line
+from tech_researcher.render.common import (
+    day_label,
+    identifier,
+    plain_text,
+    repo_code,
+    source_line,
+)
 
 IN = datetime(2026, 10, 23, 0, 0, tzinfo=UTC)  # JST 9:00
 NAMES = {"rss:blog": "公式ブログ", "hackernews": "Hacker News", "zenn": "Zenn"}
@@ -55,6 +62,12 @@ def test_identifier_rejects_unsafe_run_id(run_id):
         identifier("daily", date(2026, 10, 23), run_id)
 
 
+@pytest.mark.parametrize("cadence", ["daily -->", "a--b", ""])
+def test_identifier_rejects_unsafe_cadence(cadence):
+    with pytest.raises(ValueError):
+        identifier(cadence, date(2026, 10, 23), "r1")
+
+
 def test_link_text_is_source_name_and_domain_only():
     line = source_line(["i1"], items(record()), NAMES)
     assert line == "[公式ブログ（example.com）](https://example.com/post) 公開 2026-10-23"
@@ -64,10 +77,26 @@ def test_link_text_is_source_name_and_domain_only():
 def test_posted_date_when_published_is_unknown():
     # HN だけの項目は、公開日が不明なので投稿日（JST）を書く
     line = source_line(["i1"], items(hn()), NAMES)
-    assert line == (
+    assert line.endswith(
         "[Hacker News（news.ycombinator.com）](https://news.ycombinator.com/item?id=1) "
         "投稿 2026-10-24"
     )
+
+
+def test_article_of_aggregator_only_item_is_listed_without_primary():
+    # HN だけが指す記事は、一次情報が特定できなくても記事そのものの URL を出典に出す
+    line = source_line(["i1"], items(hn()), NAMES)
+    assert line.startswith("[example.com](https://example.com/post) ／ [Hacker News")
+
+
+def test_aggregator_with_unusable_url_still_has_article():
+    bad = replace(hn(), url="https://news.ycombinator.com/a b")
+    assert source_line(["i1"], items(bad), NAMES) == "[example.com](https://example.com/post)"
+
+
+def test_no_sources_is_an_error():
+    with pytest.raises(ValueError):
+        source_line([], {}, NAMES)
 
 
 def test_date_only_published_uses_utc_date():
@@ -134,3 +163,30 @@ def test_repo_code_wraps_valid_name(name):
 def test_repo_code_rejects_other_forms(name):
     with pytest.raises(ValueError):
         repo_code(name)
+
+
+EVIL = "Feed](https://evil.example) @victim <!--\n# 見出し"
+
+
+def test_plain_text_neutralizes_markdown_mentions_and_newlines():
+    text = plain_text(EVIL)
+    assert text == (r"Feed\]\(https\://evil\.example\) ＠victim \<\!\-\- ＃ 見出し")
+
+
+def test_malicious_source_name_cannot_break_link_label():
+    line = source_line(["i1"], items(record()), {"rss:blog": EVIL})
+    label = line[: line.index("](https://example.com/post)")]
+    assert "](" not in label and "@" not in label and "<!--" not in label and "\n" not in line
+
+
+@pytest.mark.parametrize(
+    "url, dest",
+    [
+        ("https://example.com/a&num;b", "https://example.com/a&amp;num;b"),
+        ("https://example.com/p?a=1&b=2", "https://example.com/p?a=1&amp;b=2"),
+        ("https://example.com/p?q=&lt;x&gt;", "https://example.com/p?q=&amp;lt;x&amp;gt;"),
+    ],
+)
+def test_ampersand_in_link_destination_is_escaped(url, dest):
+    line = source_line(["i1"], items(record(url=url)), NAMES)
+    assert f"]({dest})" in line
