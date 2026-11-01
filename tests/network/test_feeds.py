@@ -21,6 +21,6 @@ def test_configured_feed_can_be_fetched(feed):
     assert result.error is None
     assert all(r.published_at for r in result.records), "公開日時のないエントリーがある"
     # 1週間分を見て、期間の判定まで通ることを確かめる
-    period = daily_target(datetime.now(JST).date(), 7).period
-    items = [i for i in aggregate(result.records) if in_period(i, period)]
+    target = daily_target(datetime.now(JST).date(), 7)
+    items = [i for i in aggregate(result.records) if in_period(i, target)]
     assert items, "1週間で0件。フィードの URL か形式が変わっていないか確かめる"
