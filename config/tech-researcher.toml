@@ -10,9 +10,9 @@ period_days = 7 # 終わりは実行日以前で最も近い月曜の 0:00（JST
 # RSS・Atom（D-11）。kind は new（新着）か popular（人気型。D-13）。
 # 省略できる項目と既定値：
 #   full_text = "content"     全文が入る欄。content・summary・none（全文なし）
-#   excerpt = "summary"       抜粋にする欄。content・summary。全文と同じ内容なら持たない
-#   entry_date = "published"  エントリーの日時を公開日時とする。posted なら投稿日時とし、公開日時は不明
-#   pages = 1                 WordPress のページ送り（?paged=N）で取るページ数
+#   excerpt = "summary"       抜粋にする欄。content・summary。full_text と同じ欄は書けない。同じ内容なら持たない
+#   entry_date = "published"  公開日時にする欄。updated（published のない Atom）か、posted（updated を投稿日時とし、公開日時は不明）
+#   pages = 1                 WordPress のページ送り（?paged=N）で取るページ数。1〜5
 # 公式ブログ（17本）
 [[feeds]]
 id = "openai"
@@ -120,7 +120,7 @@ display_name = "Vercel"
 url = "https://vercel.com/atom"
 kind = "new"
 enabled = true
-entry_date = "posted" # Atom に published がなく updated だけ
+entry_date = "updated" # Atom に published がなく updated だけ
 
 [[feeds]]
 id = "cloudflare"

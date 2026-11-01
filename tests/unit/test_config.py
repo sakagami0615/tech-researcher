@@ -54,15 +54,42 @@ def full(base):
     return data
 
 
+# D-11 の公式ブログ17本
+OFFICIAL_FEEDS = [
+    "openai",
+    "google-ai",
+    "deepmind",
+    "google-research",
+    "google-cloud",
+    "microsoft",
+    "microsoft-dev",
+    "azure-blog",
+    "azure-updates",
+    "aws-blog",
+    "aws-whats-new",
+    "github-blog",
+    "github-changelog",
+    "vercel",
+    "cloudflare",
+    "huggingface",
+    "cncf",
+]
+
+
 def test_repository_config_loads():
     config = load_config(CONFIG_PATH)
     assert config.daily_period_days == 1
     assert config.weekly_period_days == 7
-    kinds = {f.kind for f in config.feeds}
-    assert len([f for f in config.feeds if f.kind == "new" and "zenn" not in f.id]) == 17
-    assert kinds == {"new", "popular"} and all(f.enabled for f in config.feeds)
-    changelog = next(f for f in config.feeds if f.id == "github-changelog")
-    assert changelog.pages == 2
+    assert {f.id: f.kind for f in config.feeds} == {
+        **dict.fromkeys(OFFICIAL_FEEDS, "new"),
+        **dict.fromkeys(["zenn-llm", "zenn-ai", "zenn-aws"], "new"),
+        **dict.fromkeys(["zenn-trend", "qiita-popular", "hatena-it"], "popular"),
+    }
+    assert all(f.enabled for f in config.feeds)
+    feeds = {f.id: f for f in config.feeds}
+    assert feeds["github-changelog"].pages == 2
+    assert feeds["vercel"].entry_date == "updated"
+    assert feeds["hatena-it"].entry_date == "posted"
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -158,9 +185,11 @@ def test_feed_text_date_and_pages_can_be_set(base):
     [
         ("full_text", "description"),
         ("excerpt", "none"),
-        ("entry_date", "updated"),
+        ("entry_date", "dc_date"),
         ("pages", 0),
+        ("pages", 6),
         ("pages", "2"),
+        ("pages", True),
     ],
 )
 def test_invalid_feed_settings_are_rejected(base, key, value):
@@ -168,6 +197,21 @@ def test_invalid_feed_settings_are_rejected(base, key, value):
     data["feeds"][0][key] = value
     with pytest.raises(ConfigError, match=key):
         parse_config(data)
+
+
+def test_full_text_and_excerpt_cannot_name_the_same_field(base):
+    data = full(base)
+    data["feeds"][0].update(full_text="content", excerpt="content")
+    with pytest.raises(ConfigError, match="full_text と同じ欄"):
+        parse_config(data)
+
+
+def test_excerpt_default_may_overlap_full_text(base):
+    # full_text = "summary" で excerpt を省略すると、抜粋なしになる（AWS What's New など）
+    data = full(base)
+    data["feeds"][0].update(full_text="summary")
+    feed = parse_config(data).feeds[0]
+    assert (feed.full_text, feed.excerpt) == ("summary", "summary")
 
 
 def test_unknown_source_is_rejected_without_other_sources(base):

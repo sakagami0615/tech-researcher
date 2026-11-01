@@ -106,13 +106,20 @@ def test_title_only_feed():
     assert record.primary_text is None and record.excerpt is None and record.title == "a"
 
 
-def test_hatena_entry_date_is_posted_time():
-    hatena = Feed("hatena", "はてな", "https://b.hatena.ne.jp/hotentry/it.rss", "popular", True)
-    hatena = replace(hatena, full_text="none", entry_date="posted")
-    body = (Path(__file__).parent / "fixtures" / "hatena.rdf").read_bytes()
-    (record,) = parse_feed(body, hatena, NOW)
+HATENA = replace(
+    Feed("hatena", "はてな", "https://b.hatena.ne.jp/hotentry/it.rss", "popular", True),
+    full_text="none",
+    entry_date="posted",
+)
+HATENA_BODY = (Path(__file__).parent / "fixtures" / "hatena.rdf").read_bytes()
+
+
+def test_hatena_entry_is_an_aggregator_post():
+    (record,) = parse_feed(HATENA_BODY, HATENA, NOW)
     posted = datetime(2026, 10, 30, 10, 18, 57, tzinfo=UTC)
-    assert record.url == "https://tech.example.jp/post" and record.title == "記事のタイトル"
+    # HN と同じく、レコードの URL はエントリーページ、指している先は記事（data-model.md 2.2）
+    assert record.url == "https://b.hatena.ne.jp/entry/s/tech.example.jp/post"
+    assert record.link_url == "https://tech.example.jp/post" and record.title == "記事のタイトル"
     assert record.published_at is None and record.published_precision == "unknown"
     assert record.posted_at == posted
     assert [(e.type, e.at) for e in record.events] == [("posted", posted)]
@@ -123,16 +130,61 @@ def test_hatena_entry_date_is_posted_time():
     ]
 
 
-def test_atom_updated_can_be_used_as_posted_time():
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("<hatena:bookmarkcount>355<", "<hatena:bookmarkcount>多数<"),
+        ("<hatena:bookmarkcount>355<", "<hatena:bookmarkcount><"),
+        ("<hatena:bookmarkcount>355<", "<hatena:bookmarkcount>-1<"),
+    ],
+)
+def test_unreadable_bookmark_count_is_dropped(old, new):
+    body = HATENA_BODY.replace(old.encode(), new.encode())
+    (record,) = parse_feed(body, HATENA, NOW)
+    assert record.attention == ()
+
+
+def test_unexpected_entry_page_is_not_used():
+    body = HATENA_BODY.replace(b"https://b.hatena.ne.jp/entry/s/", b"https://evil.example/")
+    (record,) = parse_feed(body, HATENA, NOW)
+    assert record.url == "https://tech.example.jp/post" and record.link_url is None
+
+
+def test_other_feeds_have_no_attention_or_link_url():
+    records = parse_feed(FIXTURE, FEED, NOW)
+    assert all(r.attention == () and r.link_url is None for r in records)
+
+
+ATOM_BOTH_DATES = (
+    b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>'
+    b"<entry><title>a</title><link href='https://e.example/a'/>"
+    b"<published>2026-10-22T01:00:00Z</published>"
+    b"<updated>2026-10-23T01:00:00Z</updated></entry></feed>"
+)
+PUBLISHED = datetime(2026, 10, 22, 1, 0, tzinfo=UTC)
+UPDATED = datetime(2026, 10, 23, 1, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "entry_date, published_at, posted_at, event",
+    [
+        ("published", PUBLISHED, None, ("published", PUBLISHED)),
+        ("updated", UPDATED, None, ("published", UPDATED)),
+        ("posted", None, UPDATED, ("posted", UPDATED)),
+    ],
+)
+def test_entry_date_selects_the_field(entry_date, published_at, posted_at, event):
+    (record,) = parse_feed(ATOM_BOTH_DATES, replace(FEED, entry_date=entry_date), NOW)
+    assert record.published_at == published_at and record.posted_at == posted_at
+    assert record.published_precision == ("datetime" if published_at else "unknown")
+    assert [(e.type, e.at) for e in record.events] == [event]
+
+
+def test_atom_with_only_updated_can_use_it_as_published():
     # Vercel の Atom は published がなく updated だけ
-    body = (
-        b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>'
-        b"<entry><title>a</title><link href='https://e.example/a'/>"
-        b"<updated>2026-10-23T01:00:00Z</updated></entry></feed>"
-    )
-    (record,) = parse_feed(body, replace(FEED, entry_date="posted"), NOW)
-    assert record.published_at is None
-    assert record.posted_at == datetime(2026, 10, 23, 1, 0, tzinfo=UTC)
+    body = ATOM_BOTH_DATES.replace(b"<published>2026-10-22T01:00:00Z</published>", b"")
+    (record,) = parse_feed(body, replace(FEED, entry_date="updated"), NOW)
+    assert record.published_at == UPDATED and record.published_precision == "datetime"
 
 
 def paged_fetch(pages, attempts=1):
@@ -181,6 +233,35 @@ def test_failed_page_fails_the_whole_source(limits):
     )
     result = collect_feed(feed, limits, fetch_url=fetch)
     assert result.records == () and result.error == "HTTP 503" and result.attempts == 4
+
+
+def test_non_feed_second_page_fails_the_whole_source(limits):
+    feed = replace(FEED, pages=2)
+    fetch, _ = paged_fetch({feed.url: page_body("a"), feed.url + "?paged=2": b"<html></html>"})
+    result = collect_feed(feed, limits, fetch_url=fetch)
+    assert result.records == () and result.error == "フィードとして読めない応答"
+
+
+def test_first_page_failure_stops_paging(limits):
+    feed = replace(FEED, pages=3)
+    fetch, requested = paged_fetch({feed.url: FetchError("HTTP 404", 1, 404)})
+    result = collect_feed(feed, limits, fetch_url=fetch)
+    assert requested == [feed.url] and result.error == "HTTP 404"
+
+
+def test_duplicate_in_one_page_keeps_the_first(limits):
+    body = page_body("a", "b").replace(b"https://e.example/b", b"https://e.example/a")
+    result = collect_feed(FEED, limits, fetch_url=fake_fetch(body))
+    assert [(r.url, r.title) for r in result.records] == [("https://e.example/a", "a")]
+
+
+def test_page_without_new_entries_is_warned(limits, caplog):
+    feed = replace(FEED, pages=2)
+    fetch, _ = paged_fetch({feed.url: page_body("a"), feed.url + "?paged=2": page_body("a")})
+    with caplog.at_level("WARNING"):
+        result = collect_feed(feed, limits, fetch_url=fetch)
+    assert result.error is None and len(result.records) == 1
+    assert "2ページ目に新しいエントリーがない" in caplog.text
 
 
 @pytest.mark.parametrize(

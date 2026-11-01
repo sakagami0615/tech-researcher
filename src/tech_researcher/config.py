@@ -75,6 +75,8 @@ class Qiita:
 
 # フィードのどの欄を一次情報の本文・抜粋にするか（D-14）。none は本文なし
 FEED_TEXT_FIELDS = ("content", "summary")
+# ページ送りの上限。設定の誤りで要求を増やしすぎないように
+MAX_FEED_PAGES = 5
 
 
 @dataclass(frozen=True)
@@ -82,8 +84,11 @@ class Feed:
     """RSS・Atom のフィード。kind は new（新着）か popular（人気型。D-13 の初登場の判定の対象）。
 
     full_text：全文が入る欄（content・summary・none）。excerpt：抜粋にする欄（content・summary）。
-    entry_date：エントリーの日時を公開日時（published）とするか、投稿日時（posted）とするか。
-    pages：WordPress のページ送り（?paged=N）で取るページ数。
+    full_text と excerpt が同じ内容なら抜粋は持たない
+    （full_text = "summary" で excerpt が既定のとき）。
+    entry_date：公開日時にする欄（published、または updated だけの Atom 用の updated）。
+    posted なら updated（はてなの dc:date）を投稿日時とし、公開日時は不明とする。
+    pages：WordPress のページ送り（?paged=N）で取るページ数（1〜5）。
     """
 
     id: str
@@ -317,30 +322,33 @@ def _feed(t: _Table) -> Feed:
     url = t.value("url", str)
     if not url.startswith("https://"):
         raise ConfigError(f"{t.path_of('url')}: https:// で始める（{url!r}）")
-    full_text = _choice(t, "full_text", (*FEED_TEXT_FIELDS, "none"), "content")
-    excerpt = _choice(t, "excerpt", FEED_TEXT_FIELDS, "summary")
-    entry_date = _choice(t, "entry_date", ("published", "posted"), "published")
-    pages = t.int_at_least("pages") if "pages" in t._data else 1
+    # 省略できる項目。書かれたものだけ渡し、既定値は Feed の1か所に置く
+    options = {
+        "full_text": _choice(t, "full_text", (*FEED_TEXT_FIELDS, "none")),
+        "excerpt": _choice(t, "excerpt", FEED_TEXT_FIELDS),
+        "entry_date": _choice(t, "entry_date", ("published", "updated", "posted")),
+        "pages": t.value("pages", int, required=False),
+    }
+    if options["full_text"] is not None and options["full_text"] == options["excerpt"]:
+        # 既定値どうしの重なり（full_text = "summary" で excerpt を省略）は、抜粋なしになる
+        raise ConfigError(f"{t.path_of('excerpt')}: full_text と同じ欄にしない")
+    if options["pages"] is not None and not 1 <= options["pages"] <= MAX_FEED_PAGES:
+        raise ConfigError(f"{t.path_of('pages')}: 1〜{MAX_FEED_PAGES} にする")
     result = Feed(
         t.text("id"),
         t.text("display_name"),
         url,
         kind,
         t.value("enabled", bool),
-        full_text,
-        excerpt,
-        entry_date,
-        pages,
+        **{k: v for k, v in options.items() if v is not None},
     )
     t.done()
     return result
 
 
-def _choice(t: _Table, name: str, choices: tuple[str, ...], default: str) -> str:
+def _choice(t: _Table, name: str, choices: tuple[str, ...]) -> str | None:
     value = t.value(name, str, required=False)
-    if value is None:
-        return default
-    if value not in choices:
+    if value is not None and value not in choices:
         raise ConfigError(f"{t.path_of(name)}: {'・'.join(choices)} のどれかにする（{value!r}）")
     return value
 

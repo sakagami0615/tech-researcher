@@ -20,5 +20,6 @@
 <content:encoded>&lt;blockquote cite="https://tech.example.jp/post"&gt;&lt;a href="https://b.hatena.ne.jp/entry/s/tech.example.jp/post"&gt;埋め込み&lt;/a&gt;&lt;/blockquote&gt;</content:encoded>
 <dc:date>2026-10-30T10:18:57Z</dc:date>
 <hatena:bookmarkcount>355</hatena:bookmarkcount>
+<hatena:bookmarkCommentListPageUrl>https://b.hatena.ne.jp/entry/s/tech.example.jp/post</hatena:bookmarkCommentListPageUrl>
 </item>
 </rdf:RDF>
