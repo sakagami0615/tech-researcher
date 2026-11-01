@@ -1,0 +1,47 @@
+# tech-researcher の設定（D-20）。秘匿情報・投稿先・Projects の指定は書かない（worker.env に置く）。
+# 情報源の具体的な値は、それぞれの情報源を実装する Issue で足す。
+
+[daily]
+period_days = 1 # 対象期間の長さ。終わりは実行日の 0:00（JST）、始まりはその N 日前
+
+[weekly]
+period_days = 7 # 終わりは実行日以前で最も近い月曜の 0:00（JST）。D-17
+
+# 上限（D-21、structure.md 6章）。運用で調整する
+[limits]
+http_connect_timeout_s = 10
+http_read_timeout_s = 30
+http_retry_waits_s = [5, 20] # 再試行2回。それぞれの前に待つ秒数
+retry_after_max_s = 60       # Retry-After に従う上限
+last30days_timeout_s = 300   # 内部の上限（約171秒）より長くする
+last30days_retries = 1
+github_rest_calls = 1500
+github_search_calls = 100
+github_search_per_minute = 25
+github_graphql_calls = 50
+github_graphql_batch = 100
+github_write_calls = 20
+qiita_calls = 30
+# ⑤ の GitHub への書き込みと Projects の登録は、HTTP の上限（応答30秒・再試行2回）を使う
+# ② の再試行の回数と agent の呼び出し回数は、それを実装する Issue で足す
+# agent_max_turns =           # 値は PoC で決める
+
+[limits.daily]
+collect_minutes = 20
+collect_per_source_minutes = 10
+analyze_minutes = 20 # 再試行を含めた合計
+verify_minutes = 2
+investigate_minutes = 8
+post_minutes = 5
+job_minutes = 60
+agent_input_bytes = 2_000_000
+
+[limits.weekly]
+collect_minutes = 25
+collect_per_source_minutes = 10
+analyze_minutes = 40
+verify_minutes = 3
+investigate_minutes = 10
+post_minutes = 5
+job_minutes = 90
+agent_input_bytes = 8_000_000
