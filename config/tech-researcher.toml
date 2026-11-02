@@ -16,9 +16,11 @@ display_name = "Hacker News"
 enabled = true
 display_name = "GitHub"
 
-# last30days-skill の --plan を作る元（D-01）。sources は hackernews・github。
+# last30days-skill の CLI に渡すトピックと --plan を作る元（D-01）。sources は hackernews・github。
+# トピックに比較の形（「A vs B」・「A/B」など）は書けない（比較モードに入るため）。
 # 検索語は重点領域に合わせた初期値。運用で調整する
 [last30days]
+topic = "technology news"
 subqueries = [
   { search_query = "LLM", ranking_query = "LLM and generative AI news", sources = ["hackernews", "github"], weight = 1.0 },
   { search_query = "AI agent", ranking_query = "AI agents and coding agents", sources = ["hackernews", "github"], weight = 1.0 },

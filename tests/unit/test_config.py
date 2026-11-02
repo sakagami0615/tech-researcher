@@ -34,9 +34,10 @@ FEED = {
     "enabled": True,
 }
 LAST30DAYS = {
+    "topic": "technology news",
     "subqueries": [
         {"search_query": "llm", "ranking_query": "llm", "sources": ["hackernews"], "weight": 1.0}
-    ]
+    ],
 }
 
 
@@ -91,6 +92,7 @@ def test_repository_config_loads():
     assert feeds["vercel"].entry_date == "updated"
     assert feeds["hatena-it"].entry_date == "posted"
     assert config.hackernews.enabled and config.github_search.enabled and config.subqueries
+    assert config.last30days_topic == "technology news"
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -112,6 +114,7 @@ def test_sources_are_optional(base):
         base.pop(name, None)
     config = parse_config(base)
     assert config.hackernews is None and config.feeds == () and config.subqueries == ()
+    assert config.last30days_topic is None
 
 
 def test_source_can_be_disabled_or_added_without_code(base):
@@ -139,6 +142,14 @@ def test_unknown_keys_are_rejected(base, mutate, message):
         parse_config(data)
 
 
+def test_last30days_topic_is_read(base):
+    data = full(base)
+    data["last30days"]["topic"] = "AI developer tools"
+    assert parse_config(data).last30days_topic == "AI developer tools"
+    data["last30days"]["topic"] = "canvas devs news"  # 語の一部の vs は比較ではない
+    assert parse_config(data).last30days_topic == "canvas devs news"
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -155,6 +166,14 @@ def test_unknown_keys_are_rejected(base, mutate, message):
         lambda d: d["last30days"]["subqueries"][0].update(weight=0.0),
         lambda d: d["last30days"]["subqueries"][0].update(sources=["hackernwes"]),
         lambda d: d["last30days"]["subqueries"][0].update(sources=["github_search"]),
+        lambda d: d["last30days"].pop("topic"),
+        lambda d: d["last30days"].update(topic=" "),
+        lambda d: d["last30days"].update(topic="Claude vs Codex"),
+        lambda d: d["last30days"].update(topic="Claude VS. Codex"),
+        lambda d: d["last30days"].update(topic="React versus Vue"),
+        lambda d: d["last30days"].update(topic="Rust compared to Go"),
+        lambda d: d["last30days"].update(topic="difference between A and B"),
+        lambda d: d["last30days"].update(topic="Claude/Codex"),
         lambda d: d.pop("limits"),
         lambda d: d["sources"]["qiita"].pop("display_name"),
         lambda d: d["feeds"][0].pop("url"),

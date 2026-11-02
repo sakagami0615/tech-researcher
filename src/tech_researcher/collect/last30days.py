@@ -3,7 +3,8 @@
 HN・GitHub Search を last30days-skill の CLI で集め、agent JSON（schema_version 1.4）を
 収集レコードにする。第三者コードは import せず、子プロセスとして呼ぶ（D-02）。
 
-- 計画（--plan）・情報源（--search）・Web 検索の backend（none）を常に明示する
+- トピック・計画（--plan）・情報源（--search）・Web 検索の backend（none）を常に明示する。
+  トピックと計画は設定ファイルの [last30days] から作る（比較モードに入る形は設定の読み込みで止める）
 - 子プロセスには許可した環境変数だけを渡す。推論プロバイダのキーや gh のログイン情報は渡さない。
   HOME は実行ごとの空の一時ディレクトリにし、gh の設定や library.db に届かないようにする
 - 比較形式（{"comparison": true}）と、版や必須構造の違う出力は拒否し、再試行しない
@@ -44,8 +45,6 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.4"
 SCRIPT = "skills/last30days/scripts/last30days.py"
-# トピックは固定する。「A vs B」の形だと比較モードに入るため、比較対象を含めない（D-01）
-TOPIC = "technology news"
 # 計画の固定の値（D-01。値は固定の文字列でよい）
 PLAN_HEADER = {"intent": "breaking_news", "freshness_mode": "strict_recent", "cluster_mode": "none"}
 # 設定の情報源 ID → last30days-skill の情報源名
@@ -120,7 +119,8 @@ def _collect(
 ) -> dict[str, SourceResult]:
     """source_ids を1回の CLI の実行で集める。"""
     names = [SOURCE_NAMES[sid] for sid in source_ids]
-    args = build_args(root, build_plan(config.subqueries, names), names, period)
+    plan = build_plan(config.subqueries, names)
+    args = build_args(root, config.last30days_topic, plan, names, period)
     with tempfile.TemporaryDirectory(prefix="last30days-") as home:
         try:
             stdout, stderr, attempts = _run(
@@ -164,13 +164,13 @@ def build_plan(subqueries: tuple[Subquery, ...], names: list[str]) -> dict:
     return {**PLAN_HEADER, "subqueries": entries}
 
 
-def build_args(root: Path, plan: dict, names: list[str], period: Period) -> list[str]:
+def build_args(root: Path, topic: str, plan: dict, names: list[str], period: Period) -> list[str]:
     """CLI の引数。期間は対象期間を覆う UTC の日付で渡す（D-16）。"""
     days, as_of = last30days_window(period)
     return [
         sys.executable,
         str(root.resolve() / SCRIPT),  # 子プロセスは一時ディレクトリで動くので絶対パスにする
-        TOPIC,
+        topic,
         "--emit=json",
         "--search",
         ",".join(names),

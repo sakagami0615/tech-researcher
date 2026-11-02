@@ -16,6 +16,9 @@ class ConfigError(ValueError):
     pass
 
 
+# CLI に渡すトピックが比較モード（「A vs B」など）に入る形。last30days-skill の判定より広めに止める
+_COMPARISON_TOPIC = re.compile(r"\b(?:vs\.?|versus|compared to|difference between)(?!\w)|/", re.I)
+
 # --plan に書ける情報源名。設定の sources.hackernews は "hackernews"、
 # sources.github_search は "github" にあたる
 LAST30DAYS_PLAN_SOURCES = frozenset({"hackernews", "github"})
@@ -152,6 +155,9 @@ class Config:
     github_releases: GitHubReleases | None
     qiita: Qiita | None
     feeds: tuple[Feed, ...]
+    last30days_topic: (
+        str | None
+    )  # last30days-skill の CLI に渡すトピック。[last30days] がなければ None
     subqueries: tuple[Subquery, ...]
     limits: Limits
 
@@ -174,6 +180,7 @@ def parse_config(data: dict[str, Any]) -> Config:
     limits = top.table("limits")
     feeds = top.array_of_tables("feeds")
     top.done()
+    topic, subqueries = _last30days(last30days)
 
     config = Config(
         daily_period_days=_period_days(daily),
@@ -184,7 +191,8 @@ def parse_config(data: dict[str, Any]) -> Config:
         github_releases=_github_releases(sources),
         qiita=_qiita(sources),
         feeds=tuple(_feed(f) for f in feeds) + _zenn_topic_feeds(sources),
-        subqueries=_subqueries(last30days),
+        last30days_topic=topic,
+        subqueries=subqueries,
         limits=_limits(limits),
     )
     if sources is not None:
@@ -396,9 +404,13 @@ def _check_unique_feed_ids(feeds: tuple[Feed, ...]) -> None:
         raise ConfigError(f"feeds: id が重複している {', '.join(duplicated)}")
 
 
-def _subqueries(t: _Table | None) -> tuple[Subquery, ...]:
+def _last30days(t: _Table | None) -> tuple[str | None, tuple[Subquery, ...]]:
     if t is None:
-        return ()
+        return None, ()
+    topic = t.text("topic")
+    if _COMPARISON_TOPIC.search(topic):
+        # 比較モードに入ると出力の形が変わり、アダプタが拒否する（D-01）
+        raise ConfigError(f"{t.path_of('topic')}: 比較の形（vs・/ など）にしない（{topic!r}）")
     items = t.array_of_tables("subqueries")
     t.done()
     result = []
@@ -420,7 +432,7 @@ def _subqueries(t: _Table | None) -> tuple[Subquery, ...]:
             )
         )
         s.done()
-    return tuple(result)
+    return topic, tuple(result)
 
 
 def _stage_limits(t: _Table) -> StageLimits:

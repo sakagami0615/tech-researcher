@@ -30,6 +30,7 @@ CONFIG = replace(
     load_config(REPO / "config" / "tech-researcher.toml"),
     hackernews=Last30DaysSource(True, "Hacker News"),
     github_search=Last30DaysSource(True, "GitHub"),
+    last30days_topic="technology news",
     subqueries=(Subquery("LLM", "LLM news", ("hackernews", "github"), 1.0),),
 )
 NOW = datetime(2026, 11, 2, 6, 0, tzinfo=UTC)

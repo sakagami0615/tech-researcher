@@ -14,6 +14,7 @@ BASE = load_config(Path(__file__).parents[3] / "config" / "tech-researcher.toml"
 # テストで使う値は明示する。設定ファイルの値を運用で変えても、テストが壊れないように
 CONFIG = replace(
     BASE,
+    last30days_topic="AI news",
     hackernews=Last30DaysSource(True, "Hacker News"),
     github_search=Last30DaysSource(True, "GitHub"),
     subqueries=(
@@ -68,7 +69,7 @@ def test_arguments_state_plan_sources_backend_and_period():
     run = FakeRun(done())
     collect(run)
     ((args, kwargs),) = run.calls
-    assert args[:3] == [sys.executable, str(ROOT / SCRIPT), "technology news"]
+    assert args[:3] == [sys.executable, str(ROOT / SCRIPT), "AI news"]
     assert args[3:8] == ["--emit=json", "--search", "hackernews,github", "--web-backend", "none"]
     plan = json.loads(args[args.index("--plan") + 1])
     assert plan == {
