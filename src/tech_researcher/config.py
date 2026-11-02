@@ -315,12 +315,27 @@ def _github_releases(sources: _Table | None) -> GitHubReleases | None:
     return result
 
 
+# Qiita のタグ名に書けない形。検索条件（`tag:A,B`）に入れるので、空白・カンマ・引用符を止める
+_QIITA_TAG_UNSAFE = re.compile(r"[\s,\"']")
+
+
 def _qiita(sources: _Table | None) -> Qiita | None:
     t = _source(sources, "qiita")
     if t is None:
         return None
     result = Qiita(t.value("enabled", bool), t.text("display_name"), t.strings("tags"))
     t.done()
+    path = t.path_of("tags")
+    if not result.tags:
+        raise ConfigError(f"{path}: 1つ以上書く")
+    for tag in result.tags:
+        if _QIITA_TAG_UNSAFE.search(tag):
+            raise ConfigError(f"{path}: 空白・カンマ・引用符を含めない（{tag!r}）")
+    # Qiita のタグは大文字・小文字を区別しない
+    folded = [tag.casefold() for tag in result.tags]
+    duplicated = sorted({tag for tag in result.tags if folded.count(tag.casefold()) > 1})
+    if duplicated:
+        raise ConfigError(f"{path}: 重複している {', '.join(duplicated)}")
     return result
 
 

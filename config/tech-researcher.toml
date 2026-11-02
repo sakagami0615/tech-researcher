@@ -179,7 +179,19 @@ kind = "popular"
 enabled = true
 full_text = "none"
 
-# Qiita の新着は API で取る（後の Issue）
+# Qiita の新着は API v2 で、認証なしで取る（D-11）。tags のどれかが付いた記事を作成日時で集める。
+# タグを足す・消すだけで変えられる。大文字・小文字を区別しない。空白・カンマ・引用符は書けない。
+# 要求は1回の実行で limits.qiita_calls 回まで（1ページ100件。再試行も数える）
+[sources.qiita]
+enabled = true
+display_name = "Qiita"
+tags = [
+  "LLM", "生成AI", "AIエージェント", "MCP",   # 生成AI・LLM・AIエージェント
+  "ClaudeCode", "GitHubCopilot",               # 開発者ツール
+  "AWS", "Azure", "GoogleCloud", "Kubernetes", # クラウド・インフラ
+]
+
+# Qiita の人気
 [[feeds]]
 id = "qiita-popular"
 display_name = "Qiita（人気）"

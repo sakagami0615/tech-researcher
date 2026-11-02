@@ -116,7 +116,7 @@ def parse_feed(body: bytes, feed: Feed, fetched_at: datetime) -> list[Record]:
                 published_at=published_at,
                 posted_at=posted_at,
                 attention=_attention(entry, fetched_at),
-                links=_links(primary, excerpt),
+                links=html_links(primary, excerpt),
             )
         )
     return records
@@ -155,7 +155,7 @@ def _content(entry) -> str | None:
     return "\n".join(p for p in parts if p) or None
 
 
-def _links(*texts: str | None) -> tuple[str, ...]:
+def html_links(*texts: str | None) -> tuple[str, ...]:
     """本文・抜粋の <a href> を順に集める。正規化と http(s) の絞り込みはまとめるときに行う。"""
     links: list[str] = []
     for text in texts:
