@@ -5,6 +5,7 @@
 投稿先・Projects の指定・認証情報は worker.env に置くので、ここでは受け付けない。
 """
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,15 +74,33 @@ class Qiita:
     tags: tuple[str, ...]
 
 
+# フィードのどの欄を一次情報の本文・抜粋にするか（D-14）。none は本文なし
+FEED_TEXT_FIELDS = ("content", "summary")
+# ページ送りの上限。設定の誤りで要求を増やしすぎないように
+MAX_FEED_PAGES = 5
+
+
 @dataclass(frozen=True)
 class Feed:
-    """RSS・Atom のフィード。kind は new（新着）か popular（人気型。D-13 の初登場の判定の対象）。"""
+    """RSS・Atom のフィード。kind は new（新着）か popular（人気型。D-13 の初登場の判定の対象）。
+
+    full_text：全文が入る欄（content・summary・none）。excerpt：抜粋にする欄（content・summary）。
+    full_text と excerpt が同じ内容なら抜粋は持たない
+    （full_text = "summary" で excerpt が既定のとき）。
+    entry_date：公開日時にする欄（published、または updated だけの Atom 用の updated）。
+    posted なら updated（はてなの dc:date）を投稿日時とし、公開日時は不明とする。
+    pages：WordPress のページ送り（?paged=N）で取るページ数（1〜5）。
+    """
 
     id: str
     display_name: str
     url: str
     kind: str
     enabled: bool
+    full_text: str = "content"
+    excerpt: str = "summary"
+    entry_date: str = "published"
+    pages: int = 1
 
 
 @dataclass(frozen=True)
@@ -164,7 +183,7 @@ def parse_config(data: dict[str, Any]) -> Config:
         github_repos=_github_repos(sources),
         github_releases=_github_releases(sources),
         qiita=_qiita(sources),
-        feeds=tuple(_feed(f) for f in feeds),
+        feeds=tuple(_feed(f) for f in feeds) + _zenn_topic_feeds(sources),
         subqueries=_subqueries(last30days),
         limits=_limits(limits),
     )
@@ -297,6 +316,41 @@ def _qiita(sources: _Table | None) -> Qiita | None:
     return result
 
 
+# Zenn のトピック名の形。URL のパスに入れるので、これ以外は受け付けない
+_ZENN_TOPIC = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _zenn_topic_feeds(sources: _Table | None) -> tuple[Feed, ...]:
+    """sources.zenn.topics の各トピックを、Zenn のトピック別の新着フィードに展開する。
+
+    汎用のテンプレートにはせず Zenn 専用にした。トピックで増やす情報源は Zenn だけで、
+    Qiita の tags と同じく「名前の一覧」で書ける方が設定も検査も単純なため。
+    表示名はトピック名をそのまま使う。指定したくなったら、ここに項目を足す。
+    """
+    t = _source(sources, "zenn")
+    if t is None:
+        return ()
+    topics = t.strings("topics")
+    t.done()
+    for topic in topics:
+        if not _ZENN_TOPIC.fullmatch(topic):
+            raise ConfigError(f"{t.path_of('topics')}: 英小文字・数字・- だけにする（{topic!r}）")
+    duplicated = sorted({x for x in topics if topics.count(x) > 1})
+    if duplicated:
+        raise ConfigError(f"{t.path_of('topics')}: 重複している {', '.join(duplicated)}")
+    return tuple(
+        Feed(
+            id=f"zenn-{topic}",
+            display_name=f"Zenn（{topic}）",
+            url=f"https://zenn.dev/topics/{topic}/feed",
+            kind="new",
+            enabled=True,
+            full_text="none",  # summary は先頭の抜粋
+        )
+        for topic in topics
+    )
+
+
 def _feed(t: _Table) -> Feed:
     kind = t.value("kind", str)
     if kind not in ("new", "popular"):
@@ -304,9 +358,35 @@ def _feed(t: _Table) -> Feed:
     url = t.value("url", str)
     if not url.startswith("https://"):
         raise ConfigError(f"{t.path_of('url')}: https:// で始める（{url!r}）")
-    result = Feed(t.text("id"), t.text("display_name"), url, kind, t.value("enabled", bool))
+    # 省略できる項目。書かれたものだけ渡し、既定値は Feed の1か所に置く
+    options = {
+        "full_text": _choice(t, "full_text", (*FEED_TEXT_FIELDS, "none")),
+        "excerpt": _choice(t, "excerpt", FEED_TEXT_FIELDS),
+        "entry_date": _choice(t, "entry_date", ("published", "updated", "posted")),
+        "pages": t.value("pages", int, required=False),
+    }
+    if options["full_text"] is not None and options["full_text"] == options["excerpt"]:
+        # 既定値どうしの重なり（full_text = "summary" で excerpt を省略）は、抜粋なしになる
+        raise ConfigError(f"{t.path_of('excerpt')}: full_text と同じ欄にしない")
+    if options["pages"] is not None and not 1 <= options["pages"] <= MAX_FEED_PAGES:
+        raise ConfigError(f"{t.path_of('pages')}: 1〜{MAX_FEED_PAGES} にする")
+    result = Feed(
+        t.text("id"),
+        t.text("display_name"),
+        url,
+        kind,
+        t.value("enabled", bool),
+        **{k: v for k, v in options.items() if v is not None},
+    )
     t.done()
     return result
+
+
+def _choice(t: _Table, name: str, choices: tuple[str, ...]) -> str | None:
+    value = t.value(name, str, required=False)
+    if value is not None and value not in choices:
+        raise ConfigError(f"{t.path_of(name)}: {'・'.join(choices)} のどれかにする（{value!r}）")
+    return value
 
 
 def _check_unique_feed_ids(feeds: tuple[Feed, ...]) -> None:

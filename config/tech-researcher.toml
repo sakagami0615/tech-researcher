@@ -7,13 +7,175 @@ period_days = 1 # 対象期間の長さ。終わりは実行日の 0:00（JST）
 [weekly]
 period_days = 7 # 終わりは実行日以前で最も近い月曜の 0:00（JST）。D-17
 
-# RSS・Atom（D-11）。kind は new（新着）か popular（人気型。D-13）。残りのフィードは後の Issue で足す
+# RSS・Atom（D-11）。kind は new（新着）か popular（人気型。D-13）。
+# 省略できる項目と既定値：
+#   full_text = "content"     全文が入る欄。content・summary・none（全文なし）
+#   excerpt = "summary"       抜粋にする欄。content・summary。full_text と同じ欄は書けない。同じ内容なら持たない
+#   entry_date = "published"  公開日時にする欄。updated（published のない Atom）か、posted（updated を投稿日時とし、公開日時は不明）
+#   pages = 1                 WordPress のページ送り（?paged=N）で取るページ数。1〜5
+# 公式ブログ（17本）
+[[feeds]]
+id = "openai"
+display_name = "OpenAI"
+url = "https://openai.com/news/rss.xml"
+kind = "new"
+enabled = true
+full_text = "none"
+
+[[feeds]]
+id = "google-ai"
+display_name = "Google（AI）"
+url = "https://blog.google/innovation-and-ai/technology/ai/rss/"
+kind = "new"
+enabled = true
+full_text = "none"
+excerpt = "content" # summary は画像の説明文
+
+[[feeds]]
+id = "deepmind"
+display_name = "Google DeepMind"
+url = "https://deepmind.google/blog/rss.xml"
+kind = "new"
+enabled = true
+full_text = "none"
+
+[[feeds]]
+id = "google-research"
+display_name = "Google Research"
+url = "https://research.google/blog/rss/"
+kind = "new"
+enabled = true
+full_text = "none"
+
+[[feeds]]
+id = "google-cloud"
+display_name = "Google Cloud"
+url = "https://cloudblog.withgoogle.com/rss/"
+kind = "new"
+enabled = true
+full_text = "summary"
+
+[[feeds]]
+id = "microsoft"
+display_name = "Microsoft"
+url = "https://blogs.microsoft.com/feed/"
+kind = "new"
+enabled = true
+
+[[feeds]]
+id = "microsoft-dev"
+display_name = "Microsoft（開発者）"
+url = "https://devblogs.microsoft.com/feed/"
+kind = "new"
+enabled = true
+
+[[feeds]]
+id = "azure-blog"
+display_name = "Azure（ブログ）"
+url = "https://azure.microsoft.com/en-us/blog/feed/"
+kind = "new"
+enabled = true
+
+[[feeds]]
+id = "azure-updates"
+display_name = "Azure（更新情報）"
+url = "https://www.microsoft.com/releasecommunications/api/v2/azure/rss"
+kind = "new"
+enabled = true
+full_text = "none" # description は255字で切れている
+
+[[feeds]]
+id = "aws-blog"
+display_name = "AWS（ブログ）"
+url = "https://aws.amazon.com/blogs/aws/feed/"
+kind = "new"
+enabled = true
+
+[[feeds]]
+id = "aws-whats-new"
+display_name = "AWS（What's New）"
+url = "https://aws.amazon.com/about-aws/whats-new/recent/feed/"
+kind = "new"
+enabled = true
+full_text = "summary"
+
+[[feeds]]
+id = "github-blog"
+display_name = "GitHub Blog"
+url = "https://github.blog/feed/"
+kind = "new"
+enabled = true
+
+[[feeds]]
+id = "github-changelog"
+display_name = "GitHub Changelog"
+url = "https://github.blog/changelog/feed/"
+kind = "new"
+enabled = true
+pages = 2 # 1ページは約1日分しか載らない（D-12）
+
+[[feeds]]
+id = "vercel"
+display_name = "Vercel"
+url = "https://vercel.com/atom"
+kind = "new"
+enabled = true
+entry_date = "updated" # Atom に published がなく updated だけ
+
 [[feeds]]
 id = "cloudflare"
 display_name = "Cloudflare"
 url = "https://blog.cloudflare.com/rss/"
 kind = "new"
 enabled = true
+
+[[feeds]]
+id = "huggingface"
+display_name = "Hugging Face"
+url = "https://huggingface.co/blog/feed.xml"
+kind = "new"
+enabled = true
+full_text = "none" # タイトルだけ
+
+[[feeds]]
+id = "cncf"
+display_name = "CNCF"
+url = "https://www.cncf.io/feed/"
+kind = "new"
+enabled = true
+
+# Zenn の新着はトピック別（1回で20件しか載らない取りこぼしは受け入れる。D-12）。
+# トピック名を足すと、id「zenn-{トピック}」・表示名「Zenn（{トピック}）」の新着のフィードになる
+[sources.zenn]
+topics = ["llm", "ai", "aws"]
+
+# Zenn のトレンド（人気）
+[[feeds]]
+id = "zenn-trend"
+display_name = "Zenn（トレンド）"
+url = "https://zenn.dev/feed"
+kind = "popular"
+enabled = true
+full_text = "none"
+
+# Qiita の新着は API で取る（後の Issue）
+[[feeds]]
+id = "qiita-popular"
+display_name = "Qiita（人気）"
+url = "https://qiita.com/popular-items/feed"
+kind = "popular"
+enabled = true
+full_text = "none" # content は先頭の抜粋
+
+# はてなブックマークは人気だけ使う（D-11）
+[[feeds]]
+id = "hatena-it"
+display_name = "はてなブックマーク（テクノロジー）"
+url = "https://b.hatena.ne.jp/hotentry/it.rss"
+kind = "popular"
+enabled = true
+full_text = "none" # content ははてなの埋め込み用の HTML
+entry_date = "posted" # dc:date は最初のブックマークの日時（D-13）
 
 # 上限（D-21、structure.md 6章）。運用で調整する
 [limits]

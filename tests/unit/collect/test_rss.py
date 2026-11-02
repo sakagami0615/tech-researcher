@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def fake_fetch(body=FIXTURE, attempts=1):
 
 
 def test_entries_become_records(limits):
-    records = parse_feed(FIXTURE, "rss:example", NOW)
+    records = parse_feed(FIXTURE, FEED, NOW)
     assert [r.url for r in records] == [
         "https://blog.example.com/full",
         "https://blog.example.com/summary",
@@ -63,9 +64,204 @@ def test_fetch_failure_is_recorded(limits):
     assert result.records == () and result.error == "HTTP 404" and result.attempts == 1
 
 
-def test_popular_feed_is_not_supported_yet(limits):
-    with pytest.raises(ValueError):
-        collect_feed(Feed("z", "Z", "https://z.example/feed", "popular", True), limits)
+def test_popular_feed_is_collected_like_new_one(limits):
+    # 初登場の判定（D-13）は別の Issue。ここでは新着型と同じレコードになる
+    result = collect_feed(replace(FEED, kind="popular"), limits, fetch_url=fake_fetch())
+    assert result.error is None and len(result.records) == 4
+
+
+def rss_item(content="", description=""):
+    return (
+        '<?xml version="1.0"?><rss version="2.0" '
+        'xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>t</title>'
+        "<item><title>a</title><link>https://e.example/a</link>"
+        f"<pubDate>Fri, 23 Oct 2026 01:00:00 +0000</pubDate>{description}{content}"
+        "</item></channel></rss>"
+    ).encode()
+
+
+def test_summary_can_be_full_text():
+    # AWS What's New・Google Cloud は content がなく、description に全文が入る
+    body = rss_item(description="<description>全文。</description>")
+    (record,) = parse_feed(body, replace(FEED, full_text="summary"), NOW)
+    assert record.primary_text == "全文。" and record.primary_text_origin == "rss_full"
+    assert record.excerpt is None  # 全文を抜粋として DB に残さない（D-14）
+
+
+def test_feed_without_full_text_keeps_only_excerpt():
+    # Qiita の人気は content も先頭の抜粋。Google AI は summary が画像の説明文
+    body = rss_item(
+        content="<content:encoded>記事の説明</content:encoded>",
+        description="<description>画像の説明</description>",
+    )
+    (record,) = parse_feed(body, replace(FEED, full_text="none"), NOW)
+    assert record.primary_text is None and record.primary_text_origin is None
+    assert record.excerpt == "画像の説明"
+    (record,) = parse_feed(body, replace(FEED, full_text="none", excerpt="content"), NOW)
+    assert record.primary_text is None and record.excerpt == "記事の説明"
+
+
+def test_title_only_feed():
+    (record,) = parse_feed(rss_item(), replace(FEED, full_text="none"), NOW)
+    assert record.primary_text is None and record.excerpt is None and record.title == "a"
+
+
+HATENA = replace(
+    Feed("hatena", "はてな", "https://b.hatena.ne.jp/hotentry/it.rss", "popular", True),
+    full_text="none",
+    entry_date="posted",
+)
+HATENA_BODY = (Path(__file__).parent / "fixtures" / "hatena.rdf").read_bytes()
+
+
+def test_hatena_entry_is_an_aggregator_post():
+    (record,) = parse_feed(HATENA_BODY, HATENA, NOW)
+    posted = datetime(2026, 10, 30, 10, 18, 57, tzinfo=UTC)
+    # HN と同じく、レコードの URL はエントリーページ、指している先は記事（data-model.md 2.2）
+    assert record.url == "https://b.hatena.ne.jp/entry/s/tech.example.jp/post"
+    assert record.link_url == "https://tech.example.jp/post" and record.title == "記事のタイトル"
+    assert record.published_at is None and record.published_precision == "unknown"
+    assert record.posted_at == posted
+    assert [(e.type, e.at) for e in record.events] == [("posted", posted)]
+    assert record.excerpt == "記事の説明。" and record.primary_text is None
+    assert record.links == ()  # はてなの埋め込み用の HTML（content）のリンクは拾わない
+    assert [(a.metric, a.value, a.measured_at) for a in record.attention] == [
+        ("hatena_bookmarks", 355.0, NOW)
+    ]
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("<hatena:bookmarkcount>355<", "<hatena:bookmarkcount>多数<"),
+        ("<hatena:bookmarkcount>355<", "<hatena:bookmarkcount><"),
+        ("<hatena:bookmarkcount>355<", "<hatena:bookmarkcount>-1<"),
+    ],
+)
+def test_unreadable_bookmark_count_is_dropped(old, new):
+    body = HATENA_BODY.replace(old.encode(), new.encode())
+    (record,) = parse_feed(body, HATENA, NOW)
+    assert record.attention == ()
+
+
+def test_unexpected_entry_page_is_not_used():
+    body = HATENA_BODY.replace(b"https://b.hatena.ne.jp/entry/s/", b"https://evil.example/")
+    (record,) = parse_feed(body, HATENA, NOW)
+    assert record.url == "https://tech.example.jp/post" and record.link_url is None
+
+
+def test_other_feeds_have_no_attention_or_link_url():
+    records = parse_feed(FIXTURE, FEED, NOW)
+    assert all(r.attention == () and r.link_url is None for r in records)
+
+
+ATOM_BOTH_DATES = (
+    b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>'
+    b"<entry><title>a</title><link href='https://e.example/a'/>"
+    b"<published>2026-10-22T01:00:00Z</published>"
+    b"<updated>2026-10-23T01:00:00Z</updated></entry></feed>"
+)
+PUBLISHED = datetime(2026, 10, 22, 1, 0, tzinfo=UTC)
+UPDATED = datetime(2026, 10, 23, 1, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "entry_date, published_at, posted_at, event",
+    [
+        ("published", PUBLISHED, None, ("published", PUBLISHED)),
+        ("updated", UPDATED, None, ("published", UPDATED)),
+        ("posted", None, UPDATED, ("posted", UPDATED)),
+    ],
+)
+def test_entry_date_selects_the_field(entry_date, published_at, posted_at, event):
+    (record,) = parse_feed(ATOM_BOTH_DATES, replace(FEED, entry_date=entry_date), NOW)
+    assert record.published_at == published_at and record.posted_at == posted_at
+    assert record.published_precision == ("datetime" if published_at else "unknown")
+    assert [(e.type, e.at) for e in record.events] == [event]
+
+
+def test_atom_with_only_updated_can_use_it_as_published():
+    # Vercel の Atom は published がなく updated だけ
+    body = ATOM_BOTH_DATES.replace(b"<published>2026-10-22T01:00:00Z</published>", b"")
+    (record,) = parse_feed(body, replace(FEED, entry_date="updated"), NOW)
+    assert record.published_at == UPDATED and record.published_precision == "datetime"
+
+
+def paged_fetch(pages, attempts=1):
+    """URL ごとの本文を返す。値が FetchError ならそれを送出する。"""
+    requested = []
+
+    def fetch(url, limits):
+        requested.append(url)
+        body = pages[url]
+        if isinstance(body, FetchError):
+            raise body
+        return Response(url, 200, body, attempts)
+
+    return fetch, requested
+
+
+def page_body(*names):
+    items = "".join(
+        f"<item><title>{n}</title><link>https://e.example/{n}</link>"
+        "<pubDate>Fri, 23 Oct 2026 01:00:00 +0000</pubDate></item>"
+        for n in names
+    )
+    return f'<rss version="2.0"><channel><title>t</title>{items}</channel></rss>'.encode()
+
+
+def test_changelog_pages_are_followed(limits):
+    feed = replace(FEED, url="https://github.blog/changelog/feed/", pages=2)
+    fetch, requested = paged_fetch(
+        {
+            feed.url: page_body("a", "b"),
+            # 取得の間に新しい記事が出ると、前のページの末尾が次のページの先頭にずれる
+            feed.url + "?paged=2": page_body("b", "c"),
+        },
+        attempts=2,
+    )
+    result = collect_feed(feed, limits, fetch_url=fetch)
+    assert requested == [feed.url, feed.url + "?paged=2"]
+    assert [r.url for r in result.records] == [f"https://e.example/{n}" for n in "abc"]
+    assert result.error is None and result.attempts == 4
+
+
+def test_failed_page_fails_the_whole_source(limits):
+    feed = replace(FEED, url="https://e.example/feed?x=1", pages=2)
+    fetch, _ = paged_fetch(
+        {feed.url: page_body("a"), feed.url + "&paged=2": FetchError("HTTP 503", 3, 503)}
+    )
+    result = collect_feed(feed, limits, fetch_url=fetch)
+    assert result.records == () and result.error == "HTTP 503" and result.attempts == 4
+
+
+def test_non_feed_second_page_fails_the_whole_source(limits):
+    feed = replace(FEED, pages=2)
+    fetch, _ = paged_fetch({feed.url: page_body("a"), feed.url + "?paged=2": b"<html></html>"})
+    result = collect_feed(feed, limits, fetch_url=fetch)
+    assert result.records == () and result.error == "フィードとして読めない応答"
+
+
+def test_first_page_failure_stops_paging(limits):
+    feed = replace(FEED, pages=3)
+    fetch, requested = paged_fetch({feed.url: FetchError("HTTP 404", 1, 404)})
+    result = collect_feed(feed, limits, fetch_url=fetch)
+    assert requested == [feed.url] and result.error == "HTTP 404"
+
+
+def test_duplicate_in_one_page_keeps_the_first(limits):
+    body = page_body("a", "b").replace(b"https://e.example/b", b"https://e.example/a")
+    result = collect_feed(FEED, limits, fetch_url=fake_fetch(body))
+    assert [(r.url, r.title) for r in result.records] == [("https://e.example/a", "a")]
+
+
+def test_page_without_new_entries_is_warned(limits, caplog):
+    feed = replace(FEED, pages=2)
+    fetch, _ = paged_fetch({feed.url: page_body("a"), feed.url + "?paged=2": page_body("a")})
+    with caplog.at_level("WARNING"):
+        result = collect_feed(feed, limits, fetch_url=fetch)
+    assert result.error is None and len(result.records) == 1
+    assert "2ページ目に新しいエントリーがない" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -83,7 +279,7 @@ def test_atom_updated_is_not_used_as_published():
         b"<entry><title>a</title><link href='https://e.example/a'/>"
         b"<updated>2026-10-23T01:00:00Z</updated></entry></feed>"
     )
-    (record,) = parse_feed(body, "rss:x", NOW)
+    (record,) = parse_feed(body, FEED, NOW)
     assert record.published_at is None and record.events == ()
 
 
@@ -100,7 +296,7 @@ def test_body_is_not_opened_as_file_path(tmp_path):
     # feedparser は bytes をファイルのパスとして開こうとする。本文として読ませる
     path = secret_file(tmp_path)
     with pytest.raises(ValueError):
-        parse_feed(str(path).encode(), "rss:x", NOW)
+        parse_feed(str(path).encode(), FEED, NOW)
 
 
 def xxe_body(target):
@@ -113,12 +309,12 @@ def xxe_body(target):
 
 
 def test_external_file_entity_is_not_resolved(tmp_path):
-    records = parse_feed(xxe_body(f"file://{secret_file(tmp_path)}"), "rss:x", NOW)
+    records = parse_feed(xxe_body(f"file://{secret_file(tmp_path)}"), FEED, NOW)
     assert "SECRET" not in records[0].title
 
 
 def test_external_http_entity_is_not_fetched(server):
-    parse_feed(xxe_body(server.base + "/xxe"), "rss:x", NOW)
+    parse_feed(xxe_body(server.base + "/xxe"), FEED, NOW)
     assert server.paths == []
 
 
@@ -133,7 +329,7 @@ def test_entity_expansion_is_bounded():
         "<link>https://e.example/a</link></item></channel></rss>"
     ).encode()
     try:
-        records = parse_feed(body, "rss:x", NOW)
+        records = parse_feed(body, FEED, NOW)
     except ValueError:
         return  # 読めない応答として止まる
     assert all(len(r.title) < 1_000_000 for r in records)
