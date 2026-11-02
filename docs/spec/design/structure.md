@@ -65,6 +65,7 @@
 │       ├── orchestrator.py           # 統括スクリプト（ホストで動く。docker compose run を呼ぶ）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
+│       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）
 │       ├── stages/                   # ① ③ ⑤ の各段階（worker で動く）
 │       ├── collect/                  # last30days-skill のアダプタ、RSS、Qiita、GitHub Releases、GitHub の急上昇（D-03・D-13）
 │       ├── agent/                    # ② ④ の呼び出しの境界（claude の引数・入出力。AI の差し替えの境界）
