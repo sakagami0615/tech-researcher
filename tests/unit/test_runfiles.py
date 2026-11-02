@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -60,7 +60,16 @@ def test_new_run_id():
 
 @pytest.mark.parametrize(
     "run_id",
-    ["", "20261024-060000", "obs-20261024-060000-abcd", "20261024-060000-ABCD", "../x", "dry-"],
+    [
+        "",
+        "20261024-060000",
+        "obs-20261024-060000-abcd",
+        "20261024-060000-ABCD",
+        "../x",
+        "dry-",
+        "20261324-060000-abcd",  # 13月
+        "20260230-060000-abcd",  # 2月30日
+    ],
 )
 def test_rejects_malformed_run_id(tmp_path, run_id):
     with pytest.raises(ValueError, match="実行 ID"):
@@ -78,6 +87,7 @@ def test_paths(tmp_path):
     assert dry.dir == tmp_path / "dry-run" / DRY
     assert dry.log == dry.dir / "log.jsonl"
     assert dry.db == prod.db  # ドライランも本番の DB を（読み取り専用で）読む
+    assert prod.started_on == dry.started_on == date(2026, 10, 24)
 
 
 def test_production_files_are_removed_on_success(tmp_path):

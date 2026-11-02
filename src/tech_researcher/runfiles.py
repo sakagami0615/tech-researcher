@@ -13,7 +13,7 @@ import shutil
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from tech_researcher.periods import JST
@@ -21,7 +21,7 @@ from tech_researcher.periods import JST
 DATA_DIR_ENV = "TR_DATA_DIR"
 DRY_RUN_PREFIX = "dry-"
 # `YYYYMMDD-HHMMSS-xxxx`（JST の開始時刻と4桁の16進数。data-model.md 3.2）。ドライランは先頭に dry-
-_RUN_ID = re.compile(r"(dry-)?(\d{4})(\d{2})\d{2}-\d{6}-[0-9a-f]{4}")
+_RUN_ID = re.compile(r"(dry-)?(\d{4})(\d{2})(\d{2})-\d{6}-[0-9a-f]{4}")
 _LOCK = ".lock"
 
 
@@ -67,6 +67,12 @@ class RunFiles:
     @property
     def dry_run(self) -> bool:
         return self.run_id.startswith(DRY_RUN_PREFIX)
+
+    @property
+    def started_on(self) -> date:
+        """実行を始めた日（JST）。各段階は、これから対象と期間を決める（同じ実行の段階で
+        日付がずれないように。過去の期間を指定する引数は作らない。US-E6-05）。"""
+        return _check_run_id(self.run_id)
 
     @property
     def db(self) -> Path:
@@ -155,6 +161,12 @@ def _open_lock(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
 
 
-def _check_run_id(run_id: str) -> None:
-    if not _RUN_ID.fullmatch(run_id):
-        raise ValueError(f"実行 ID の形でない: {run_id!r}")
+def _check_run_id(run_id: str) -> date:
+    """形を確かめ、開始日を返す。日付として正しくないもの（13月など）も形の誤りにする。"""
+    match = _RUN_ID.fullmatch(run_id)
+    try:
+        if match is None:
+            raise ValueError
+        return date(*map(int, match.group(2, 3, 4)))
+    except ValueError:
+        raise ValueError(f"実行 ID の形でない: {run_id!r}") from None

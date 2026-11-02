@@ -1,0 +1,36 @@
+# worker・agent のコンテナ（D-04、structure.md 2章・3章）。agent は #18 で足す。
+# 統括スクリプト（ホスト）が `docker compose run --rm -T <サービス> …` で1段階ずつ起動する。
+# どのコンテナにも Docker のソケットを渡さない。
+name: tech-researcher
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    image: tech-researcher-worker
+    # データ用フォルダの持ち主（運用者）で動かす。root にはしない
+    # TR_UID=0 にはしない（sudo の下で $(id -u) とすると 0 になる）
+    user: "${TR_UID:-1000}:${TR_GID:-1000}"
+    # PID 1 を init にし、シグナルを転送して子プロセス（last30days-skill）を回収する
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TR_DATA_DIR: /data
+    volumes:
+      # 設定は読み取り専用（structure.md 2.2）
+      - type: bind
+        source: ./config
+        target: /app/config
+        read_only: true
+      # 実行データ（DB・ログ・実行中のファイル・ドライランの出力）。worker にだけマウントする（D-22）。
+      # コンテナの中からは /data に見えるので、リポジトリの外かどうかは統括スクリプトがホストで確かめる
+      - type: bind
+        source: ${TR_DATA_DIR:?TR_DATA_DIR にデータ用フォルダ（リポジトリの外の絶対パス）を設定する}
+        target: /data

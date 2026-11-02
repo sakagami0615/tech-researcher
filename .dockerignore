@@ -1,0 +1,9 @@
+# ビルドに使うものだけを送る（許可リスト）。.git・.env・実行データ・指示ファイルを入れない
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!third_party/last30days/LICENSE
+!third_party/last30days/skills/last30days/scripts/
+**/__pycache__
