@@ -49,7 +49,7 @@
 
 ### 呼び出すときの注意
 
-- セットアップスクリプトは、`git submodule update --init third_party/last30days` のあとに `git -C third_party/last30days sparse-checkout set --no-cone /skills/last30days/scripts/ /LICENSE` を実行する。設定後に `CLAUDE.md`・`AGENTS.md`・`SKILL.md` がないことを確かめ、あれば失敗にする
+- セットアップスクリプトは、`git submodule update --init third_party/last30days` のあとに `git -C third_party/last30days sparse-checkout init --no-cone` と `git -C third_party/last30days sparse-checkout set /skills/last30days/scripts/ /LICENSE` を実行する。`set --no-cone` は Git 2.35 以降にしかなく、それより前の版では `--no-cone` がパターンとして書き込まれる。`init` で非 cone にすると `set` がその設定を引き継ぐので、どちらの版でも同じ結果になる。設定後に `CLAUDE.md`・`AGENTS.md`・`SKILL.md` がないことを確かめ、あれば失敗にする
 - 手順では `git clone --recurse-submodules` を使わない。sparse-checkout の設定が引き継がれず、一時的に last30days-skill の全ファイル（`CLAUDE.md` を含む）が置かれるため
 - アダプタは、子プロセスに許可した環境変数だけを渡す（`PATH`・`HOME`・`LANG`・収集用トークンなど。D-05）
   - 推論プロバイダのキー（`GOOGLE_API_KEY`・`GEMINI_API_KEY`・`GOOGLE_GENAI_API_KEY`・`OPENAI_API_KEY`・`XAI_API_KEY`・`OPENROUTER_API_KEY`）は渡さない。あると `--plan` を付けても、取得したタイトル・抜粋がそのプロバイダへ送られる
