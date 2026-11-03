@@ -19,7 +19,7 @@ from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.period_filter import in_period
 from tech_researcher.collect.popularity import judge_feed_entries, mark_thresholds
 from tech_researcher.collect.records import SourceResult
-from tech_researcher.collect.rss import collect_feed
+from tech_researcher.collect.rss import collect_feed, feed_source_id
 from tech_researcher.config import Config, Feed, Limits
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
@@ -53,7 +53,7 @@ def run_collect(
     log.write("collect", "start")
     feeds = [f for f in config.feeds if f.enabled]
     results = [_collect_one(collect, f, config.limits, log) for f in feeds]
-    popular = {f"rss:{f.id}" for f in feeds if f.kind == "popular"}
+    popular = {feed_source_id(f) for f in feeds if f.kind == "popular"}
     judged = judge_feed_entries(results, popular, target, db, write=bool(write_db))
     records = mark_thresholds(judged.records, config.attention_thresholds)
     items = [i for i in aggregate(records) if in_period(i, target)]
@@ -79,7 +79,7 @@ def _collect_one(collect: CollectFeed, feed: Feed, limits: Limits, log: RunLog) 
         result = collect(feed, limits)
     except Exception as e:
         # 例外の中身（外部由来の文を含みうる）は、マスクするログの exception にだけ残す
-        result = SourceResult(f"rss:{feed.id}", (), 0, type(e).__name__)
+        result = SourceResult(feed_source_id(feed), (), 0, type(e).__name__)
         log.write(
             "collect", "failure", source=result.source_id, error_category=type(e).__name__, exc=e
         )

@@ -61,8 +61,8 @@
 │   └── tr-run                        # 実行の唯一の入口（cron と外側のスキルの両方が呼ぶ）
 ├── src/
 │   └── tech_researcher/
-│       ├── cli.py                    # 統括と各段階の入口
-│       ├── orchestrator.py           # 統括スクリプト（ホストで動く。docker compose run を呼ぶ）
+│       ├── cli.py                    # 各段階の入口（worker で動く）
+│       ├── orchestrator.py           # 統括スクリプトとその入口（ホストで動く。bin/tr-run が呼び、docker compose run を呼ぶ）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
 │       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）
@@ -134,7 +134,7 @@ F1〜F14 は公式ドキュメントで確かめた（2026-10-25）。F15〜F18 
 ### 3.2 cron と bin/tr-run
 
 - ホストの crontab に、日次 6:00・週次 月曜 7:00（JST、D-09）で `bin/tr-run daily`・`bin/tr-run weekly` を書く。出力は `${TR_DATA_DIR}/logs/cron.log` に足していく
-- `bin/tr-run` は、二重起動を防ぐロック（`flock`）と、ジョブ全体の上限時間（6章）を付けて統括スクリプトを起動する。ロックは日次と週次で別にする（月曜は日次と週次の実行が重なりうるが、同じ種類の二重起動だけを防ぐ）
+- `bin/tr-run` は、二重起動を防ぐロック（`flock`）と、ジョブ全体の上限時間（6章）を付けて統括スクリプトを起動する。ロックは日次と週次で別にする（月曜は日次と週次の実行が重なりうるが、同じ種類の二重起動だけを防ぐ）。ロックとジョブ全体の上限は、`bin/tr-run` が起動する Python の入口（統括スクリプトの親プロセス）が持ち、統括スクリプトの本体は子プロセスで動かす。上限を超えたら子プロセスのグループとその実行のコンテナを止める
 - `bin/tr-run` が受け付ける引数は、`daily`・`weekly` と `--dry-run` だけにする。知らない引数は拒否する。過去の期間を指定する引数は作らない（US-E6-05）
 - `bin/tr-run` が標準出力に出すのは、コードが作る定型の要約だけにする：実行 ID・日次か週次か・対象日（週）・結果の種別（レポート・不合格・実行エラー・ドライラン）・Issue の番号と URL・件数・取得できなかった情報源の名前（設定ファイルの名前）・ドライランの出力先。収集したタイトル・本文と AI の出力は出さない
 - ホストの時刻帯が JST でない場合の crontab の書き方（UTC に直すか、cron の実装が対応していれば `CRON_TZ` を使うか）は、運用サーバーの cron の実装を確かめて決める。対象期間の計算はホストの時刻帯に依存させず、コードが JST で行う
@@ -222,6 +222,9 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 
 - Claude のトークンを渡すのは agent コンテナだけ。cron の実行では外側の Claude Code を使わないので、外側用のトークンは要らない
 - 統括スクリプト（ホスト）は env_file の中身を読まず、compose が各コンテナにだけ渡す。統括スクリプトから compose に渡す環境変数は、許可したものだけに絞る（F3 の `ANTHROPIC_API_KEY` などがホストのシェルにあっても、コンテナに入れない）
+- compose に渡すのは `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_UID`・`TR_GID` と `DOCKER_CONFIG` だけにする。リポジトリの `.env` は読ませない（`--env-file /dev/null`）
+- `DOCKER_CONFIG` は、このプロジェクト専用のフォルダ（`${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`、権限 700）にする。利用者の `~/.docker/config.json` の `proxies` は compose がコンテナの環境変数に入れるため。`TR_DATA_DIR` の下には置かない（worker にマウントするので、コンテナの中から次のコンテナの設定を書き換えられる）。Docker のコンテキストは使えず、デーモンは `DOCKER_HOST` で指定する
+- `TR_UID`・`TR_GID` を省略したときは、`bin/tr-run` を動かしている人の ID を渡す。0（root）は拒否する
 
 ### 3.8 PoC で確認すること
 
@@ -448,6 +451,7 @@ last30days-skill は `--days N --as-of YYYY-MM-DD` で期間を受け取り、�
 ```
 ${TR_DATA_DIR}/
 ├── db/tech-researcher.sqlite3
+├── locks/                             # bin/tr-run の種類ごとのロック（flock）
 ├── logs/
 │   ├── cron.log                       # bin/tr-run と cron の出力
 │   └── 2026/10/<実行ID>.jsonl          # 1回の実行のログ（統括スクリプトと worker が書く）

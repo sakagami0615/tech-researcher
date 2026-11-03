@@ -28,7 +28,7 @@ def collect_feed(feed: Feed, limits: Limits, *, fetch_url=fetch) -> SourceResult
     情報源全体を失敗にする。重なったエントリーは先に出たものを残す。
     2ページ目以降に新しいエントリーがなければ警告をログに残す（ページ送りが効いていないおそれ）。
     """
-    source_id = f"rss:{feed.id}"
+    source_id = feed_source_id(feed)
     fetched_at = datetime.now(UTC)
     records: dict[str, Record] = {}
     attempts = 0
@@ -50,6 +50,11 @@ def collect_feed(feed: Feed, limits: Limits, *, fetch_url=fetch) -> SourceResult
     if not records:
         log.info("%s：エントリーが0件", source_id)
     return SourceResult(source_id, tuple(records.values()), attempts)
+
+
+def feed_source_id(feed: Feed) -> str:
+    """フィードの情報源 ID（統括スクリプトが表示名に戻すのにも使う）。"""
+    return f"rss:{feed.id}"
 
 
 def _page_url(url: str, page: int) -> str:
@@ -103,7 +108,7 @@ def parse_feed(body: bytes, feed: Feed, fetched_at: datetime) -> list[Record]:
             events.append(Event("posted", posted_at))
         records.append(
             Record(
-                source_id=f"rss:{feed.id}",
+                source_id=feed_source_id(feed),
                 url=page_url or url,
                 link_url=url if page_url else None,
                 title=entry.get("title") or "",
