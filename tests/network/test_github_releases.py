@@ -21,7 +21,7 @@ TOKEN = os.environ.get("GITHUB_TOKEN") or None
 
 @pytest.mark.network
 @pytest.mark.parametrize("repo", CONFIG.github_releases.repos)
-def test_configured_repo_releases_can_be_fetched(repo):
+def test_configured_repo_releases_can_be_fetched(repo, caplog):
     releases = CONFIG.github_releases
     # 30日分を見て、期間の判定まで通ることを確かめる
     target = daily_target(datetime.now(JST).date(), 30)
@@ -32,6 +32,7 @@ def test_configured_repo_releases_can_be_fetched(repo):
         token=TOKEN,
     )
     assert result.error is None
+    assert "取りこぼしたおそれ" not in caplog.text, "ページの上限に達した。MAX_PAGES を見直す"
     items = [i for i in aggregate(result.records) if in_period(i, target)]
     assert items, "30日でリリースが0件。追跡先として妥当か確かめる"
     assert any(r.primary_text for r in result.records), "本文のあるリリースがない"
