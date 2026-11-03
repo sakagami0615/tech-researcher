@@ -1,6 +1,11 @@
 """外部への HTTP 要求（structure.md 6.3、D-21）。標準ライブラリだけで、タイムアウトと再試行を包む。
 
 再試行するのは、タイムアウト・名前解決や接続の失敗・HTTP 429・5xx。ほかの 4xx は再試行しない。
+
+Accept-Encoding は送らない（圧縮を求めない）。それでも Content-Encoding: gzip で返すサーバーが
+あるため（Google DeepMind の CDN）、gzip・x-gzip の本文は展開する。判定はヘッダだけで行い、
+本文の先頭バイトは見ない（観察した gzip の応答は必ずヘッダを付けていた。.gz のファイルそのものを
+取得したときに、勝手に展開しないようにする）。
 """
 
 import http.client
@@ -10,6 +15,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -83,6 +89,9 @@ def _get(open_url, request, attempt: int) -> Response:
             body = res.read(MAX_BODY_BYTES + 1)
             if len(body) > MAX_BODY_BYTES:
                 raise FetchError(f"応答が {MAX_BODY_BYTES} バイトを超えた", attempt)
+            encoding = (res.headers.get("Content-Encoding") or "").strip().lower()
+            if encoding in ("gzip", "x-gzip"):
+                body = _gunzip(body, attempt)
             return Response(res.geturl(), res.status, body, attempt)
     except urllib.error.HTTPError as e:
         e.close()
@@ -97,6 +106,27 @@ def _get(open_url, request, attempt: int) -> Response:
         if _transient(e) or isinstance(e, http.client.HTTPException):
             raise _Retryable(f"{type(e).__name__}: {e}") from e
         raise FetchError(f"{type(e).__name__}: {e}", attempt) from e
+
+
+def _gunzip(data: bytes, attempt: int) -> bytes:
+    """gzip を展開する。展開後も MAX_BODY_BYTES を超えた時点で止める（圧縮爆弾対策）。
+
+    壊れた gzip はサーバーの返す中身の誤りで、再試行しても直らないため再試行しない。
+    """
+    out = bytearray()
+    while data:  # 複数のメンバーを連結した gzip もある
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            # max_length は 1 以上（0 だと上限なし）。上限を 1 バイト超えるまでで止める
+            out += d.decompress(data, MAX_BODY_BYTES + 1 - len(out))
+        except zlib.error as e:
+            raise FetchError(f"gzip を展開できない：{e}", attempt) from e
+        if len(out) > MAX_BODY_BYTES:
+            raise FetchError(f"展開した応答が {MAX_BODY_BYTES} バイトを超えた", attempt)
+        if not d.eof:
+            raise FetchError("gzip を展開できない：途中で終わっている", attempt)
+        data = d.unused_data.lstrip(b"\0")  # 末尾のゼロ埋めは無視する（gzip モジュールと同じ）
+    return bytes(out)
 
 
 def _transient(reason) -> bool:

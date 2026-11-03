@@ -1,3 +1,4 @@
+import gzip
 import http.client
 import io
 import socket
@@ -17,6 +18,12 @@ URL = "https://feed.example/rss"
 class FakeResponse(io.BytesIO):
     status = 200
 
+    def __init__(self, body, content_encoding=None):
+        super().__init__(body)
+        self.headers = Message()
+        if content_encoding is not None:
+            self.headers["Content-Encoding"] = content_encoding
+
     def geturl(self):
         return URL
 
@@ -29,7 +36,7 @@ def http_error(code, retry_after=None):
 
 
 def scripted(*outcomes):
-    """順に例外を投げるか本文を返す open_url。受け取った要求を記録する。"""
+    """順に例外を投げるか本文（bytes・FakeResponse）を返す open_url。要求を記録する。"""
     requests = []
 
     def open_url(request):
@@ -37,6 +44,8 @@ def scripted(*outcomes):
         outcome = outcomes[len(requests) - 1]
         if isinstance(outcome, Exception):
             raise outcome
+        if isinstance(outcome, FakeResponse):
+            return outcome
         return FakeResponse(outcome)
 
     return open_url, requests
@@ -99,6 +108,85 @@ def test_too_large_body_is_refused(limits, monkeypatch):
     monkeypatch.setattr(tr_http, "MAX_BODY_BYTES", 3)
     result, _, _ = run(limits, b"1234")
     assert isinstance(result, FetchError) and "超えた" in str(result)
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "x-gzip", " GZIP "])
+def test_gzip_body_is_decompressed(limits, encoding):
+    response, _, _ = run(limits, FakeResponse(gzip.compress(b"<rss/>"), encoding))
+    assert response.body == b"<rss/>"
+
+
+def test_concatenated_gzip_members_are_all_decompressed(limits):
+    body = gzip.compress(b"<rss>") + gzip.compress(b"</rss>")
+    response, _, _ = run(limits, FakeResponse(body, "gzip"))
+    assert response.body == b"<rss></rss>"
+
+
+def test_trailing_zero_padding_is_ignored(limits):
+    response, _, _ = run(limits, FakeResponse(gzip.compress(b"<rss/>") + b"\0\0\0", "gzip"))
+    assert response.body == b"<rss/>"
+
+
+def test_empty_gzip_body_is_empty(limits):
+    response, _, _ = run(limits, FakeResponse(b"", "gzip"))
+    assert response.body == b""
+
+
+def test_uncompressed_body_is_kept_even_if_it_looks_like_gzip(limits):
+    # ヘッダがなければ、gzip の先頭バイトで始まっていても展開しない
+    data = gzip.compress(b"<rss/>")
+    response, _, _ = run(limits, FakeResponse(data))
+    assert response.body == data
+
+
+def test_gzip_body_at_limit_is_accepted(limits, monkeypatch):
+    monkeypatch.setattr(tr_http, "MAX_BODY_BYTES", 100)
+    response, _, _ = run(limits, FakeResponse(gzip.compress(b"a" * 100), "gzip"))
+    assert response.body == b"a" * 100
+
+
+def test_gzip_bomb_is_refused_without_full_decompression(limits, monkeypatch):
+    monkeypatch.setattr(tr_http, "MAX_BODY_BYTES", 2000)
+    bomb = gzip.compress(b"\0" * 1_000_000)  # 約 1KB が 1MB に広がる
+    assert len(bomb) < 2000
+    calls = []
+    real = tr_http.zlib.decompressobj
+
+    class Spy:
+        def __init__(self, *args):
+            self._d = real(*args)
+
+        def decompress(self, data, max_length):
+            out = self._d.decompress(data, max_length)
+            calls.append(len(out))
+            return out
+
+    monkeypatch.setattr(tr_http.zlib, "decompressobj", Spy)
+    result, waits, requests = run(limits, FakeResponse(bomb, "gzip"), b"never")
+    assert isinstance(result, FetchError) and "展開した応答" in str(result)
+    assert (len(requests), waits) == (1, [])  # 再試行しない
+    assert calls == [2001]  # 上限を 1 バイト超えたところで展開を止めた
+
+
+def test_gzip_members_over_limit_in_total_are_refused(limits, monkeypatch):
+    monkeypatch.setattr(tr_http, "MAX_BODY_BYTES", 100)
+    body = gzip.compress(b"a" * 60) + gzip.compress(b"b" * 60)
+    result, _, _ = run(limits, FakeResponse(body, "gzip"))
+    assert isinstance(result, FetchError) and "展開した応答" in str(result)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not gzip at all",
+        gzip.compress(b"<rss/>" * 100)[:-20],  # 途中で切れている
+        b"\x1f\x8b\x08\x00broken",
+    ],
+)
+def test_broken_gzip_is_an_error_without_retry(limits, body):
+    result, waits, requests = run(limits, FakeResponse(body, "gzip"), b"never")
+    assert isinstance(result, FetchError) and "gzip" in str(result)
+    assert (len(requests), waits) == (1, [])
 
 
 @pytest.mark.parametrize("code", [400, 401, 403, 404, 410])
