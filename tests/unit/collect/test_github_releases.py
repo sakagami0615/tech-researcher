@@ -189,6 +189,20 @@ def test_pages_are_followed_until_period_start(limits, caplog):
     assert "取りこぼしたおそれ" not in caplog.text
 
 
+def test_pages_are_not_cut_by_one_old_release(limits):
+    """一覧が公開日時の順に並ぶ保証はないので、古いものが混ざっても次のページを取る。"""
+    mixed = json.loads(page_of(0, "2026-11-02T12:00:00Z"))
+    mixed[5]["published_at"] = "2026-09-01T00:00:00Z"
+    api = FakeApi(
+        {
+            releases_url("example/tool", 1): json.dumps(mixed).encode(),
+            releases_url("example/tool", 2): page_of(30, "2026-11-02T13:00:00Z", count=3),
+        }
+    )
+    result = collect_releases(RELEASES, TARGET.period, limits, get=api)
+    assert len(api.calls) == 2 and len(result.records) == 33
+
+
 def test_possible_truncation_is_logged(limits, caplog):
     recent = "2026-11-02T12:00:00Z"
     api = FakeApi({releases_url("example/tool", p): page_of(p * 30, recent) for p in range(1, 7)})
@@ -209,7 +223,7 @@ def test_readmes_are_fetched_for_given_repos(limits):
             readme_url("example/empty"): b"  \n",
         }
     )
-    names = ["example/tool", "example/none", "example/broken", "example/empty", "example/tool"]
+    names = ["example/tool", "example/none", "example/broken", "example/empty", "Example/Tool"]
     result = fetch_readmes(names, limits, get=api)
     assert [(url, accept) for url, accept, _ in api.calls] == [
         (readme_url(n), RAW) for n in names[:4]
@@ -224,9 +238,9 @@ def test_readmes_are_fetched_for_given_repos(limits):
 
 def test_readme_names_must_be_repo_names(limits):
     api = FakeApi({})
-    result = fetch_readmes(["../../user", "a/..", "a/b/c"], limits, get=api)
+    result = fetch_readmes(["../../user", "a/..", "a/b/c", None], limits, get=api)
     assert api.calls == []
-    assert set(result.errors) == {"../../user", "a/..", "a/b/c"}
+    assert set(result.errors) == {"../../user", "a/..", "a/b/c", "None"}
 
 
 def test_readme_budget_stops_the_rest(limits):
@@ -364,19 +378,44 @@ class _RedirectHandler(BaseHTTPRequestHandler):
         pass
 
 
-def test_token_is_not_sent_after_redirect(limits):
+def test_redirect_is_not_followed(limits):
+    """名前を変えたリポジトリの 301 には従わない。数えない要求も、トークンなしの要求も出さない。"""
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
     srv.seen = []
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
         url = f"http://127.0.0.1:{srv.server_address[1]}/from"
-        assert api_get(url, JSON, limits, TOKEN).body == b"[]"
+        with pytest.raises(FetchError) as caught:
+            api_get(url, JSON, limits, TOKEN)
     finally:
         srv.shutdown()
         srv.server_close()
         thread.join()
-    assert srv.seen == [("/from", f"Bearer {TOKEN}"), ("/to", None)]
+    assert (caught.value.status, caught.value.attempts) == (301, 1)
+    assert srv.seen == [("/from", f"Bearer {TOKEN}")]
+
+
+def test_token_with_invalid_characters_is_rejected_without_its_value(limits):
+    seen = []
+
+    def open_url(req):
+        seen.append(req)
+        return _Opened(req.full_url)
+
+    with pytest.raises(FetchError) as caught:
+        api_get(releases_url("a/b"), JSON, limits, "abc\ndef-secret", open_url=open_url)
+    assert "secret" not in str(caught.value) and seen == []
+    # 末尾の改行（CRLF の env_file）は落として使う
+    api_get(releases_url("a/b"), JSON, limits, f"{TOKEN}\r\n", open_url=open_url)
+    assert seen[0].unredirected_hdrs["Authorization"] == f"Bearer {TOKEN}"
+    result = collect_releases(
+        RELEASES,
+        TARGET.period,
+        limits,
+        get=lambda url, accept, lim: api_get(url, accept, lim, "x\ny-secret", open_url=open_url),
+    )
+    assert "secret" not in result.error
 
 
 @pytest.mark.parametrize(
@@ -396,6 +435,12 @@ def test_token_is_not_sent_after_redirect(limits):
         ("[![b](https://a.example/badge.svg)](https://a.example/ci)", ("https://a.example/ci",)),
         ("[local](docs/a.md) [abs](/x)", ()),
         ("javascript:alert(1) ftp://a.example/x", ()),
+        ('<a href="https://a.example/x?b=1&amp;c=2">x</a>', ("https://a.example/x?b=1&c=2",)),
+        (
+            "[![b][badge]][ci]\n\n[badge]: https://a.example/b.svg\n[ci]: https://a.example/ci",
+            ("https://a.example/ci",),
+        ),
+        ("&lt;img src=&quot;https://a.example/i.png&quot;&gt;", ()),
     ],
 )
 def test_markdown_links(text, links):
