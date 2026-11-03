@@ -9,12 +9,19 @@ from collections.abc import Iterator
 from itertools import count
 from pathlib import Path
 
+from tech_researcher.db.schema import BUSY_TIMEOUT_MS, check_version
+
 
 def open_readonly(path: Path) -> sqlite3.Connection | None:
     """読み取り専用で開く。DB がなければ作らずに None を返す。
 
     `mode=ro` の URI で開くので、ファイルがなくても作られず、書き込みは SQLite が拒む。
-    多重防御として `query_only` も有効にする。WAL の DB を開けるかは #26 で確かめる。
+    多重防御として `query_only` も有効にする。
+
+    本番の DB は WAL なので、本番の実行が書いている途中でも、コミット済みの内容を読める。
+    `-wal`・`-shm` のファイルがなければ SQLite が空のものを作る（DB の中身は変わらず、
+    次に書く接続がそのまま使う）。そのため DB のフォルダには書き込める必要がある。
+    表の版がコードと違えば SchemaError にする（読み取り専用では版を上げられないため）。
     """
     if not path.is_file():
         return None
@@ -22,6 +29,8 @@ def open_readonly(path: Path) -> sqlite3.Connection | None:
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         conn.execute("PRAGMA query_only = ON")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        check_version(conn.execute("PRAGMA user_version").fetchone()[0])
     except BaseException:
         conn.close()
         raise
