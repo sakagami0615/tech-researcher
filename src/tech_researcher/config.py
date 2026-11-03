@@ -322,12 +322,28 @@ def _github_repos(sources: _Table | None) -> GitHubRepos | None:
     return result
 
 
+# GitHub のリポジトリ名（owner/repo）。API の URL のパスに入れるので、これ以外は受け付けない。
+# owner は英数字と -（先頭は英数字、39字まで）、repo は英数字と . _ -（100字まで。. と .. は除く）
+REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.\.?$)[A-Za-z0-9._-]{1,100}")
+
+
 def _github_releases(sources: _Table | None) -> GitHubReleases | None:
     t = _source(sources, "github_releases")
     if t is None:
         return None
     result = GitHubReleases(t.value("enabled", bool), t.text("display_name"), t.strings("repos"))
     t.done()
+    path = t.path_of("repos")
+    if not result.repos:
+        raise ConfigError(f"{path}: 1つ以上書く")
+    for repo in result.repos:
+        if not REPO_NAME.fullmatch(repo):
+            raise ConfigError(f"{path}: owner/repo の形にする（{repo!r}）")
+    # GitHub のリポジトリ名は大文字・小文字を区別しない
+    folded = [repo.casefold() for repo in result.repos]
+    duplicated = sorted({r for r in result.repos if folded.count(r.casefold()) > 1})
+    if duplicated:
+        raise ConfigError(f"{path}: 重複している {', '.join(duplicated)}")
     return result
 
 

@@ -145,6 +145,13 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - last30days-skill の agent JSON（`schema_version` 1.4）から収集レコードへの対応表と、その契約テスト（D-01）
   - 実装での対応（`src/tech_researcher/collect/last30days.py`）：`results[].source` の `hackernews`・`github` → `source_id` の `hackernews`・`github_search`。`url` → `url`、`title` → `title`、`summary` → `excerpt`（タイトルと同じなら空）、`published_at`（UTC の日付）→ `published_at`（UTC の 0:00、`published_precision` は `date`）と出来事 `published`、`engagement` の数値 → `attention`（`hn_points`・`hn_comments`・`github_reactions`・`github_comments`）、GitHub の URL の `owner/repo` → `meta_terms`
   - agent JSON には HN の item ページの URL がない。そのため HN のレコードは、2.3 と違い、`url` に記事の URL（記事のない投稿は item ページ）を入れ、`link_url` は空にする
+- GitHub Releases・README から収集レコードへの対応表
+  - 実装での対応（`src/tech_researcher/collect/github_releases.py`）：Releases は `source_id` を `github_releases` とし、`html_url` → `url`、`name`（空なら `tag_name`）→ `title`、`published_at` → `published_at`（`published_precision` は `datetime`）と出来事 `released`、`body` → `primary_text`（`github_release`）、`owner/repo` とタグ名 → `meta_terms`。`excerpt` は持たない（抜粋は DB に保存されるため。2.7）。下書きとプレリリース（本文がほとんどない版が多い）は除く
+  - README は、渡されたリポジトリ（急上昇・新規の検出が選んだもの）について取り、そのリポジトリの項目のレコードの `primary_text`（`github_readme`）に入れる
+  - 候補リンクは、リリース本文・README の Markdown の絶対 URL から集める。画像（バッジなど）と相対リンクは集めない
+  - 1つのリポジトリの Releases が取れなければ、情報源全体を失敗にする（RSS・Qiita と同じ）。README は1件の失敗で止めず、README がないもの（HTTP 404）は失敗にしない
+  - GitHub REST のリダイレクトには従わない。名前を変えたリポジトリ（HTTP 301）は失敗にし、設定を新しい名前に直す。要求の回数に数えない要求や、収集用トークンをリダイレクト先に送ることを避けるため
+  - 一覧が公開日時の順に並ぶ保証はないので、ページの中のすべてが期間の始まりより前になるまでページを送る（1ページ30件、最大5ページ）
 
 ## 3. SQLite のテーブル
 
