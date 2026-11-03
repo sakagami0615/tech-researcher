@@ -466,6 +466,12 @@ def _run_stages(job: Job) -> Summary:
     if collected is None:
         return job.summary("error", failed_stage="collect", error_category=category)
     fields = {"items": collected["items"], "failed_sources": collected["failed_sources"]}
+    if collected["sources"] and len(collected["failed_sources"]) == collected["sources"]:
+        # すべての情報源が取得できないときは、0件のレポートにせず実行エラーにする（US-E6-03）
+        job.log.write("collect", "failure", error_category="all_sources_failed")
+        return job.summary(
+            "error", failed_stage="collect", error_category="all_sources_failed", **fields
+        )
     if job.cadence == "weekly":
         # 週次の ② 〜 ⑤ はまだない。本番はレポートを作れないので実行エラーにする
         if job.files.dry_run:
@@ -507,12 +513,15 @@ def _analyze(job: Job) -> str | None:
     入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。
     """
     job.log.write("analyze", "start")
-    data = json.loads((job.files.dir / AGENT_INPUT).read_text(encoding="utf-8"))
     try:
+        data = json.loads((job.files.dir / AGENT_INPUT).read_text(encoding="utf-8"))
         body = encode_input(data, job.limits.agent_input_bytes)
     except InputTooLarge as e:
         job.log.write("analyze", "failure", error_category="input_too_large", detail=str(e))
         return "input_too_large"
+    except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
+        job.log.write("analyze", "failure", error_category="bad_input", exc=e)
+        return "bad_input"
     try:
         output = call_agent(job, body)
     except NotImplementedError:
@@ -578,22 +587,22 @@ def _stage_summary(stdout: str, names: Mapping[str, str]) -> dict | None:
     data = _last_json(stdout)
     if data is None:
         return None
-    items, failed = data.get("items"), data.get("failed_sources")
-    if not _count(items):
+    items, sources, failed = data.get("items"), data.get("sources"), data.get("failed_sources")
+    if not (_count(items) and _count(sources)):
         return None
     if not isinstance(failed, list) or not all(isinstance(s, str) and s in names for s in failed):
         return None
-    return {"items": items, "failed_sources": [names[s] for s in failed]}
+    if len(set(failed)) != len(failed) or len(failed) > sources:
+        return None
+    return {"items": items, "sources": sources, "failed_sources": [names[s] for s in failed]}
 
 
 def _verify_summary(stdout: str) -> dict | None:
-    """③ の要約（結果の種別と件数）を読む。形が違えば None。"""
+    """③ の要約の結果の種別を読む。知らない種別なら None（件数はログと validation.json にある）。"""
     data = _last_json(stdout)
     if data is None or data.get("result") not in VERIFY_RESULTS:
         return None
-    if not (_count(data.get("entries")) and _count(data.get("excluded"))):
-        return None
-    return {k: data[k] for k in ("result", "entries", "excluded")}
+    return {"result": data["result"]}
 
 
 def _count(value: object) -> bool:

@@ -3,12 +3,13 @@
 - ① の後に、collected.json から ② の入力（agent-input.json）を作る。統括スクリプトがそれを
   agent に標準入力で渡し、構造化出力を agent-output.json に保存する
 - ③ は、agent に渡したコピーではなく、worker の collected.json から同じ入力を作り直して照合する
-  （D-04）。いまは D6(a) の最小の形と D6(b) の ID だけを検査する。正式なスキーマ・D1〜D4・
-  文字数・期間内の出来事の欠落は後の Issue で足す
+  （D-04）。いまは D6(a) の最小の形と D6(b) の ID だけを検査する。正式なスキーマ・D1・期間内の
+  出来事の欠落は #19、D2・D3・文字数は #20、D4 は #21 で足す
 - 秘匿情報を検出したら Issue の本文を残さない（US-E7-05）。⑤ の直前の検査は ⑤ の Issue で足す
 
 項目の ID は、DB への保存（items）を実装するまで、本番も仮の ID（d1, d2, …）にする。
-取得できなかった情報源と、急上昇を判定しなかった情報源の本文への記載は、後の Issue で足す。
+取得できなかった情報源と、急上昇を判定しなかった情報源の本文への記載は、③ の保存と全情報源の
+接続（#40）または部分失敗の分岐（#41）で足す（① の要約にはすでにある）。
 """
 
 import json
@@ -73,7 +74,11 @@ def run_verify(
     kept, excluded = check_daily_ids(entries, data)
     for x in excluded:
         log.write("verify", "excluded", error_category="invalid_id", detail=x.reason)
-    reasons = [{"item_ids": list(x.entry.item_ids), "reason": x.reason} for x in excluded]
+    # ID と理由には AI が返した文字列が入るので、マスクしてから残す（ログは RunLog がマスクする）
+    reasons = [
+        {"item_ids": [scanner.mask(i) for i in x.entry.item_ids], "reason": scanner.mask(x.reason)}
+        for x in excluded
+    ]
     if entries and not kept:  # 除外で0件（US-E7-02）。AI が0件を選んだときはレポートにする
         log.write("verify", "failure", error_category="all_excluded")
         return _finish(run_dir, log, REJECTED, "all_excluded", entries=0, excluded=reasons)

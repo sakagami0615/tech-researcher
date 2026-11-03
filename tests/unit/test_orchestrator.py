@@ -3,7 +3,8 @@
 docker を偽のプロセス（PATH の先頭に置いた `docker`）に差し替え、ロックは flock で確かめる。
 偽の docker は、受け取った引数と環境変数とロックの状態を calls.jsonl に書き、behavior.json の
 指示（ok・fail・bad・sleep）どおりに振る舞う。偽の docker には許可した環境変数しか届かないので、
-指示はファイルで渡す。① は ok のとき、日次の ② の入力（項目なし）も書く。③ は常に合格を返す。
+指示はファイルで渡す。① は ok のとき、日次の ② の入力（項目なし）も書く。③ は verify の指示
+（既定は report）どおりの結果を返す。
 ② の AI は、項目なしの出力を返す偽の実装に差し替える。段階を本物でつなぐ一巡は test_daily_flow.py。
 """
 
@@ -20,8 +21,8 @@ from pathlib import Path
 import pytest
 
 from tech_researcher import orchestrator
+from tech_researcher.collect.sources import source_names
 from tech_researcher.config import parse_config
-from tech_researcher.orchestrator import source_names
 
 ROOT = Path(__file__).parents[2]
 LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").split("[limits]")[1]
@@ -48,15 +49,19 @@ mode = behavior["mode"]
 if command == "ps":
     print("cid1" if mode == "sleep" else "")
 elif command == "compose" and "verify" in sys.argv:
-    print(json.dumps({{"result": "report", "entries": 0, "excluded": 0}}))
+    verify = behavior.get("verify", "report")
+    if verify == "fail":
+        sys.exit(1)
+    print("not json" if verify == "bad" else json.dumps({{"result": verify}}))
 elif command == "compose":
     if mode == "ok":
         stage, cadence, _, run_id = sys.argv[-4:]
-        if cadence == "daily":
+        if cadence == "daily" and behavior.get("input", True):
             kind = "dry-run" if run_id.startswith("dry-") else "work"
             run_dir = Path(os.environ["TR_DATA_DIR"]) / kind / run_id
             (run_dir / "agent-input.json").write_text(json.dumps({{"task": "daily", "items": []}}))
-        print(json.dumps({{"items": 3, "sources": 3, "failed_sources": behavior["failed"]}}))
+        sources = behavior.get("sources", 3)
+        print(json.dumps({{"items": 3, "sources": sources, "failed_sources": behavior["failed"]}}))
     elif mode == "fail":
         print("tech-researcher: collect が失敗した " + behavior["secret"], file=sys.stderr)
         sys.exit(1)
@@ -383,6 +388,44 @@ def test_daily_stops_at_analyze_until_agent_exists(host, capfd, monkeypatch, dry
     assert [c["argv"][-4] for c in host.calls()] == ["collect"]
 
 
+@pytest.mark.parametrize(
+    ("verify", "result", "stage", "category"),
+    [
+        ("rejected", "rejected", None, None),
+        ("secret_detected", "error", "verify", "secret_detected"),
+        ("fail", "error", "verify", "exit_1"),
+        ("bad", "error", "verify", "bad_output"),
+    ],
+)
+def test_verify_result_decides_summary(host, capfd, verify, result, stage, category):
+    host.behave("ok", lock="daily-dry-run", verify=verify)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        result,
+        stage,
+        category,
+    )
+    assert summary["output_dir"] is not None
+
+
+def test_all_sources_failed_is_error_without_ai(host, capfd, monkeypatch):
+    """すべての情報源が取得できない日は、0件のレポートにしない（US-E6-03・US-E6-04）。"""
+    monkeypatch.setattr(orchestrator, "call_agent", PRODUCT_CALL_AGENT)
+    host.behave("ok", lock="daily-dry-run", failed=["rss:example", "qiita"], sources=2)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("collect", "all_sources_failed")
+    assert [c["argv"][-4] for c in host.calls()] == ["collect"]  # ② ③ を呼ばない
+
+
+def test_missing_agent_input_is_analyze_failure(host, capfd):
+    host.behave("ok", lock="daily-dry-run", input=False)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "bad_input")
+
+
 def test_weekly_dry_run_ends_after_collect(host, capfd):
     host.behave("ok", lock="weekly-dry-run")
     assert orchestrator.main(["weekly", "--dry-run"], host.environ) == 0
@@ -639,25 +682,49 @@ def test_lock_is_released_after_run(host, capfd):
 @pytest.mark.parametrize(
     ("stdout", "expected"),
     [
-        ('{"items": 2, "failed_sources": ["qiita"]}', {"items": 2, "failed_sources": ["Qiita"]}),
-        ('{"items": 2, "failed_sources": ["rss:gone"]}', None),
-        ('{"items": 0, "failed_sources": [], "x": 1}', {"items": 0, "failed_sources": []}),
+        (
+            '{"items": 2, "sources": 2, "failed_sources": ["qiita"]}',
+            {"items": 2, "sources": 2, "failed_sources": ["Qiita"]},
+        ),
+        ('{"items": 2, "sources": 2, "failed_sources": ["rss:gone"]}', None),
+        (
+            '{"items": 0, "sources": 0, "failed_sources": [], "x": 1}',
+            {"items": 0, "sources": 0, "failed_sources": []},
+        ),
         # ビルドの進み具合の後に要約（イメージがないときの compose run）
         (
-            '#1 DONE 0.0s\n\n{"items": 1, "failed_sources": []}\n',
-            {"items": 1, "failed_sources": []},
+            '#1 DONE 0.0s\n\n{"items": 1, "sources": 1, "failed_sources": []}\n',
+            {"items": 1, "sources": 1, "failed_sources": []},
         ),
-        ('{"items": 1, "failed_sources": []}\nnot json\n', None),
+        ('{"items": 1, "sources": 1, "failed_sources": []}\nnot json\n', None),
         ("", None),
         ("[]", None),
-        ('{"items": true, "failed_sources": []}', None),
-        ('{"items": -1, "failed_sources": []}', None),
-        ('{"items": 1, "failed_sources": [1]}', None),
-        ('{"items": 1}', None),
+        ('{"items": true, "sources": 1, "failed_sources": []}', None),
+        ('{"items": -1, "sources": 1, "failed_sources": []}', None),
+        ('{"items": 1, "sources": 1, "failed_sources": [1]}', None),
+        ('{"items": 1, "sources": 1}', None),
+        ('{"items": 1, "failed_sources": []}', None),
+        ('{"items": 1, "sources": 2, "failed_sources": ["qiita", "qiita"]}', None),
+        ('{"items": 1, "sources": 1, "failed_sources": ["qiita", "rss:a"]}', None),
     ],
 )
 def test_stage_summary_shape(stdout, expected):
-    assert orchestrator._stage_summary(stdout, {"qiita": "Qiita"}) == expected
+    assert orchestrator._stage_summary(stdout, {"qiita": "Qiita", "rss:a": "A"}) == expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ('{"result": "report", "entries": 2}', {"result": "report"}),
+        ('{"result": "rejected"}', {"result": "rejected"}),
+        ('{"result": "secret_detected"}', {"result": "secret_detected"}),
+        ('{"result": "dry_run"}', None),
+        ('{"entries": 2}', None),
+        ("not json", None),
+    ],
+)
+def test_verify_summary_shape(stdout, expected):
+    assert orchestrator._verify_summary(stdout) == expected
 
 
 def test_source_names():

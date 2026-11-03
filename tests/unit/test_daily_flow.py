@@ -20,11 +20,12 @@ from pathlib import Path
 import pytest
 
 from tech_researcher import cli, orchestrator
-from tech_researcher.collect.http import Response
+from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.rss import collect_feed
+from tech_researcher.db.schema import open_db
 from tech_researcher.orchestrator import StageResult
 from tech_researcher.periods import JST
-from tech_researcher.runfiles import new_run_id
+from tech_researcher.runfiles import db_path, new_run_id
 from tech_researcher.stages.collect import run_collect
 
 ROOT = Path(__file__).parents[2]
@@ -92,6 +93,8 @@ class Host:
 
     def fake_fetch(self, url, limits):
         assert url == "https://blog.example.com/feed.xml"
+        if self.feed is None:  # 再試行を使い切った失敗
+            raise FetchError("HTTP 503", 3, 503)
         return Response(url, 200, self.feed, 1)
 
     def fake_compose_run(self, compose, service, args, timeout_s):
@@ -339,3 +342,62 @@ def test_ai_failure_stops_before_verify(host, ai, category):
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", category)
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
+
+
+def test_all_sources_failed_is_error_not_empty_report(host):
+    """取得の失敗は、正常の0件（該当なしのレポート）と区別する（US-E6-03・US-E6-04）。"""
+    host.feed = None
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 1
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "collect",
+        "all_sources_failed",
+    )
+    assert summary["failed_sources"] == ["Example"]
+    assert host.calls("agent") == []
+    assert not (Path(summary["output_dir"]) / "issue.md").exists()
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_existing_db_is_not_changed(host, dry_run):
+    """本番の DB があっても、一巡は DB を読み書きしない（D-22。保存は後の Issue で足す）。"""
+    open_db(db_path(host.data)).close()
+    before = {p.name: p.read_bytes() for p in db_path(host.data).parent.iterdir()}
+
+    code, _, _ = host.run(*(["--dry-run"] if dry_run else []))
+
+    assert code == (0 if dry_run else 1)
+    after = {p.name: p.read_bytes() for p in db_path(host.data).parent.iterdir()}
+    assert after == before
+
+
+def test_verify_checks_worker_data_not_the_copy_given_to_ai(host):
+    """③ は agent に渡したコピーではなく collected.json と照合する（D-04）。"""
+
+    def tamper(data):
+        # ② の入力のファイルに、収集していない項目を足す（コピーが書き換えられた場合）
+        [path] = (host.data / "dry-run").glob("*/agent-input.json")
+        forged = {**data, "items": [*data["items"], {**data["items"][0], "id": "d3"}]}
+        path.write_text(json.dumps(forged), encoding="utf-8")
+        return {"items": [entry("d1", 1), entry("d3", 2)]}
+
+    host.ai = tamper
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    validation = json.loads((Path(summary["output_dir"]) / "validation.json").read_text())
+    assert validation["entries"] == 1
+    assert [x["item_ids"] for x in validation["excluded"]] == [["d3"]]
+
+
+def test_secret_in_ai_ids_is_masked_in_results(host):
+    host.ai = lambda data: {"items": [entry("d1", 1), entry(TOKEN, 2)]}
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    out_dir = Path(summary["output_dir"])
+    for name in ("validation.json", "log.jsonl", "issue.md"):
+        assert TOKEN not in (out_dir / name).read_text(encoding="utf-8"), name
+    assert "[MASKED:known]" in (out_dir / "validation.json").read_text(encoding="utf-8")
