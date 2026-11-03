@@ -226,6 +226,15 @@ def test_extra_headers_are_sent_but_not_to_redirect_target(limits, server):
     assert response.status == 200
 
 
+def test_error_body_head_is_kept_for_client_errors(limits):
+    body = b"x" * (tr_http.ERROR_BODY_BYTES + 10)
+    error = urllib.error.HTTPError(URL, 403, "err", Message(), io.BytesIO(body))
+    result, _, _ = run(limits, error)
+    assert result.body == body[: tr_http.ERROR_BODY_BYTES]
+    result, _, _ = run(limits, http_error(404))  # 本文のない誤り
+    assert result.body == b""
+
+
 def test_response_and_error_headers_are_kept(limits):
     ok = FakeResponse(b"{}")
     ok.headers["X-RateLimit-Remaining"] = "42"

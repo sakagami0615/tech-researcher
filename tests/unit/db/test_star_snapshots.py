@@ -23,13 +23,21 @@ def insert(conn, repo, day, n=0):
     )
 
 
-def test_recent_repos_are_the_days_before_target(conn):
+def test_recent_repos_are_first_measured_in_the_days_before_target(conn):
     insert(conn, "a/old", T - timedelta(days=31))
     insert(conn, "a/edge", T - timedelta(days=30))
     insert(conn, "b/yesterday", T - timedelta(days=1))
     insert(conn, "b/yesterday", T - timedelta(days=2))
     insert(conn, "c/today", T)  # 同じ対象の最初の実行が書いた行は見ない
     assert recent_repos(conn, T, 30) == ("a/edge", "b/yesterday")
+
+
+def test_repos_measured_every_day_leave_after_days(conn):
+    """監視リストで毎日測っても、初めて測ってから days 日で外れる。"""
+    for n in range(1, 32):
+        insert(conn, "a/daily", T - timedelta(days=n))
+    assert recent_repos(conn, T, 30) == ()
+    assert recent_repos(conn, T - timedelta(days=1), 30) == ("a/daily",)
 
 
 def test_recent_repos_empty_db(conn):

@@ -73,7 +73,7 @@ class FakeSearch:
         self.pages = pages  # topic → [応答または例外, ...]
         self.queries = []
 
-    def __call__(self, url, limits, *, headers):
+    def __call__(self, url, limits, *, headers, sleep):
         query = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
         self.queries.append(query)
         topic = query["q"].split()[0].removeprefix("topic:")
@@ -140,7 +140,9 @@ def test_mentions_from_fixture_records():
             "https://github.blog/news/2026-11-02-example",
             "https://zenn.dev/u/articles/abc",
         ),
-        "someone/agent-kit": ("https://github.com/someone/agent-kit",),
+        # リポジトリへ直接リンクした投稿は、はてなのエントリーのページを言及元にし、
+        # レコード自身もリポジトリの URL（HN）なら言及元に入れない
+        "someone/agent-kit": ("https://b.hatena.ne.jp/entry/s/github.com/someone/agent-kit",),
         "infra-team/deployer": ("https://github.com/infra-team/deployer/issues/12",),
     }
 
@@ -176,7 +178,9 @@ def test_collects_all_routes(limits, tmp_path):
         Candidate("new/two", ("search",)),
         Candidate("old/watched", ("watch",)),
         Candidate(
-            "someone/agent-kit", ("search", "mention"), ("https://github.com/someone/agent-kit",)
+            "someone/agent-kit",
+            ("search", "mention"),
+            ("https://b.hatena.ne.jp/entry/s/github.com/someone/agent-kit",),
         ),
     )
     assert result.candidates[0].url == "https://github.com/anthropics/claude-code"
@@ -256,7 +260,24 @@ def test_disabled_source_collects_nothing(limits):
     assert result.candidates == () and result.error is None
 
 
-def test_invalid_search_response_is_an_error(limits):
-    fake = FakeSearch({"llm": [{"message": "x"}]})
+def test_failed_topic_is_skipped_and_next_topic_is_searched(limits):
+    error = FetchError("再試行を使い切った：HTTP 502", 3, 502)
+    for first in ({"message": "x"}, error):
+        fake = FakeSearch({"llm": [first], "mcp": [page(["new/two"])]})
+        result = collect_candidates(SETTINGS, T, [], client(limits, fake), None)
+        assert result.error_category in (github_api.INVALID_RESPONSE, github_api.HTTP_5XX)
+        assert "new/two" in {c.repo for c in result.candidates}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FetchError("HTTP 403", 1, 403, {"x-ratelimit-remaining": "0"}),
+        FetchError("HTTP 401", 1, 401),
+    ],
+)
+def test_rate_limit_or_auth_failure_stops_remaining_topics(limits, error):
+    fake = FakeSearch({"llm": [error], "mcp": [page(["new/two"])]})
     result = collect_candidates(SETTINGS, T, [], client(limits, fake), None)
-    assert result.error_category == github_api.INVALID_RESPONSE
+    assert len(fake.queries) == 1
+    assert result.error_category in (github_api.RATE_LIMITED, github_api.AUTH)

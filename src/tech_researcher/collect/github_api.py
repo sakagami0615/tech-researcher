@@ -36,8 +36,6 @@ _TOKEN = re.compile(r"[A-Za-z0-9_.\-]+")
 # API のパス。`/` で区切った空でない部分だけにし、ホストを差し替えられないようにする
 # （`.`・`..` の部分は別に止める）
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
-# 認証なしの Search の上限（1分の回数。structure.md 6.2）
-UNAUTHENTICATED_SEARCH_PER_MINUTE = 10
 
 # error_category に使う語
 AUTH = "auth"  # 401。トークンがない・無効
@@ -83,7 +81,7 @@ def collect_token(environ: Mapping[str, str] = os.environ) -> str | None:
 class GitHubClient:
     """GitHub の REST API の GET。1回の実行の中で使った回数を数える。
 
-    token が None なら認証なしで要求する（Search は1分10回までなど、上限が小さくなる）。
+    token が None なら認証なしで要求する（GitHub の上限は小さくなる。structure.md 6.2）。
     fetch_url・clock・sleep はテストで差し替える。
     """
 
@@ -133,20 +131,19 @@ class GitHubClient:
         return data
 
     def search(self, kind: str, params: Mapping[str, Any]) -> Any:
-        """Search API（`/search/{kind}`）。前の Search から間隔をあけて出す。
+        """Search API（`/search/{kind}`）。前の Search から間隔をあけて出す（再試行も）。
 
-        認証なしでは、GitHub の上限（1分10回）に合わせて間隔を広げる。
+        間隔は設定の1分あたりの回数から決める。認証なしの GitHub の上限（1分10回）は
+        考えないので、認証なしで続けて呼ぶ側は回数に気をつける。
         """
-        per_minute = self._limits.github_search_per_minute
-        if not self.authenticated:
-            per_minute = min(per_minute, UNAUTHENTICATED_SEARCH_PER_MINUTE)
-        if self._last_search is not None:
-            wait = self._last_search + 60 / per_minute - self._clock()
+        interval = 60 / self._limits.github_search_per_minute
+        remaining = self._limits.github_search_calls - self.search_calls
+        if remaining >= 1 and self._last_search is not None:
+            wait = self._last_search + interval - self._clock()
             if wait > 0:
                 self._sleep(wait)
-        remaining = self._limits.github_search_calls - self.search_calls
         try:
-            data, used = self._request(f"/search/{kind}", params, remaining)
+            data, used = self._request(f"/search/{kind}", params, remaining, interval)
         except GitHubError as e:
             self.search_calls += e.attempts
             if e.attempts:
@@ -157,9 +154,18 @@ class GitHubClient:
         return data
 
     def _request(
-        self, path: str, params: Mapping[str, Any] | None, remaining: int
+        self,
+        path: str,
+        params: Mapping[str, Any] | None,
+        remaining: int,
+        min_wait: float = 0.0,
     ) -> tuple[Any, int]:
-        """要求して（JSON, 要求の回数）を返す。再試行は残りの回数に収まる分だけにする。"""
+        """要求して（JSON, 要求の回数）を返す。再試行は残りの回数に収まる分だけにする。
+
+        min_wait は再試行の前に待つ最短の秒数（Search の間隔を再試行にも守らせる）。
+        リダイレクトをたどった応答は、要求を1回多く数える（たどった回数は分からないので、
+        1回とみなす。GitHub の API のリダイレクトは名前を変えたリポジトリなどで、まれ）。
+        """
         if not _PATH.fullmatch(path) or {".", ".."} & set(path.split("/")):
             raise ValueError(f"API のパスにできない：{path!r}")
         if remaining < 1:
@@ -168,17 +174,19 @@ class GitHubClient:
         url = API_ROOT + path + (f"?{urlencode(params)}" if params else "")
         try:
             response = self._fetch(
-                url, replace(self._limits, http_retry_waits_s=waits), headers=self._headers
+                url,
+                replace(self._limits, http_retry_waits_s=waits),
+                headers=self._headers,
+                sleep=lambda seconds: self._sleep(max(seconds, min_wait)),
             )
         except FetchError as e:
             category = classify(e)
             raise GitHubError(f"{path}：{category}（{e}）", category, e.attempts, e.status) from e
+        used = response.attempts + (response.url != url)
         try:
-            return json.loads(response.body), response.attempts
+            return json.loads(response.body), used
         except ValueError as e:
-            raise GitHubError(
-                f"{path}：応答が JSON でない", INVALID_RESPONSE, response.attempts
-            ) from e
+            raise GitHubError(f"{path}：応答が JSON でない", INVALID_RESPONSE, used) from e
 
 
 def classify(error: FetchError) -> str:
@@ -190,9 +198,14 @@ def classify(error: FetchError) -> str:
     if status == 401:
         return AUTH
     if status == 429 or (
-        status == 403 and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers)
+        status == 403
+        and (
+            headers.get("x-ratelimit-remaining") == "0"
+            or "retry-after" in headers
+            or b"rate limit" in error.body.lower()
+        )
     ):
-        # 一次のレート制限は残り0、二次のレート制限は Retry-After で示される
+        # 一次のレート制限は残り0、二次のレート制限は Retry-After か本文の文言で示される
         return RATE_LIMITED
     if status == 403:
         return FORBIDDEN

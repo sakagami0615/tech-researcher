@@ -6,10 +6,10 @@ Star 数を測る候補を、次の3つの経路から集めて1つにまとめ�
   リポジトリを、設定のトピックごとに Star 数の順で取る
 - mention（言及）：その回に集めたほかの情報源のレコードの URL・指している先・候補リンクから
   `github.com/{owner}/{repo}` を抜き出す。レコードを受け取るだけで、ほかの収集処理には依存しない
-- watch（監視リスト）：直近 WATCH_DAYS 日に Star 数を測ったリポジトリ（star_snapshots）と、
-  設定の watch_repos
+- watch（監視リスト）：直近 WATCH_DAYS 日の間に初めて Star 数を測ったリポジトリ
+  （star_snapshots）と、設定の watch_repos
 
-Search の失敗では止めず、それまでに取れた分と、ほかの経路の候補を返す（error に理由を残す）。
+Search の失敗では止めず、取れた分と、ほかの経路の候補を返す（error に最初の失敗を残す）。
 GitHub Trending のページや外部サービスは使わない（D-13）。
 """
 
@@ -35,21 +35,27 @@ WATCH_DAYS = 30
 ROUTES = ("search", "mention", "watch")
 PER_PAGE = 100  # Search API の1ページの上限
 MAX_SEARCH_RESULTS = 1000  # Search API が1つの検索で返す上限
-# github.com の1つめのパスがリポジトリの持ち主でないもの（GitHub の機能のページ）
+# github.com の1つめのパスがリポジトリの持ち主でないもの（GitHub の機能のページ）。
+# 漏れたものは候補に入っても、Star 数を測るときにリポジトリが見つからないだけになる
 NON_OWNER_PATHS = frozenset(
     {
         "about",
         "account",
+        "advisories",
         "apps",
+        "blog",
         "codespaces",
         "collections",
         "contact",
+        "copilot",
         "customer-stories",
         "dashboard",
         "enterprise",
         "events",
         "explore",
         "features",
+        "github-copilot",
+        "home",
         "issues",
         "join",
         "login",
@@ -58,6 +64,7 @@ NON_OWNER_PATHS = frozenset(
         "new",
         "notifications",
         "organizations",
+        "partners",
         "orgs",
         "pricing",
         "pulls",
@@ -145,51 +152,58 @@ def collect_candidates(
 def _search(
     settings: GitHubRepos, day: date, client: GitHubClient | None
 ) -> tuple[list[str], int, GitHubError | None]:
-    """Search の経路。（見つけたリポジトリ、要求の回数、失敗）を返す。"""
+    """Search の経路。（見つけたリポジトリ、要求の回数、最初の失敗）を返す。"""
     if not settings.search_topics:
         return [], 0, None
     if client is None or not client.authenticated:
         return [], 0, GitHubError("収集用トークンがない", github_api.AUTH, 0)
     before = client.search_calls
-    try:
-        repos, error = search_repos(client, settings, day), None
-    except _SearchError as e:
-        repos, error = e.repos, e.cause
+    repos, error = search_repos(client, settings, day)
     return repos, client.search_calls - before, error
 
 
-class _SearchError(Exception):
-    """途中で失敗した Search。repos はそれまでに取れたリポジトリ。"""
-
-    def __init__(self, cause: GitHubError, repos: list[str]):
-        super().__init__(str(cause))
-        self.cause = cause
-        self.repos = repos
+# これらの失敗では、次のトピックも同じく失敗するので Search をやめる
+_STOP_CATEGORIES = frozenset({github_api.AUTH, github_api.RATE_LIMITED, github_api.BUDGET})
 
 
-def search_repos(client: GitHubClient, settings: GitHubRepos, day: date) -> list[str]:
-    """設定のトピックごとに Search API を呼び、見つかったリポジトリを返す（重なりは除く）。
+def search_repos(
+    client: GitHubClient, settings: GitHubRepos, day: date
+) -> tuple[list[str], GitHubError | None]:
+    """設定のトピックごとに Search API を呼び、（見つかったリポジトリ、最初の失敗）を返す。
 
     Star 数の順にページを送り、件数が尽きるか、Search の上限（1,000件）まで取る。
+    あるトピックで失敗したら、そのトピックをやめて次へ進む。認証・レート制限・この実行の
+    上限の失敗では、残りのトピックも呼ばずにやめる。重なったリポジトリは除く。
     """
     since = day - timedelta(days=settings.search_days)
     repos: dict[str, None] = {}
+    first_error: GitHubError | None = None
     for topic in settings.search_topics:
-        query = search_query(topic, since, settings.search_min_stars)
-        for page in range(1, MAX_SEARCH_RESULTS // PER_PAGE + 1):
-            params = {"q": query, "sort": "stars", "order": "desc", "per_page": PER_PAGE}
-            try:
-                data = client.search("repositories", {**params, "page": page})
-                names = parse_search(data)
-            except GitHubError as e:
-                raise _SearchError(e, list(repos)) from e
-            repos.update(dict.fromkeys(names))
-            if data.get("incomplete_results"):
-                log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", topic, page)
-            total = min(data["total_count"], MAX_SEARCH_RESULTS)
-            if len(names) < PER_PAGE or page * PER_PAGE >= total:
+        try:
+            repos.update(dict.fromkeys(_search_topic(client, topic, since, settings)))
+        except GitHubError as e:
+            first_error = first_error or e
+            if e.category in _STOP_CATEGORIES:
                 break
-    return list(repos)
+    return list(repos), first_error
+
+
+def _search_topic(
+    client: GitHubClient, topic: str, since: date, settings: GitHubRepos
+) -> list[str]:
+    query = search_query(topic, since, settings.search_min_stars)
+    params = {"q": query, "sort": "stars", "order": "desc", "per_page": PER_PAGE}
+    names: list[str] = []
+    for page in range(1, MAX_SEARCH_RESULTS // PER_PAGE + 1):
+        data = client.search("repositories", {**params, "page": page})
+        page_names = parse_search(data)
+        names += page_names
+        if data.get("incomplete_results"):
+            log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", topic, page)
+        total = min(data["total_count"], MAX_SEARCH_RESULTS)
+        if len(page_names) < PER_PAGE or page * PER_PAGE >= total:
+            break
+    return names
 
 
 def search_query(topic: str, since: date, min_stars: int) -> str:
@@ -216,17 +230,24 @@ def mentioned_repos(records: Iterable[Record]) -> dict[str, tuple[str, ...]]:
     """レコードの URL・指している先・候補リンクに現れたリポジトリを、言及元とともに返す。
 
     言及元は、そのレコードがまとまる収集項目の URL（指している先の正規化した URL）。
+    それがリポジトリ自身の URL（投稿がリポジトリへ直接リンクした場合）なら、レコード自身の
+    URL（はてなのエントリーのページなど）にし、それも同じなら言及元に入れない（言及の経路には入る）。
     返す順はリポジトリを最初に見た順で、言及元も見た順に重なりを除く。
     """
     found: dict[str, dict[str, None]] = {}
     for record in records:
-        source = record_key(record)
-        if source is None:
+        key = record_key(record)
+        if key is None:
             continue
         for url in (record.url, record.link_url, *record.links):
             repo = repo_from_url(url or "")
-            if repo is not None:
-                found.setdefault(repo, {})[source] = None
+            if repo is None:
+                continue
+            sources = found.setdefault(repo, {})
+            own = f"https://github.com/{repo}"
+            source = key if key != own else normalize_url(record.url)
+            if source is not None and source != own:
+                sources[source] = None
     return {repo: tuple(sources) for repo, sources in found.items()}
 
 
@@ -241,5 +262,5 @@ def repo_from_url(url: str) -> str | None:
     segments = parts.path.split("/")[1:3]
     if len(segments) < 2 or segments[0] in NON_OWNER_PATHS:
         return None
-    repo = "/".join(segments).removesuffix(".git")
+    repo = "/".join(segments)
     return repo if GITHUB_REPO_NAME.fullmatch(repo) else None

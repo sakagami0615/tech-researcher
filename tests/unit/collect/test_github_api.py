@@ -29,8 +29,9 @@ class FakeFetch:
         self.attempts = attempts
         self.calls = []
 
-    def __call__(self, url, limits, *, headers):
+    def __call__(self, url, limits, *, headers, sleep):
         self.calls.append((url, limits.http_retry_waits_s, dict(headers)))
+        self.sleep = sleep
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -166,29 +167,50 @@ def test_search_is_spaced_by_per_minute_limit(limits):
     assert parse_qs(urlsplit(fetch.calls[0][0]).query) == {"q": ["x"]}
 
 
-def test_unauthenticated_search_is_spaced_for_ten_per_minute(limits):
-    clock = Clock()
-    api = client(replace(limits, github_search_per_minute=25), FakeFetch({}, {}), None, clock)
-    api.search("repositories", {"q": "x"})
-    api.search("repositories", {"q": "y"})
-    assert clock.sleeps == [pytest.approx(6.0)]
-
-
 def test_search_budget(limits):
     api = client(replace(limits, github_search_calls=1), FakeFetch({}))
     api.search("repositories", {"q": "x"})
     with pytest.raises(GitHubError) as e:
         api.search("repositories", {"q": "y"})
     assert e.value.category == github_api.BUDGET
+    assert api._sleep.__self__.sleeps == []  # 上限に達していれば間隔を待たない
 
 
 def test_invalid_json_is_an_error(limits):
-    fetch = FakeFetch(Response("u", 200, b"<html>", 1))
+    fetch = FakeFetch(Response("https://api.github.com/a", 200, b"<html>", 1))
     api = client(limits, fetch)
     with pytest.raises(GitHubError) as e:
         api.get("/a")
     assert e.value.category == github_api.INVALID_RESPONSE
     assert api.rest_calls == 1
+
+
+def test_redirected_response_counts_one_more_request(limits):
+    fetch = FakeFetch(Response("https://api.github.com/repositories/1", 200, b"{}", 1))
+    api = client(limits, fetch)
+    api.get("/repos/old/name")
+    assert api.rest_calls == 2
+
+
+def test_search_retries_also_wait_for_interval(limits):
+    clock = Clock()
+    fetch = FakeFetch({})
+    api = client(replace(limits, github_search_per_minute=25), fetch, clock=clock)
+    api.search("repositories", {"q": "x"})
+    fetch.sleep(1)  # http.fetch が Retry-After: 1 で待つとき
+    fetch.sleep(30)
+    assert clock.sleeps == [pytest.approx(2.4), 30]
+    clock.sleeps.clear()
+    fetch.outcomes.append({})
+    api.get("/a")
+    fetch.sleep(1)  # Search 以外は間隔を足さない
+    assert clock.sleeps == [1]
+
+
+def test_secondary_rate_limit_is_found_in_body():
+    body = b'{"message": "You have exceeded a secondary rate limit."}'
+    error = FetchError("HTTP 403", 1, 403, {"x-ratelimit-remaining": "4000"}, body)
+    assert classify(error) == github_api.RATE_LIMITED
 
 
 @pytest.mark.parametrize(
