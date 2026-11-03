@@ -260,6 +260,15 @@ def test_disabled_source_collects_nothing(limits):
     assert result.candidates == () and result.error is None
 
 
+def test_pages_before_failure_are_kept(limits):
+    full = [f"o/r{i}" for i in range(100)]
+    error = FetchError("再試行を使い切った：HTTP 502", 3, 502)
+    fake = FakeSearch({"llm": [page(full, total=300), error], "mcp": [page([])]})
+    result = collect_candidates(SETTINGS, T, [], client(limits, fake), None)
+    assert result.error_category == github_api.HTTP_5XX
+    assert "o/r99" in {c.repo for c in result.candidates}
+
+
 def test_failed_topic_is_skipped_and_next_topic_is_searched(limits):
     error = FetchError("再試行を使い切った：HTTP 502", 3, 502)
     for first in ({"message": "x"}, error):

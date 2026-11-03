@@ -180,7 +180,7 @@ def search_repos(
     first_error: GitHubError | None = None
     for topic in settings.search_topics:
         try:
-            repos.update(dict.fromkeys(_search_topic(client, topic, since, settings)))
+            _search_topic(client, topic, since, settings, repos)
         except GitHubError as e:
             first_error = first_error or e
             if e.category in _STOP_CATEGORIES:
@@ -189,21 +189,24 @@ def search_repos(
 
 
 def _search_topic(
-    client: GitHubClient, topic: str, since: date, settings: GitHubRepos
-) -> list[str]:
+    client: GitHubClient,
+    topic: str,
+    since: date,
+    settings: GitHubRepos,
+    repos: dict[str, None],
+) -> None:
+    """1つのトピックのページを送り、取れたページの分から repos に足す（途中で失敗しても残る）。"""
     query = search_query(topic, since, settings.search_min_stars)
     params = {"q": query, "sort": "stars", "order": "desc", "per_page": PER_PAGE}
-    names: list[str] = []
     for page in range(1, MAX_SEARCH_RESULTS // PER_PAGE + 1):
         data = client.search("repositories", {**params, "page": page})
-        page_names = parse_search(data)
-        names += page_names
+        names = parse_search(data)
+        repos.update(dict.fromkeys(names))
         if data.get("incomplete_results"):
             log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", topic, page)
         total = min(data["total_count"], MAX_SEARCH_RESULTS)
-        if len(page_names) < PER_PAGE or page * PER_PAGE >= total:
+        if len(names) < PER_PAGE or page * PER_PAGE >= total:
             break
-    return names
 
 
 def search_query(topic: str, since: date, min_stars: int) -> str:
