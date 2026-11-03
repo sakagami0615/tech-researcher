@@ -93,6 +93,7 @@ def test_repository_config_loads():
     assert feeds["hatena-it"].entry_date == "posted"
     assert config.hackernews.enabled and config.github_search.enabled and config.subqueries
     assert config.last30days_topic == "technology news"
+    assert config.qiita.enabled and "LLM" in config.qiita.tags
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -267,6 +268,31 @@ def test_zenn_topics_become_feeds(base):
 def test_invalid_zenn_topics_are_rejected(base, topics, message):
     data = full(base)
     data["sources"]["zenn"] = {"topics": topics}
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
+def test_qiita_tags_are_read(base):
+    data = full(base)
+    data["sources"]["qiita"]["tags"] = ["LLM", "生成AI", "C#", "Node.js"]
+    assert parse_config(data).qiita.tags == ("LLM", "生成AI", "C#", "Node.js")
+
+
+@pytest.mark.parametrize(
+    "tags, message",
+    [
+        ([], "1つ以上"),
+        ([""], "空でない"),
+        (["LLM", "llm"], "重複している LLM, llm"),
+        (["Claude Code"], "空白"),
+        (["LLM,AWS"], "カンマ"),
+        (['"LLM"'], "引用符"),
+        (["LLM\t"], "空白"),
+    ],
+)
+def test_invalid_qiita_tags_are_rejected(base, tags, message):
+    data = full(base)
+    data["sources"]["qiita"]["tags"] = tags
     with pytest.raises(ConfigError, match=message):
         parse_config(data)
 
