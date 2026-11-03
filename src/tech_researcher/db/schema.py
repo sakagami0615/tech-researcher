@@ -95,6 +95,19 @@ MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (source_id, target, canonical_url)
     ) STRICT;
     """,
+    # GitHub のリポジトリの累計 Star 数の日次の測定（D-13）。監視リストもここから引く
+    """
+    CREATE TABLE star_snapshots (
+        repo TEXT NOT NULL,
+        target TEXT NOT NULL,
+        measured_at TEXT NOT NULL,
+        stars_total INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (repo, target),
+        UNIQUE (repo, measured_at)
+    ) STRICT;
+    CREATE INDEX star_snapshots_target ON star_snapshots (target);
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

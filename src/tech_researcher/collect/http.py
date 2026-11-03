@@ -16,8 +16,8 @@ import time
 import urllib.error
 import urllib.request
 import zlib
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
@@ -31,12 +31,22 @@ MAX_BODY_BYTES = 20_000_000
 
 
 class FetchError(Exception):
-    """再試行を使い切ったか、再試行しない失敗。attempts は初回を含めた要求の回数。"""
+    """再試行を使い切ったか、再試行しない失敗。attempts は初回を含めた要求の回数。
 
-    def __init__(self, message: str, attempts: int, status: int | None = None):
+    headers は HTTP の誤りの応答のヘッダ（レート制限の判定などに使う）。それ以外は空。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        attempts: int,
+        status: int | None = None,
+        headers: Mapping[str, str] | None = None,
+    ):
         super().__init__(message)
         self.attempts = attempts
         self.status = status
+        self.headers = headers or {}
 
 
 @dataclass(frozen=True)
@@ -45,13 +55,21 @@ class Response:
     status: int
     body: bytes
     attempts: int
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 class _Retryable(Exception):
-    def __init__(self, message: str, status: int | None = None, retry_after: float | None = None):
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        retry_after: float | None = None,
+        headers: Mapping[str, str] | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
+        self.headers = headers
 
 
 def fetch(
@@ -60,8 +78,13 @@ def fetch(
     *,
     open_url: Callable[[urllib.request.Request], http.client.HTTPResponse] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    headers: Mapping[str, str] | None = None,
 ) -> Response:
-    """GET して本文を返す。待ちは設定の http_retry_waits_s で、Retry-After があれば従う。"""
+    """GET して本文を返す。待ちは設定の http_retry_waits_s で、Retry-After があれば従う。
+
+    headers は足す要求ヘッダ（認証など）。リダイレクトの先には送らない（別のホストへ
+    認証情報を渡さないため）。
+    """
     if open_url is None:
         opener = _opener(limits)
 
@@ -69,13 +92,15 @@ def fetch(
             return opener.open(req, timeout=limits.http_connect_timeout_s)
 
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    for name, value in (headers or {}).items():
+        request.add_unredirected_header(name, value)
     waits = limits.http_retry_waits_s
     for attempt in range(1, len(waits) + 2):
         try:
             return _get(open_url, request, attempt)
         except _Retryable as e:
             if attempt > len(waits):
-                raise FetchError(f"再試行を使い切った：{e}", attempt, e.status) from e
+                raise FetchError(f"再試行を使い切った：{e}", attempt, e.status, e.headers) from e
             wait = waits[attempt - 1]
             if e.retry_after is not None:
                 wait = min(e.retry_after, limits.retry_after_max_s)
@@ -92,12 +117,13 @@ def _get(open_url, request, attempt: int) -> Response:
             encoding = (res.headers.get("Content-Encoding") or "").strip().lower()
             if encoding in ("gzip", "x-gzip"):
                 body = _gunzip(body, attempt)
-            return Response(res.geturl(), res.status, body, attempt)
+            return Response(res.geturl(), res.status, body, attempt, dict(res.headers.items()))
     except urllib.error.HTTPError as e:
         e.close()
+        headers = dict((e.headers or {}).items())
         if e.code == 429 or e.code >= 500:
-            raise _Retryable(f"HTTP {e.code}", e.code, _retry_after(e.headers)) from e
-        raise FetchError(f"HTTP {e.code}", attempt, e.code) from e
+            raise _Retryable(f"HTTP {e.code}", e.code, _retry_after(e.headers), headers) from e
+        raise FetchError(f"HTTP {e.code}", attempt, e.code, headers) from e
     except urllib.error.URLError as e:
         if _transient(e.reason):
             raise _Retryable(f"{type(e.reason).__name__}: {e.reason}") from e

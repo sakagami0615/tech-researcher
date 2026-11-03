@@ -216,6 +216,29 @@ def test_real_opener_against_local_server(limits, server):
     assert response.body == USER_AGENT.encode()
 
 
+def test_extra_headers_are_sent_but_not_to_redirect_target(limits, server):
+    response = fetch(server.base + "/to-ok", limits, headers={"Authorization": "Bearer secret"})
+    assert server.paths == ["/to-ok", "/ok"]
+    first, second = server.headers
+    assert first["Authorization"] == "Bearer secret"
+    assert "Authorization" not in second
+    assert second["User-Agent"] == USER_AGENT
+    assert response.status == 200
+
+
+def test_response_and_error_headers_are_kept(limits):
+    ok = FakeResponse(b"{}")
+    ok.headers["X-RateLimit-Remaining"] = "42"
+    response, _, _ = run(limits, ok)
+    assert response.headers["X-RateLimit-Remaining"] == "42"
+    error = http_error(403)
+    error.headers["X-RateLimit-Remaining"] = "0"
+    result, _, _ = run(limits, error)
+    assert result.headers["X-RateLimit-Remaining"] == "0"
+    result, _, _ = run(limits, http_error(429, "1"), http_error(429, "1"), http_error(429, "1"))
+    assert result.status == 429 and result.headers["Retry-After"] == "1"
+
+
 def test_read_timeout_is_applied(limits, server):
     fast = replace(limits, http_read_timeout_s=0.2, http_retry_waits_s=())
     with pytest.raises(FetchError, match="timed out"):

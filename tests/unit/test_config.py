@@ -94,6 +94,9 @@ def test_repository_config_loads():
     assert config.hackernews.enabled and config.github_search.enabled and config.subqueries
     assert config.last30days_topic == "technology news"
     assert config.qiita.enabled and "LLM" in config.qiita.tags
+    repos = config.github_repos
+    assert repos.enabled and "llm" in repos.search_topics
+    assert (repos.search_days, repos.search_min_stars) == (14, 200)  # 観測までの仮の値
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -160,6 +163,15 @@ def test_last30days_topic_is_read(base):
         lambda d: d["sources"]["qiita"].update(enabled="yes"),
         lambda d: d["sources"]["qiita"].update(tags="LLM"),
         lambda d: d["sources"]["github_repos"].update(report_top_n=0),
+        lambda d: d["sources"]["github_repos"].update(search_topics=["LLM"]),
+        lambda d: d["sources"]["github_repos"].update(search_topics=["ai agents"]),
+        lambda d: d["sources"]["github_repos"].update(search_topics=["llm", "llm"]),
+        lambda d: d["sources"]["github_repos"].update(search_topics=["a" * 51]),
+        lambda d: d["sources"]["github_repos"].update(watch_repos=["claude-code"]),
+        lambda d: d["sources"]["github_repos"].update(watch_repos=["a/b/c"]),
+        lambda d: d["sources"]["github_repos"].update(watch_repos=["a/.."]),
+        lambda d: d["sources"]["github_repos"].update(watch_repos=["a/b", "A/B"]),
+        lambda d: d["sources"]["github_repos"].update(search_days=0),
         lambda d: d["limits"].update(http_retry_waits_s=[5, -1]),
         lambda d: d["limits"].update(agent_max_turns=0),
         lambda d: d["feeds"][0].update(kind="hot"),
@@ -188,6 +200,16 @@ def test_invalid_values_are_rejected(base, mutate):
     mutate(data)
     with pytest.raises(ConfigError):
         parse_config(data)
+
+
+def test_github_repos_watch_repos_are_lowercased_and_topics_can_be_empty(base):
+    data = full(base)
+    data["sources"]["github_repos"].update(
+        search_topics=[], watch_repos=["Anthropics/Claude-Code", "a/b.js"]
+    )
+    repos = parse_config(data).github_repos
+    assert repos.search_topics == ()
+    assert repos.watch_repos == ("anthropics/claude-code", "a/b.js")
 
 
 def test_feed_text_date_and_pages_can_be_set(base):
