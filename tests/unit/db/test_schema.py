@@ -27,7 +27,7 @@ def test_creates_db_with_settings(tmp_path):
     assert pragma(conn, "foreign_keys") == 1
     assert pragma(conn, "busy_timeout") == BUSY_TIMEOUT_MS
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
-    assert tables == {"runs", "source_fetches", "items", "feed_snapshots"}
+    assert tables == {"runs", "source_fetches", "items", "feed_snapshots", "star_snapshots"}
     conn.close()
 
 
@@ -59,7 +59,7 @@ def test_upgrades_first_version_with_feed_snapshots(tmp_path, monkeypatch):
         )
         conn.close()
     conn = open_db(path)
-    assert pragma(conn, "user_version") == SCHEMA_VERSION == 2
+    assert pragma(conn, "user_version") == SCHEMA_VERSION
     assert [r[1] for r in conn.execute("PRAGMA table_info(feed_snapshots)")] == [
         "source_id",
         "target",

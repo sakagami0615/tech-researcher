@@ -1,0 +1,37 @@
+[
+  {
+    "source_id": "rss:github-blog",
+    "url": "https://github.blog/news/2026-11-02-example/?utm_source=rss",
+    "links": [
+      "https://github.com/Example-Org/Fast-Tool",
+      "https://github.com/example-org/fast-tool/releases/tag/v1.0",
+      "https://github.com/features/copilot",
+      "https://github.com/example-org",
+      "https://docs.github.com/en/rest"
+    ]
+  },
+  {
+    "source_id": "hatena-it",
+    "url": "https://b.hatena.ne.jp/entry/s/github.com/someone/agent-kit",
+    "link_url": "https://github.com/someone/agent-kit"
+  },
+  {
+    "source_id": "hackernews",
+    "url": "https://github.com/someone/agent-kit.git"
+  },
+  {
+    "source_id": "github_search",
+    "url": "https://github.com/infra-team/deployer/issues/12"
+  },
+  {
+    "source_id": "zenn-llm",
+    "url": "https://zenn.dev/u/articles/abc",
+    "links": [
+      "http://www.github.com/Example-Org/fast-tool#readme",
+      "https://gist.github.com/someone/0123abcd",
+      "https://github.com/orgs/example-org/repositories",
+      "https://github.com/sponsors/someone",
+      "javascript:alert(1)//github.com/x/y"
+    ]
+  }
+]

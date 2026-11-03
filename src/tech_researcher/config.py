@@ -7,7 +7,7 @@
 
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,12 @@ class Subquery:
     weight: float
 
 
+# GitHub の `owner/repo`（小文字）。持ち主は英数字と -（39文字まで）、名前は英数字と . _ -
+GITHUB_REPO_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,38}/(?!\.\.?$)[a-z0-9._-]{1,100}")
+# GitHub のトピック名。英小文字・数字・-（50文字まで）。検索条件（`topic:X`）に入れる
+_GITHUB_TOPIC = re.compile(r"[a-z0-9][a-z0-9-]{0,49}")
+
+
 @dataclass(frozen=True)
 class GitHubRepos:
     """GitHub の新着・急上昇（D-13）。
@@ -58,6 +64,8 @@ class GitHubRepos:
     D-13 の記号との対応：threshold_increase＝A、report_top_n＝N_report、new_repo_days＝D、
     new_repo_stars＝C、search_days＝D_search、search_min_stars＝C_search。
     search_days・search_min_stars は観測（PoC）で決める。
+    search_topics は Search で1つずつ検索するトピック。watch_repos は `owner/repo`（小文字に
+    そろえる）。
     """
 
     enabled: bool
@@ -319,7 +327,19 @@ def _github_repos(sources: _Table | None) -> GitHubRepos | None:
         search_min_stars=t.int_at_least("search_min_stars", minimum=0),
     )
     t.done()
-    return result
+    _check_names(t.path_of("search_topics"), result.search_topics, _GITHUB_TOPIC)
+    watch = tuple(repo.lower() for repo in result.watch_repos)
+    _check_names(t.path_of("watch_repos"), watch, GITHUB_REPO_NAME)
+    return replace(result, watch_repos=watch)
+
+
+def _check_names(path: str, names: tuple[str, ...], pattern: re.Pattern[str]) -> None:
+    for name in names:
+        if not pattern.fullmatch(name):
+            raise ConfigError(f"{path}: 形が違う（{name!r}）")
+    duplicated = sorted({x for x in names if names.count(x) > 1})
+    if duplicated:
+        raise ConfigError(f"{path}: 重複している {', '.join(duplicated)}")
 
 
 def _github_releases(sources: _Table | None) -> GitHubReleases | None:

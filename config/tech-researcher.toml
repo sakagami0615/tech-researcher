@@ -28,6 +28,28 @@ subqueries = [
   { search_query = "cloud infrastructure", ranking_query = "cloud and infrastructure news", sources = ["hackernews", "github"], weight = 1.0 },
 ]
 
+# GitHub の新着・急上昇のリポジトリ（D-13）。Star 数を測る候補を、Search（search_topics ごと）・
+# ほかの情報源での言及・監視リスト（watch_repos と、直近30日に測ったリポジトリ）から集める。
+# search_topics は GitHub のトピック名（英小文字・数字・-）。1つで Search を1回以上使う
+# （1分 limits.github_search_per_minute 回の間隔、1回の実行で limits.github_search_calls 回まで）。
+# 記号（D-13）：threshold_increase＝A、report_top_n＝N_report、new_repo_days＝D、
+# new_repo_stars＝C、search_days＝D_search、search_min_stars＝C_search。値は PoC で調整する
+[sources.github_repos]
+enabled = true
+display_name = "GitHub"
+search_topics = [
+  "llm", "ai-agent", "ai-agents", "mcp", "rag", "generative-ai", # 生成AI・LLM・AIエージェント
+  "coding-agent", "claude-code", "developer-tools", "cli",       # 開発者ツール
+  "kubernetes", "devops", "self-hosted",                         # クラウド・インフラ
+]
+watch_repos = ["anthropics/claude-code", "openai/codex"]
+threshold_increase = 100
+report_top_n = 10
+new_repo_days = 14
+new_repo_stars = 200
+search_days = 14        # 観測（PoC）までの仮の値
+search_min_stars = 200  # 観測（PoC）までの仮の値
+
 # RSS・Atom（D-11）。kind は new（新着）か popular（人気型。D-13）。
 # 省略できる項目と既定値：
 #   full_text = "content"     全文が入る欄。content・summary・none（全文なし）
