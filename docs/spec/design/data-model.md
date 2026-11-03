@@ -377,11 +377,15 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 ### 3.10 実装で決める細部
 
 - `STRICT` テーブルにするか、`CHECK` 制約で enum を縛るか
+  - 実装での対応（`src/tech_researcher/db/`）：`STRICT` にして型を確かめる。enum の値は `CHECK` で縛らず、書き込む側のコードで確かめる。SQLite で `CHECK` を変えるには表の作り直しが要り、値を足すたびに版が増えるため。例外として、runs の `run_id` にドライランの実行 ID（`dry-`）を入れない `CHECK` を置く（外部キーで他の表にも効く。6章）
 - インデックス（items の `target`・`canonical_url`、report_entries の `section` など）
+  - 実装での対応（runs・source_fetches・items）：items の（`cadence`, `target`, `canonical_url`）は一意制約の索引で足りるので、別に items の `canonical_url`（3.5 の対象をまたぐ照合）と runs の（`cadence`, `target`）（3.5 の前日の実行の取得記録）に索引を付ける
 - 月曜の日次・週次の重なりの制御。WAL と `busy_timeout` で足りるか、⑤ の Projects 登録を両方が同時に行わないよう実行の単位のロックが要るか（同じ Issue を Projects に2回追加したときの GitHub の応答は未確認）
 - star_snapshots のキーを `owner/repo` にするか GraphQL のノード ID にするか（初期案は `owner/repo`）
 - 不合格・実行エラー Issue を作る直前に、「作ろうとした」ことを issues に仮の状態で書くか
 - ドライランで DB を読み取り専用（`mode=ro`）で開くとき、WAL の `-shm` ファイルの扱いで開けないことがないか（実装の前に確かめる。開けない場合は `immutable` の指定などを検討する）
+  - 確かめた結果（SQLite 3.53.1（開発機）と 3.46.1（worker のイメージ））：`mode=ro` で開ける。本番の実行が開いている間（WAL にだけある行がある）も、コミット済みの内容を読み、DB と `-wal` を書き換えない。`-wal`・`-shm` がなければ SQLite が空のものを作る（DB の中身は変わらず、次に本番が開いたときにそのまま使い、閉じるときに消える）。そのため DB のフォルダに書き込める必要があり、本番と同じ利用者（worker の `TR_UID`）で動かす。`immutable` は、ドライランの間に本番が書くと読み違えるので使わない
+  - 表の版（`user_version`）がコードと違う DB は、ドライランでは使わずにエラーにする。読み取り専用では版を上げられないため
 
 ## 4. AI への入力と AI の出力
 
