@@ -210,6 +210,22 @@ enabled = true
 full_text = "none" # content ははてなの埋め込み用の HTML
 entry_date = "posted" # dc:date は最初のブックマークの日時（D-13）
 
+# GitHub Releases は REST API で取る（releases.atom は使わない。D-11）。追跡するリポジトリを owner/repo で書く。
+# 足す・消すだけで変えられる。大文字・小文字を区別しない。下書きとプレリリースは除く。
+# 1リポジトリにつき1回の要求（最新100件）。1つでも取れなければ情報源全体を失敗にする
+[sources.github_releases]
+enabled = true
+display_name = "GitHub Releases"
+repos = [
+  # 生成AI・LLM・AIエージェント（Anthropic は RSS がないので、ここと HN で拾う。D-11）
+  "anthropics/claude-code", "openai/codex", "google-gemini/gemini-cli",
+  "ollama/ollama", "vllm-project/vllm", "huggingface/transformers",
+  # 開発者ツール
+  "microsoft/vscode", "microsoft/TypeScript", "nodejs/node", "astral-sh/uv",
+  # クラウド・インフラ
+  "kubernetes/kubernetes", "hashicorp/terraform",
+]
+
 # 注目度の値による急上昇の基準（D-13）。metric ごとに、この値以上なら急上昇とする。
 # 書かなかった metric では判定しない。書ける metric は hn_points・hn_comments・hatena_bookmarks。
 # 値は PoC で調整する

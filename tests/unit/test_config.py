@@ -94,6 +94,8 @@ def test_repository_config_loads():
     assert config.hackernews.enabled and config.github_search.enabled and config.subqueries
     assert config.last30days_topic == "technology news"
     assert config.qiita.enabled and "LLM" in config.qiita.tags
+    assert config.github_releases.enabled
+    assert {"anthropics/claude-code", "openai/codex"} <= set(config.github_releases.repos)
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -293,6 +295,40 @@ def test_qiita_tags_are_read(base):
 def test_invalid_qiita_tags_are_rejected(base, tags, message):
     data = full(base)
     data["sources"]["qiita"]["tags"] = tags
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
+def test_github_releases_repos_are_read(base):
+    data = full(base)
+    data["sources"]["github_releases"]["repos"] = [
+        "openai/codex",
+        "microsoft/TypeScript",
+        "a/b.c_d",
+    ]
+    repos = parse_config(data).github_releases.repos
+    assert repos == ("openai/codex", "microsoft/TypeScript", "a/b.c_d")
+
+
+@pytest.mark.parametrize(
+    "repos, message",
+    [
+        ([], "1つ以上"),
+        ([""], "空でない"),
+        (["openai"], "owner/repo"),
+        (["openai/codex/releases"], "owner/repo"),
+        (["https://github.com/openai/codex"], "owner/repo"),
+        (["openai/.."], "owner/repo"),
+        (["openai/."], "owner/repo"),
+        (["-a/b"], "owner/repo"),
+        (["a/b?x=1"], "owner/repo"),
+        (["a/b c"], "owner/repo"),
+        (["openai/codex", "OpenAI/Codex"], "重複している OpenAI/Codex, openai/codex"),
+    ],
+)
+def test_invalid_github_releases_repos_are_rejected(base, repos, message):
+    data = full(base)
+    data["sources"]["github_releases"]["repos"] = repos
     with pytest.raises(ConfigError, match=message):
         parse_config(data)
 
