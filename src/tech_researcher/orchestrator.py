@@ -54,11 +54,17 @@ RUN_ID_LABEL = "tech-researcher.run-id"
 SUMMARY = "summary.json"  # ドライランの出力のフォルダに残す要約（structure.md 7.2）
 
 # compose に渡す環境変数（許可リスト）。PATH・HOME は docker の CLI とプラグインを探すため、
-# DOCKER_HOST・DOCKER_CONTEXT は Docker のデーモンの指定（rootless など）のため。
-# TR_* は compose.yaml の変数の展開に使う。ほかの変数（認証情報、COMPOSE_* などの compose の設定）は
-# 渡さない。認証情報は compose が env_file から各コンテナにだけ渡す（D-05）
-COMPOSE_ENV = ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT")
-UID_ENV = ("TR_UID", "TR_GID")
+# DOCKER_HOST は Docker のデーモンの指定（rootless など）のため。DOCKER_CONFIG は統括スクリプトが
+# 専用のフォルダを指定する（下）。TR_* は compose.yaml の変数の展開に使う。ほかの変数（認証情報、
+# COMPOSE_* などの compose の設定）は渡さない。認証情報は compose が env_file から各コンテナにだけ
+# 渡す（D-05）。DOCKER_CONTEXT は渡さない（コンテキストは利用者の Docker の設定にあり、専用の
+# フォルダからは見えないため。デーモンは DOCKER_HOST で指定する）
+COMPOSE_ENV = ("PATH", "HOME", "DOCKER_HOST")
+UID_ENV = {"TR_UID": lambda: os.getuid(), "TR_GID": lambda: os.getgid()}
+# Docker の CLI の設定のフォルダ（DOCKER_CONFIG）。利用者の ~/.docker/config.json の proxies は
+# compose がコンテナの環境変数に入れるので、使わせない。worker にマウントする TR_DATA_DIR の下には
+# 置かない（コンテナの中から、次に起動するコンテナの設定を書き換えられないように）
+DOCKER_CONFIG_DIR = Path("tech-researcher") / "docker"
 
 MINUTE = 60.0  # 設定の上限（分）を秒にする。テストで縮める
 STOP_GRACE_S = 10.0  # 止めるとき、SIGTERM から SIGKILL までの猶予
@@ -269,15 +275,32 @@ def check_environment(environ: Mapping[str, str], repo: Path) -> tuple[Path, dic
         raise UsageError(f"TR_DATA_DIR のフォルダがない（先に作る）: {data}")
     env = {name: environ[name] for name in COMPOSE_ENV if environ.get(name)}
     env["TR_DATA_DIR"] = str(data)
-    for name in UID_ENV:
-        value = environ.get(name, "")
-        if not value:
-            continue  # compose.yaml の既定（1000）を使う
-        # sudo の下の $(id -u) などで 0 になると、コンテナが root で動く
+    env["DOCKER_CONFIG"] = str(docker_config(environ))
+    for name, current in UID_ENV.items():
+        # 未設定なら bin/tr-run を動かしている人の ID（統括スクリプトが作るフォルダの持ち主と同じ）
+        value = environ.get(name) or str(current())
+        # root で動かしたときや、sudo の下の $(id -u) などで 0 になると、コンテナが root で動く
         if not _UID.fullmatch(value) or not 0 < int(value) <= MAX_ID:
-            raise UsageError(f"{name} は 1〜{MAX_ID} の数にする（0 は root）")
+            raise UsageError(f"{name} は 1〜{MAX_ID} の数にする（0 は root。root で動かさない）")
         env[name] = str(int(value))
     return data, env
+
+
+def docker_config(environ: Mapping[str, str]) -> Path:
+    """このプロジェクト専用の Docker の CLI の設定のフォルダを用意する（権限 700）。
+
+    `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`。公開イメージの取得とビルドには
+    設定が要らないので、空のフォルダでよい。
+    """
+    base = environ.get("XDG_CONFIG_HOME") or (
+        str(Path(environ["HOME"]) / ".config") if environ.get("HOME") else ""
+    )
+    if not base or not Path(base).is_absolute():
+        raise UsageError("HOME（または XDG_CONFIG_HOME）を絶対パスで設定する")
+    path = Path(base) / DOCKER_CONFIG_DIR
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
 
 
 @contextmanager
@@ -471,9 +494,12 @@ def _stage_summary(stdout: str, names: Mapping[str, str]) -> dict | None:
     """段階の CLI の要約（cli.py）を読み、情報源 ID を設定ファイルの表示名にする。
 
     形が違うとき、または設定にない情報源 ID があるときは None（要約に設定の名前以外を出さない）。
+    要約は最後の行だけを読む。イメージがないと compose run がビルドし、その進み具合を標準出力に
+    出すため（実機で確認）。
     """
+    lines = stdout.strip().splitlines()
     try:
-        data = json.loads(stdout)
+        data = json.loads(lines[-1]) if lines else None
     except json.JSONDecodeError:
         return None
     if not isinstance(data, dict):

@@ -53,7 +53,7 @@ def run_collect(
     log.write("collect", "start")
     feeds = [f for f in config.feeds if f.enabled]
     results = [_collect_one(collect, f, config.limits, log) for f in feeds]
-    popular = {f"rss:{f.id}" for f in feeds if f.kind == "popular"}
+    popular = {feed_source_id(f) for f in feeds if f.kind == "popular"}
     judged = judge_feed_entries(results, popular, target, db, write=bool(write_db))
     records = mark_thresholds(judged.records, config.attention_thresholds)
     items = [i for i in aggregate(records) if in_period(i, target)]

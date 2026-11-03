@@ -192,6 +192,41 @@ def test_uid_is_normalized(host, capfd):
     assert (env["TR_UID"], env["TR_GID"]) == ("1001", "2147483647")
 
 
+def test_uid_defaults_to_runner(host, capfd, monkeypatch):
+    monkeypatch.setattr(orchestrator.os, "getuid", lambda: 1234)
+    monkeypatch.setattr(orchestrator.os, "getgid", lambda: 5678)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+    summary_of(capfd)
+    env = host.calls()[0]["env"]
+    assert (env["TR_UID"], env["TR_GID"]) == ("1234", "5678")
+
+
+def test_root_runner_is_rejected_without_explicit_ids(host, capfd, monkeypatch):
+    monkeypatch.setattr(orchestrator.os, "getuid", lambda: 0)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    assert "TR_UID" in capfd.readouterr().err
+    assert host.calls() == []
+
+
+def test_docker_config_is_private_and_own(host, capfd, tmp_path):
+    xdg = tmp_path / "xdg"
+    assert (
+        orchestrator.main(["daily", "--dry-run"], {**host.environ, "XDG_CONFIG_HOME": str(xdg)})
+        == 0
+    )
+    summary_of(capfd)
+    path = xdg / "tech-researcher" / "docker"
+    assert host.calls()[0]["env"]["DOCKER_CONFIG"] == str(path)
+    assert path.stat().st_mode & 0o777 == 0o700
+    assert not path.is_relative_to(host.data)  # worker にマウントするフォルダの外
+
+
+def test_rejects_missing_home(host, capfd):
+    environ = {k: v for k, v in host.environ.items() if k != "HOME"}
+    assert orchestrator.main(["daily", "--dry-run"], environ) == 2
+    assert "HOME" in capfd.readouterr().err
+
+
 def test_rejects_bad_config(host, capfd):
     (host.repo / "config" / "tech-researcher.toml").write_text("[daily]\nperiod_days = 0\n")
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
@@ -209,6 +244,8 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "COMPOSE_PROJECT_NAME": "evil",
         "TR_SECRETS_DIR": "/srv/secrets",
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+        "DOCKER_CONTEXT": "desktop-linux",  # 専用の設定のフォルダからは見えないので渡さない
+        "DOCKER_CONFIG": "/home/someone/.docker",  # 利用者の設定（proxies など）は使わない
         "TR_UID": "1001",
         "TR_GID": "1002",
     }
@@ -222,6 +259,7 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "PATH": host.environ["PATH"],
         "HOME": host.environ["HOME"],
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+        "DOCKER_CONFIG": str(Path(host.environ["HOME"]) / ".config" / "tech-researcher" / "docker"),
         "TR_DATA_DIR": str(host.data),
         "TR_UID": "1001",
         "TR_GID": "1002",
@@ -566,6 +604,12 @@ def test_lock_is_released_after_run(host, capfd):
         ('{"items": 2, "failed_sources": ["qiita"]}', {"items": 2, "failed_sources": ["Qiita"]}),
         ('{"items": 2, "failed_sources": ["rss:gone"]}', None),
         ('{"items": 0, "failed_sources": [], "x": 1}', {"items": 0, "failed_sources": []}),
+        # ビルドの進み具合の後に要約（イメージがないときの compose run）
+        (
+            '#1 DONE 0.0s\n\n{"items": 1, "failed_sources": []}\n',
+            {"items": 1, "failed_sources": []},
+        ),
+        ('{"items": 1, "failed_sources": []}\nnot json\n', None),
         ("", None),
         ("[]", None),
         ('{"items": true, "failed_sources": []}', None),
