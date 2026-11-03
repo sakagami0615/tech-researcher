@@ -210,6 +210,13 @@ enabled = true
 full_text = "none" # content ははてなの埋め込み用の HTML
 entry_date = "posted" # dc:date は最初のブックマークの日時（D-13）
 
+# 注目度の値による急上昇の基準（D-13）。metric ごとに、この値以上なら急上昇とする。
+# 書かなかった metric では判定しない。書ける metric は hn_points・hn_comments・hatena_bookmarks。
+# 値は PoC で調整する
+[attention_thresholds]
+hn_points = 100        # HN のポイント。2026-11-03 のフロントページ30件では約3分の2が100以上
+hatena_bookmarks = 100 # はてなのブックマーク数。2026-11-03 の人気エントリー30件では上位4件が100以上
+
 # 上限（D-21、structure.md 6章）。運用で調整する
 [limits]
 http_connect_timeout_s = 10

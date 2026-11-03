@@ -83,6 +83,18 @@ MIGRATIONS: tuple[str, ...] = (
     ) STRICT;
     CREATE INDEX items_canonical_url ON items (canonical_url);
     """,
+    # 人気型フィードの取得記録（D-13）。日次の取得ごとに、期間で絞る前の全件を残す
+    """
+    CREATE TABLE feed_snapshots (
+        source_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        canonical_url TEXT NOT NULL,
+        rank INTEGER NOT NULL,
+        attention_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (source_id, target, canonical_url)
+    ) STRICT;
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

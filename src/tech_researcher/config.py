@@ -19,6 +19,15 @@ class ConfigError(ValueError):
 # CLI に渡すトピックが比較モード（「A vs B」など）に入る形。last30days-skill の判定より広めに止める
 _COMPARISON_TOPIC = re.compile(r"\b(?:vs\.?|versus|compared to|difference between)(?!\w)|/", re.I)
 
+# 注目度の基準（D-13 の basis = threshold）を置ける metric。収集処理が出すもの（data-model.md 2.4）
+ATTENTION_METRICS = frozenset(
+    {
+        "hn_points",
+        "hn_comments",
+        "hatena_bookmarks",
+    }
+)
+
 # --plan に書ける情報源名。設定の sources.hackernews は "hackernews"、
 # sources.github_search は "github" にあたる
 LAST30DAYS_PLAN_SOURCES = frozenset({"hackernews", "github"})
@@ -159,6 +168,8 @@ class Config:
         str | None
     )  # last30days-skill の CLI に渡すトピック。[last30days] がなければ None
     subqueries: tuple[Subquery, ...]
+    # 注目度の基準（metric → この値以上で急上昇。D-13）。書かなかった metric では判定しない
+    attention_thresholds: dict[str, int]
     limits: Limits
 
 
@@ -178,6 +189,7 @@ def parse_config(data: dict[str, Any]) -> Config:
     sources = top.table("sources", required=False)
     last30days = top.table("last30days", required=False)
     limits = top.table("limits")
+    thresholds = top.table("attention_thresholds", required=False)
     feeds = top.array_of_tables("feeds")
     top.done()
     topic, subqueries = _last30days(last30days)
@@ -193,6 +205,7 @@ def parse_config(data: dict[str, Any]) -> Config:
         feeds=tuple(_feed(f) for f in feeds) + _zenn_topic_feeds(sources),
         last30days_topic=topic,
         subqueries=subqueries,
+        attention_thresholds=_attention_thresholds(thresholds),
         limits=_limits(limits),
     )
     if sources is not None:
@@ -260,6 +273,9 @@ class _Table:
         if not all(isinstance(v, str) and v for v in value):
             raise ConfigError(f"{self.path_of(name)}: 空でない文字列の配列にする")
         return tuple(value)
+
+    def names(self) -> list[str]:
+        return list(self._data)
 
     def done(self) -> None:
         unknown = sorted(set(self._data) - self._seen)
@@ -417,6 +433,17 @@ def _check_unique_feed_ids(feeds: tuple[Feed, ...]) -> None:
     duplicated = sorted({i for i in ids if ids.count(i) > 1})
     if duplicated:
         raise ConfigError(f"feeds: id が重複している {', '.join(duplicated)}")
+
+
+def _attention_thresholds(t: _Table | None) -> dict[str, int]:
+    if t is None:
+        return {}
+    unknown = sorted(set(t.names()) - ATTENTION_METRICS)
+    if unknown:
+        raise ConfigError(f"attention_thresholds: 知らない metric {', '.join(unknown)}")
+    result = {name: t.int_at_least(name) for name in t.names()}
+    t.done()
+    return result
 
 
 def _last30days(t: _Table | None) -> tuple[str | None, tuple[Subquery, ...]]:

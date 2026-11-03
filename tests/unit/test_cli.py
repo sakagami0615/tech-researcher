@@ -57,6 +57,7 @@ def test_collect_writes_result_and_prints_summary_only(env, capsys):
         "items": 2,
         "sources": 1,
         "failed_sources": [],
+        "unjudged_feed_sources": [],
     }
     assert "記事" not in out  # タイトルなどの外部由来の文は出さない
     run_dir = Path(env["TR_DATA_DIR"]) / "dry-run" / DRY

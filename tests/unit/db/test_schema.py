@@ -27,7 +27,7 @@ def test_creates_db_with_settings(tmp_path):
     assert pragma(conn, "foreign_keys") == 1
     assert pragma(conn, "busy_timeout") == BUSY_TIMEOUT_MS
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
-    assert tables == {"runs", "source_fetches", "items"}
+    assert tables == {"runs", "source_fetches", "items", "feed_snapshots"}
     conn.close()
 
 
@@ -41,6 +41,33 @@ def test_reopen_keeps_version_and_data(tmp_path):
     conn.close()
     conn = open_db(path)
     assert pragma(conn, "user_version") == SCHEMA_VERSION
+    assert conn.execute("SELECT count(*) FROM runs").fetchone() == (1,)
+    conn.close()
+
+
+def test_upgrades_first_version_with_feed_snapshots(tmp_path, monkeypatch):
+    """版1の DB（runs・source_fetches・items だけ）に、版2で feed_snapshots を足す。"""
+    path = tmp_path / "x.sqlite3"
+    with monkeypatch.context() as m:
+        m.setattr(schema, "MIGRATIONS", schema.MIGRATIONS[:1])
+        m.setattr(schema, "SCHEMA_VERSION", 1)
+        conn = open_db(path)
+        conn.execute(
+            "INSERT INTO runs (run_id, cadence, target, period_start, period_end, started_at,"
+            " status) VALUES ('20261024-060000-abcd', 'daily', '2026-10-23', 'a', 'b', 'c',"
+            " 'running')"
+        )
+        conn.close()
+    conn = open_db(path)
+    assert pragma(conn, "user_version") == SCHEMA_VERSION == 2
+    assert [r[1] for r in conn.execute("PRAGMA table_info(feed_snapshots)")] == [
+        "source_id",
+        "target",
+        "canonical_url",
+        "rank",
+        "attention_json",
+        "fetched_at",
+    ]
     assert conn.execute("SELECT count(*) FROM runs").fetchone() == (1,)
     conn.close()
 

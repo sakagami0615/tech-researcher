@@ -312,6 +312,10 @@ enabled = true
 display_name = "Qiita"
 tags = ["LLM", "AWS"]
 
+[attention_thresholds]          # 注目度の値による急上昇の基準（D-13 の basis = threshold）。この値以上
+hn_points = 100                 # 書かなかった metric では判定しない。値は PoC で調整する
+hatena_bookmarks = 100
+
 [limits]                        # 上限（6章。D-21）
 # agent_max_turns =           # 値は PoC で決める（3.8 の7）
 # ほかの上限も同じく置く
