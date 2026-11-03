@@ -326,6 +326,36 @@ def test_stage_limits_must_fit_in_job(base):
         parse_config(data)
 
 
+def test_attention_thresholds_are_read(base):
+    assert load_config(CONFIG_PATH).attention_thresholds == {
+        "hn_points": 100,
+        "hatena_bookmarks": 100,
+    }
+    data = full(base)
+    data["attention_thresholds"] = {"hn_comments": 30}
+    assert parse_config(data).attention_thresholds == {"hn_comments": 30}
+    del data["attention_thresholds"]
+    assert parse_config(data).attention_thresholds == {}  # 書かなければ基準超えを判定しない
+
+
+@pytest.mark.parametrize(
+    ("thresholds", "message"),
+    [
+        ({"hn_point": 100}, "知らない metric hn_point"),
+        ({"qiita_likes": 100}, "知らない metric qiita_likes"),  # 投稿日時がなく判定できない
+        ({"hn_points": 0}, "1 以上"),
+        ({"hn_points": 1.5}, "int"),
+        ({"hn_points": True}, "int"),
+        ([100], "表"),
+    ],
+)
+def test_invalid_attention_thresholds_are_rejected(base, thresholds, message):
+    data = full(base)
+    data["attention_thresholds"] = thresholds
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
 def test_broken_toml_is_reported(tmp_path):
     path = tmp_path / "broken.toml"
     path.write_text("[daily\n", encoding="utf-8")

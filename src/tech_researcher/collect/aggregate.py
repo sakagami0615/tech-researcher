@@ -15,10 +15,15 @@ def aggregate(records: Iterable[Record]) -> list[Item]:
     """
     groups: dict[str, list[Record]] = {}
     for record in records:
-        key = normalize_url(record.link_url or "") or normalize_url(record.url)
+        key = record_key(record)
         if key is not None:
             groups.setdefault(key, []).append(record)
     return [_merge(url, group) for url, group in groups.items()]
+
+
+def record_key(record: Record) -> str | None:
+    """まとめるときのキー（指している先の正規化した URL。2.2）。正規化できなければ None。"""
+    return normalize_url(record.link_url or "") or normalize_url(record.url)
 
 
 def _merge(url: str, group: list[Record]) -> Item:

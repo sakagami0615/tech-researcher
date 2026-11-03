@@ -102,3 +102,45 @@ def test_published_before_period(published_at, precision, expected):
     events = [Event("published", published_at)] if published_at else [Event("posted", IN)]
     it = item(record(events, published_at, precision=precision))
     assert published_before_period(it, TARGET) is expected
+
+
+def hn_post(day, events=()):
+    """last30days-skill の HN のレコード。投稿の日付を UTC の日付だけの公開日時として持つ。"""
+    at = datetime(2026, 10, day, tzinfo=UTC)
+    return record(
+        [Event("published", at), *events],
+        at,
+        url="https://e.example/a",
+        precision="date",
+    )
+
+
+def test_new_hn_post_of_old_article_is_dropped_without_spike():
+    # 公開が期間より前の記事（RSS）に期間内の HN の投稿があっても、急上昇でなければ残さない
+    rss = record([Event("published", BEFORE)], BEFORE)
+    assert not in_period(item(rss, hn_post(23)), TARGET)
+    assert published_before_period(item(hn_post(23), rss), TARGET)
+
+
+def test_new_hn_post_of_old_article_is_kept_when_points_cross_threshold():
+    rss = record([Event("published", BEFORE)], BEFORE)
+    spike = Event("attention_spike", datetime(2026, 10, 23, tzinfo=UTC), "threshold")
+    assert in_period(item(rss, hn_post(23, [spike])), TARGET)
+
+
+@pytest.mark.parametrize(("day", "expected"), [(22, True), (21, False)])
+def test_threshold_on_date_only_post_uses_utc_dates(day, expected):
+    spike = Event("attention_spike", datetime(2026, 10, day, tzinfo=UTC), "threshold")
+    rss = record([Event("published", BEFORE)], BEFORE)
+    assert in_period(item(rss, hn_post(day, [spike])), TARGET) is expected
+
+
+def test_hn_post_alone_still_uses_its_date():
+    assert in_period(item(hn_post(23)), TARGET)
+
+
+def test_feed_entry_is_kept_although_observed_after_window():
+    # 対象日 10/23 の判定は 10/24 6:00 の実行の取得で観測する（窓の終わりより後）
+    observed = datetime(2026, 10, 24, 6, 0, 5, tzinfo=JST)
+    events = [Event("published", BEFORE), Event("attention_spike", observed, "feed_entry")]
+    assert in_period(item(record(events, BEFORE)), TARGET)
