@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 実行の唯一の入口（D-04、structure.md 3.2）。cron と外側のスキル（/tr-daily・/tr-weekly）が呼ぶ。
+#   bin/tr-run daily|weekly [--dry-run]
+# 引数の検査、種類ごとのロック（flock）、ジョブ全体の上限、compose に渡す環境変数の絞り込み、
+# 定型の要約の出力は、統括スクリプト（src/tech_researcher/orchestrator.py）が行う。
+# ホストに uv が要る。作業ディレクトリはリポジトリにする（設定ファイルと compose.yaml の場所）。
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
+# -I：作業ディレクトリのファイルや PYTHON* の環境変数を import の経路に入れない
+exec uv run --frozen --no-dev --quiet python -I -m tech_researcher.orchestrator "$@"
