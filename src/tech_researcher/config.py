@@ -349,12 +349,17 @@ def _check_names(path: str, names: tuple[str, ...], pattern: re.Pattern[str]) ->
 
 
 def _github_releases(sources: _Table | None) -> GitHubReleases | None:
+    """repos は `owner/repo`（watch_repos と同じく小文字にそろえる。GitHub は区別しない）。"""
     t = _source(sources, "github_releases")
     if t is None:
         return None
     result = GitHubReleases(t.value("enabled", bool), t.text("display_name"), t.strings("repos"))
     t.done()
-    return result
+    if not result.repos:
+        raise ConfigError(f"{t.path_of('repos')}: 1つ以上書く")
+    repos = tuple(repo.lower() for repo in result.repos)
+    _check_names(t.path_of("repos"), repos, GITHUB_REPO_NAME)
+    return replace(result, repos=repos)
 
 
 # Qiita のタグ名に書けない形。検索条件（`tag:A,B`）に入れるので、空白・カンマ・引用符を止める
