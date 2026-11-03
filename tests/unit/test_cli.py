@@ -68,6 +68,9 @@ def test_collect_writes_result_and_prints_summary_only(env, capsys):
     ]
     events = [json.loads(x)["event"] for x in (run_dir / "log.jsonl").read_text().splitlines()]
     assert events == ["start", "source_result", "end"]
+    # 日次は ② の入力も書く（項目には並びの順に仮の ID を付ける）
+    data = json.loads((run_dir / "agent-input.json").read_text(encoding="utf-8"))
+    assert [i["id"] for i in data["items"]] == ["d1", "d2"]
 
 
 def test_weekly_target_comes_from_run_id(env, capsys):
@@ -75,6 +78,7 @@ def test_weekly_target_comes_from_run_id(env, capsys):
     (Path(env["TR_DATA_DIR"]) / "dry-run" / run_id).mkdir()
     assert cli.main(["collect", "weekly", "--run-id", run_id], env) == 0
     assert json.loads(capsys.readouterr().out)["target"] == "2026-10-26"
+    assert not (Path(env["TR_DATA_DIR"]) / "dry-run" / run_id / "agent-input.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -98,7 +102,15 @@ def test_invalid_config_exits_2(env, capsys):
     assert "必須の項目がない" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("args", [[], ["post"], ["collect", "monthly", "--run-id", DRY]])
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["post"],
+        ["collect", "monthly", "--run-id", DRY],
+        ["verify", "weekly", "--run-id", DRY],  # 週次の ③ はまだない
+    ],
+)
 def test_unknown_arguments_are_rejected(env, args):
     with pytest.raises(SystemExit) as e:
         cli.main(args, env)
@@ -149,3 +161,18 @@ def test_failure_when_log_cannot_be_written_prints_no_details(env, capsys, monke
     assert cli.main(["collect", "daily", "--run-id", DRY], env) == 1
     captured = capsys.readouterr()
     assert "外部の文" not in captured.err and TOKEN not in captured.err
+
+
+def test_verify_failure_is_logged_as_verify(env, capsys):
+    # ② の出力がない（統括スクリプトの誤りなど）。段階の途中の失敗にし、③ の失敗として残す
+    assert cli.main(["collect", "daily", "--run-id", DRY], env) == 0
+    assert cli.main(["verify", "daily", "--run-id", DRY], env) == 1
+    captured = capsys.readouterr()
+    assert "verify が失敗した" in captured.err
+    log = Path(env["TR_DATA_DIR"]) / "dry-run" / DRY / "log.jsonl"
+    last = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert (last["stage"], last["event"], last["error_category"]) == (
+        "verify",
+        "failure",
+        "FileNotFoundError",
+    )

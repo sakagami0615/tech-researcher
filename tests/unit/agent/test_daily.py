@@ -8,8 +8,8 @@ from tech_researcher.agent.daily import (
     InputTooLarge,
     build_daily_input,
     encode_input,
-    evaluate_daily,
     inclusion_event,
+    parse_daily_output,
 )
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.records import Attention, Event, GitHubRepo, Record
@@ -195,19 +195,11 @@ OUTPUT_ITEM = {
 }
 
 
-def test_ai_boundary_can_be_replaced():
-    data = build(record())
-    received = []
-
-    def fake(payload):
-        received.append(payload)
-        return {"items": [OUTPUT_ITEM]}
-
-    (entry,) = evaluate_daily(fake, data)
-    assert evaluate_daily(lambda _: {"items": [{**OUTPUT_ITEM, "item_ids": ["i1", "i1"]}]}, data)[
+def test_output_is_split_into_entries():
+    (entry,) = parse_daily_output({"items": [OUTPUT_ITEM]})
+    assert parse_daily_output({"items": [{**OUTPUT_ITEM, "item_ids": ["i1", "i1"]}]})[
         0
     ].item_ids == ("i1",)
-    assert received == [data]
     assert entry.item_ids == ("i1",) and entry.points == ("要点1", "要点2")
     assert entry.headline == "見出し" and entry.category == "cloud"
 
@@ -231,4 +223,4 @@ def test_ai_boundary_can_be_replaced():
 )
 def test_broken_output_is_rejected(output):
     with pytest.raises(ValueError):
-        evaluate_daily(lambda _: output, build(record()))
+        parse_daily_output(output)

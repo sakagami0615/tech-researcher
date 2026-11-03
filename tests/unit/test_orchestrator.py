@@ -3,7 +3,8 @@
 docker を偽のプロセス（PATH の先頭に置いた `docker`）に差し替え、ロックは flock で確かめる。
 偽の docker は、受け取った引数と環境変数とロックの状態を calls.jsonl に書き、behavior.json の
 指示（ok・fail・bad・sleep）どおりに振る舞う。偽の docker には許可した環境変数しか届かないので、
-指示はファイルで渡す。
+指示はファイルで渡す。① は ok のとき、日次の ② の入力（項目なし）も書く。③ は常に合格を返す。
+② の AI は、項目なしの出力を返す偽の実装に差し替える。段階を本物でつなぐ一巡は test_daily_flow.py。
 """
 
 import fcntl
@@ -25,6 +26,7 @@ from tech_researcher.orchestrator import source_names
 ROOT = Path(__file__).parents[2]
 LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").split("[limits]")[1]
 TOKEN = "ghp" + "_" + "y" * 36  # テスト用のダミー。実行時に組み立てる
+PRODUCT_CALL_AGENT = orchestrator.call_agent
 
 FAKE_DOCKER = f"""#!{sys.executable}
 import fcntl, json, os, sys, time
@@ -45,8 +47,15 @@ command = sys.argv[1]
 mode = behavior["mode"]
 if command == "ps":
     print("cid1" if mode == "sleep" else "")
+elif command == "compose" and "verify" in sys.argv:
+    print(json.dumps({{"result": "report", "entries": 0, "excluded": 0}}))
 elif command == "compose":
     if mode == "ok":
+        stage, cadence, _, run_id = sys.argv[-4:]
+        if cadence == "daily":
+            kind = "dry-run" if run_id.startswith("dry-") else "work"
+            run_dir = Path(os.environ["TR_DATA_DIR"]) / kind / run_id
+            (run_dir / "agent-input.json").write_text(json.dumps({{"task": "daily", "items": []}}))
         print(json.dumps({{"items": 3, "sources": 3, "failed_sources": behavior["failed"]}}))
     elif mode == "fail":
         print("tech-researcher: collect が失敗した " + behavior["secret"], file=sys.stderr)
@@ -111,6 +120,7 @@ def host(tmp_path, monkeypatch) -> Host:
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
     h.behave("ok")
+    monkeypatch.setattr(orchestrator, "call_agent", lambda job, body: {"items": []})
     monkeypatch.setattr(orchestrator, "MINUTE", 0.05)
     monkeypatch.setattr(orchestrator, "STOP_GRACE_S", 1.0)
     monkeypatch.setattr(orchestrator, "POLL_S", 0.02)
@@ -252,7 +262,10 @@ def test_compose_gets_only_allowed_environment(host, capfd):
     assert orchestrator.main(["daily", "--dry-run"], environ) == 0
     summary = summary_of(capfd)
     run_id = summary["run_id"]
-    [call] = host.calls()
+    calls = host.calls()
+    assert [c["argv"][-4] for c in calls] == ["collect", "verify"]  # ① と ③
+    assert all(c["env"] == calls[0]["env"] for c in calls)
+    call = calls[0]
     env = call["env"]
     env.pop("LC_CTYPE", None)  # 偽の docker（Python）がロケールの強制で足すことがある
     assert env == {
@@ -320,9 +333,12 @@ def test_dry_run_prints_summary_only_and_keeps_it(host, capfd):
     assert json.loads((out_dir / "summary.json").read_text(encoding="utf-8")) == summary
     assert [(r["stage"], r["event"]) for r in host.log(run_id)] == [
         ("job", "start"),
+        ("analyze", "start"),
+        ("analyze", "end"),
         ("job", "end"),
     ]
-    assert host.calls()[0]["locked"]  # 段階の間はロックを持っている
+    assert json.loads((out_dir / "agent-output.json").read_text()) == {"items": []}
+    assert all(c["locked"] for c in host.calls())  # 段階の間はロックを持っている
 
 
 def test_weekly_target_is_monday(host, capfd):
@@ -343,13 +359,35 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
     run_id = summary["run_id"]
     assert not run_id.startswith("dry-")
     assert summary["result"] == "error"
-    assert summary["failed_stage"] == "analyze"
+    assert summary["failed_stage"] == "post"  # ⑤ はまだない
     assert summary["error_category"] == "not_implemented"
     assert summary["items"] == 3
     assert summary["output_dir"] is None
     assert list((host.data / "work").iterdir()) == [host.data / "work" / ".lock"]  # 消した
-    assert ("analyze", "failure") in [(r["stage"], r["event"]) for r in host.log(run_id)]
+    assert ("post", "failure") in [(r["stage"], r["event"]) for r in host.log(run_id)]
     assert host.calls()[0]["locked"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_daily_stops_at_analyze_until_agent_exists(host, capfd, monkeypatch, dry_run):
+    """製品の ② はまだ AI を呼べない（#18）。③ を起動せずに実行エラーにする。"""
+    monkeypatch.setattr(orchestrator, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
+    host.behave("ok", lock="daily-dry-run" if dry_run else "daily")
+    assert orchestrator.main(["daily", *(["--dry-run"] if dry_run else [])], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "analyze",
+        "not_implemented",
+    )
+    assert [c["argv"][-4] for c in host.calls()] == ["collect"]
+
+
+def test_weekly_dry_run_ends_after_collect(host, capfd):
+    host.behave("ok", lock="weekly-dry-run")
+    assert orchestrator.main(["weekly", "--dry-run"], host.environ) == 0
+    assert summary_of(capfd)["result"] == "dry_run"
+    assert [c["argv"][-4] for c in host.calls()] == ["collect"]
 
 
 @pytest.mark.parametrize(("mode", "category"), [("fail", "exit_1"), ("bad", "bad_output")])

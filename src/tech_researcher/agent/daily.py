@@ -1,12 +1,13 @@
 """日次の ② 評価・要約への入力と、その出力（data-model.md 4.1・4.2、D-06・D-18）。
 
 外部由来の自由文は各項目の untrusted の中にだけ入れ、出典は ID で受け取る。
-AI の呼び出しは evaluate（入力の dict を受け、構造化出力の dict を返す関数）に閉じ、
-テストでは偽の実装に差し替える。正式なスキーマの検査は後の Issue で足す。
+AI の呼び出しは統括スクリプトの call_agent に閉じ（テストでは偽の実装に差し替える）、ここでは
+入力を作ることと、受け取った構造化出力を項目に分けることだけを行う。正式なスキーマの検査は
+後の Issue で足す。
 """
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -21,8 +22,6 @@ DEPTHS = ("full", "brief")
 
 # 掲載の根拠とする出来事の優先順位（2.4）
 _INCLUSION_ORDER = ("published", "released", "new_repo", "attention_spike", "posted")
-
-Evaluate = Callable[[dict], dict]
 
 
 class InputTooLarge(Exception):
@@ -176,9 +175,8 @@ def _iso(moment: datetime | None) -> str | None:
     return None if moment is None else moment.astimezone(JST).isoformat()
 
 
-def evaluate_daily(evaluate: Evaluate, data: dict) -> list[DailyEntry]:
-    """AI を呼び、出力を項目に分ける。形が崩れていれば ValueError（D6(a) の最小の形）。"""
-    output = evaluate(data)
+def parse_daily_output(output: object) -> list[DailyEntry]:
+    """AI の構造化出力を項目に分ける。形が崩れていれば ValueError（D6(a) の最小の形）。"""
     if not isinstance(output, dict) or not isinstance(output.get("items"), list):
         raise ValueError("出力に items の配列がない")
     return [_entry(raw) for raw in output["items"]]

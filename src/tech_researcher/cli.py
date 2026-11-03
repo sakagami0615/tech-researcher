@@ -1,8 +1,9 @@
 """コマンドの入口（structure.md 2.2）。worker の各段階を1つずつ起動する。
 
-統括スクリプト（#16）が `docker compose run --rm -T worker <段階> …` で呼ぶ（D-04）。実行 ID と
+統括スクリプト（#16）が `docker compose run --rm -T worker <段階> …` で呼ぶ（D-04）。段階は
+`collect`（①）と `verify`（③、日次だけ）。実行 ID と
 実行のフォルダは統括スクリプトが用意し、段階は実行 ID の日付から対象と期間を決める。
-標準出力には、コードが作る要約（件数と情報源の ID）だけを JSON で出す。外部由来の文と
+標準出力には、コードが作る要約（件数・情報源の ID・結果の種別）だけを JSON で出す。外部由来の文と
 例外の中身は出さず、ログ（秘匿情報をマスクする）にだけ残す（structure.md 3.2・7.3）。
 相対パスは作業ディレクトリ（ホストではリポジトリ、worker では /app）から解く。
 
@@ -22,6 +23,7 @@ from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir
 from tech_researcher.stages.collect import run_collect
+from tech_researcher.stages.daily import run_verify, write_daily_input
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -42,10 +44,10 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     scanner = SecretScanner(known_secret_values(environ))
     log = RunLog(files.log, files.run_id, args.cadence, target.key, scanner)
     try:
-        summary = run_collect(config, target, files.dir, log)
+        summary = _run(args, config, target, files, log, scanner)
     except Exception as e:
         try:
-            log.write("collect", "failure", error_category=type(e).__name__, exc=e)
+            log.write(args.stage, "failure", error_category=type(e).__name__, exc=e)
         except Exception:
             pass  # ログに書けなくても、例外の中身（外部由来の文を含みうる）は stderr に出さない
         print(f"tech-researcher: {args.stage} が失敗した（ログ：{files.log}）", file=sys.stderr)
@@ -65,12 +67,36 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     return 0
 
 
+def _run(
+    args: argparse.Namespace,
+    config: Config,
+    target: Target,
+    files: RunFiles,
+    log: RunLog,
+    scanner: SecretScanner,
+) -> dict:
+    if args.stage == "verify":
+        return run_verify(config, target, files.run_id, files.dir, log, scanner)
+    summary = run_collect(config, target, files.dir, log)
+    if args.cadence == "daily":  # 週次の ② の入力は、週次の Issue で足す
+        write_daily_input(config, target, files.dir)
+    return summary
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tech-researcher")
     stages = parser.add_subparsers(dest="stage", required=True)
-    collect = stages.add_parser("collect", help="① 収集。実行のフォルダに collected.json を書く")
+    collect = stages.add_parser(
+        "collect",
+        help="① 収集。実行のフォルダに collected.json と、日次は ② の入力 agent-input.json を書く",
+    )
     collect.add_argument("cadence", choices=sorted(_TARGETS))
     collect.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
+    verify = stages.add_parser(
+        "verify", help="③ 検証・検査。agent-output.json から本文を作り、結果を実行のフォルダに書く"
+    )
+    verify.add_argument("cadence", choices=["daily"])  # 週次は週次の Issue で足す
+    verify.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
     return parser
 
 
