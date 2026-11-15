@@ -400,6 +400,24 @@ def test_worker_env_values_are_masked_in_stage_errors(host, capfd):
     assert "[MASKED:known]" in log_text
 
 
+def test_worker_env_rewritten_during_run_is_masked(host, capfd, monkeypatch):
+    # 起動の後に worker.env を書き換えても、compose が読んだいまの値を伏せる
+    rewritten = "fake-rewritten-credential-4567"
+    host.behave("fail", lock="daily-dry-run", secret=rewritten)
+    real_mask = orchestrator.SecretScanner.mask
+
+    def rewrite_then_mask(self, text):
+        (host.secrets / "worker.env").write_text(f"TR_ISSUE_TOKEN={rewritten}\n")
+        return real_mask(self, text)
+
+    monkeypatch.setattr(orchestrator.SecretScanner, "mask", rewrite_then_mask)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    monkeypatch.undo()
+    summary = json.loads(capfd.readouterr().out)
+    log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
+    assert rewritten not in log_text
+
+
 def test_compose_passes_worker_env_only_to_worker():
     # worker.env は worker の env_file だけ。フォルダはどのサービスにもマウントしない
     text = (ROOT / "compose.yaml").read_text(encoding="utf-8")

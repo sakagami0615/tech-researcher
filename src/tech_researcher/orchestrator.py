@@ -138,6 +138,10 @@ class Compose:
         self._env = dict(env)
         self._label = f"{RUN_ID_LABEL}={run_id}"
 
+    @property
+    def env(self) -> Mapping[str, str]:
+        return self._env
+
     def run(self, service: str, args: Sequence[str], timeout_s: float) -> StageResult:
         """段階を1つ起動して終わりを待つ。timeout_s を超えたら止め、そのコンテナを消す。"""
         command = [
@@ -580,12 +584,22 @@ def _worker(
         if summary is not None:
             return summary, None
         category = "bad_output"
-    # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
-    detail = job.scanner.mask(result.stderr)[-STDERR_TAIL_CHARS:]
+    # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す。
+    # 実行の途中で worker.env を書き換えても、compose が読んだいまの値を伏せられるよう読み直す
+    detail = _current_worker_secrets(job).mask(job.scanner.mask(result.stderr))
+    detail = detail[-STDERR_TAIL_CHARS:]
     job.log.write(stage, "failure", error_category=category, detail=detail)
     if result.remove_failed:
         job.log.write(stage, "failure", error_category="container_remove_failed")
     return None, category
+
+
+def _current_worker_secrets(job: Job) -> SecretScanner:
+    """いまの worker.env の秘匿値。読めなければ空（起動のときに読んだ値では伏せている）。"""
+    try:
+        return SecretScanner(secret_values(Path(job.compose.env[SECRETS_DIR_ENV]) / WORKER_ENV))
+    except ValueError:
+        return SecretScanner()
 
 
 def _last_json(stdout: str) -> dict | None:
