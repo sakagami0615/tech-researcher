@@ -27,6 +27,9 @@ from tech_researcher.validate.secret_scan import is_secret_name
 
 SECRETS_DIR_ENV = "TR_SECRETS_DIR"
 WORKER_ENV = "worker.env"
+ORIGINAL_LABEL = f"{SECRETS_DIR_ENV} の {WORKER_ENV}"  # エラー文での呼び方
+# 写しを確かめて違ったときの呼び方。写しはすぐ消すので、直す先は元のファイルだと分かるようにする
+SNAPSHOT_LABEL = f"{ORIGINAL_LABEL}（実行の始めに写した内容。元のファイルを直す）"
 SNAPSHOT_PREFIX = ".run-"  # 1回の実行の間だけ置く写しのフォルダ
 # worker.env の1行。compose が解釈を変えたり（引用符・`$`・`\`・前後の空白）、エラー文に値を
 # 出したりする文字を値に含めない
@@ -65,7 +68,7 @@ def secrets_dir(
         )
     owner = os.geteuid()
     _check_private(path, f"{SECRETS_DIR_ENV} のフォルダ", _DIR, owner)
-    _check_private(path / WORKER_ENV, f"{SECRETS_DIR_ENV} の {WORKER_ENV}", _FILE, owner)
+    _check_private(path / WORKER_ENV, ORIGINAL_LABEL, _FILE, owner)
     return path
 
 
@@ -123,7 +126,7 @@ def snapshot(secrets: Path, run_id: str) -> Path:
         raise ValueError(message) from None
     try:
         run_dir.chmod(0o700)  # umask によらず 700 にする
-        data = _read_private(secrets / WORKER_ENV, f"{SECRETS_DIR_ENV} の {WORKER_ENV}")
+        data = _read_private(secrets / WORKER_ENV, ORIGINAL_LABEL)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         with os.fdopen(os.open(run_dir / WORKER_ENV, flags, 0o600), "wb") as f:
             os.fchmod(f.fileno(), 0o600)  # umask によらず 600 にする
@@ -154,7 +157,7 @@ def remove_snapshot(run_dir: Path) -> None:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def secret_values(path: Path, label: str = f"{SECRETS_DIR_ENV} の {WORKER_ENV}") -> list[str]:
+def secret_values(path: Path, label: str = ORIGINAL_LABEL) -> list[str]:
     """worker.env の書式を確かめ、秘匿値（名前の規則は secret_scan と同じ）を返す。
 
     書式は `名前=値` を1行に1つ。空行と、空白・タブで字下げしてもよい `#` の行は読み飛ばす。

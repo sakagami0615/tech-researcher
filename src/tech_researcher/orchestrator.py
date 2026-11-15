@@ -49,6 +49,7 @@ from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
 from tech_researcher.envfiles import (
     SECRETS_DIR_ENV,
+    SNAPSHOT_LABEL,
     WORKER_ENV,
     remove_snapshot,
     secret_values,
@@ -368,9 +369,7 @@ def _new_job(
     except ValueError as e:
         raise UsageError(str(e)) from None
     try:
-        worker_secrets = secret_values(
-            copy / WORKER_ENV, f"{SECRETS_DIR_ENV} の {WORKER_ENV} の写し"
-        )
+        worker_secrets = secret_values(copy / WORKER_ENV, SNAPSHOT_LABEL)
     except ValueError as e:
         remove_snapshot(copy)
         raise UsageError(str(e)) from None
