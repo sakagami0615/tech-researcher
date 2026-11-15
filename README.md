@@ -75,7 +75,7 @@ bin/tr-observe   # 引数はありません
 
 - 日次と同じロック（`$TR_DATA_DIR/locks/daily.lock`）を使います。日次（`bin/tr-run daily`）が動いていれば、何もせずに終了コード 3 で終わります
 - 実行 ID の先頭は `obs-` です。runs には `observed`（すべての情報源の取得に失敗した日と、① が失敗したときは `failed`）と終了時刻を残し、取得結果（失敗も）は source_fetches に、収集項目は items に、Star 数は star_snapshots に、人気型フィードの取得記録は feed_snapshots に残します。② 以降は動かさず、Issue は作りません
-- 環境変数（`TR_DATA_DIR`・`TR_UID`・`TR_GID`）、上限時間、標準出力の要約（`result` は `observed`）は `bin/tr-run` と同じです。収集用トークンは worker.env の `GITHUB_TOKEN` から worker にだけ渡ります。トークンがないと GitHub Search と Star 数の測定は `auth` の失敗になり、ほかの情報源の観測は続けます
+- 環境変数（`TR_DATA_DIR`・`TR_UID`・`TR_GID`）、上限時間、標準出力の要約（`result` は `observed`）は `bin/tr-run` と同じです。worker は収集用トークンを環境変数 `GITHUB_TOKEN` から読みます。トークンがないと、GitHub Search（last30days-skill と候補集め）と Star 数の測定は失敗（`auth` など）として source_fetches に残り、ほかの情報源の観測は続けます。worker.env（`${TR_SECRETS_DIR}`）を compose から worker に渡す配線はまだないので、トークンを使った観測は、その配線を足してから始めます
 
 crontab の例（cron の `PATH` に uv と docker が入るようにします。ホストの時刻帯が JST のとき。JST でなければ、cron の実装に合わせて `CRON_TZ=Asia/Tokyo` を書くか、時刻を UTC に直します。リポジトリとデータ用フォルダのパスは運用サーバーに合わせます）：
 
