@@ -122,3 +122,11 @@ def test_short_or_symbol_only_lines_are_not_secret_values(tmp_path):
     assert any('\\"x\\": 1' in v for v in values)
     assert not {"{", "}", '"{', '}"', "1"} & values
     assert "example/repo" not in values
+
+
+def test_escaped_single_quote_does_not_close_value(tmp_path):
+    path = tmp_path / "worker.env"
+    path.write_text("TR_KEY='fake-abc\\'\nfake-second'\nTR_ISSUE_REPO=example/repo\n")
+    values = set(secret_values(path))
+    assert "fake-second" in values
+    assert "example/repo" not in values

@@ -156,10 +156,11 @@ def secret_values(path: Path) -> list[str]:
     return [v for v in values if len(v) >= MIN_SECRET_CHARS and any(c.isalnum() for c in v)]
 
 
-# 二重引用符の中では `\"` は閉じる引用符ではない（前の `\` の数が偶数のものだけが閉じる）
-_DOUBLE_CLOSE = re.compile(r'(?:^|[^\\])(?:\\\\)*"')
+# 前の `\` の数が偶数の引用符だけを、閉じる引用符とみなす。compose は二重引用符の `\"` も、
+# 単一引用符の `\'` も閉じる引用符とみなさない（実機で確認）
+_CLOSE = {q: re.compile(r"(?:^|[^\\])(?:\\\\)*" + q) for q in ("'", '"')}
 
 
 def _closes(text: str, quote: str) -> bool:
-    """text の中で引用符が閉じるか。単一引用符の中ではエスケープはない（compose の書式）。"""
-    return bool(_DOUBLE_CLOSE.search(text)) if quote == '"' else quote in text
+    """text の中で引用符が閉じるか。"""
+    return bool(_CLOSE[quote].search(text))
