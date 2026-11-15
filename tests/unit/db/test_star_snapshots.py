@@ -31,7 +31,8 @@ def test_recent_repos_are_found_by_search_or_mention_in_the_days_before_target(c
     insert(conn, "b/yesterday", T - timedelta(days=2))
     insert(conn, "c/today", T)  # 同じ対象の最初の実行が書いた行は見ない
     insert(conn, "d/watch-only", T - timedelta(days=1), routes=("watch",))
-    assert recent_repos(conn, T, 30) == ("a/edge", "b/yesterday")
+    insert(conn, "e/mixed", T - timedelta(days=5), routes=("search", "watch"))
+    assert recent_repos(conn, T, 30) == ("a/edge", "b/yesterday", "e/mixed")
 
 
 def test_repos_measured_only_by_watch_leave_after_days(conn):

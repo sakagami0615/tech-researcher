@@ -35,7 +35,8 @@ ERROR_BODY_BYTES = 4096
 class FetchError(Exception):
     """再試行を使い切ったか、再試行しない失敗。attempts は初回を含めた要求の回数。
 
-    headers・body は HTTP の誤りの応答のヘッダと本文の先頭（レート制限の判定などに使う）。
+    headers・body は HTTP の誤りの応答のヘッダ（キーは小文字）と本文の先頭（レート制限の
+    判定などに使う）。
     本文は再試行しない誤りのときだけ持つ。それ以外は空。
     """
 
@@ -60,7 +61,7 @@ class Response:
     status: int
     body: bytes
     attempts: int
-    headers: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)  # キーは小文字
 
 
 class _Retryable(Exception):
@@ -124,9 +125,9 @@ def _get(open_url, request, attempt: int) -> Response:
             encoding = (res.headers.get("Content-Encoding") or "").strip().lower()
             if encoding in ("gzip", "x-gzip"):
                 body = _gunzip(body, attempt)
-            return Response(res.geturl(), res.status, body, attempt, dict(res.headers.items()))
+            return Response(res.geturl(), res.status, body, attempt, _lower_keys(res.headers))
     except urllib.error.HTTPError as e:
-        headers = dict((e.headers or {}).items())
+        headers = _lower_keys(e.headers)
         if e.code == 429 or e.code >= 500:
             e.close()
             raise _Retryable(f"HTTP {e.code}", e.code, _retry_after(e.headers), headers) from e
@@ -140,6 +141,10 @@ def _get(open_url, request, attempt: int) -> Response:
         if _transient(e) or isinstance(e, http.client.HTTPException):
             raise _Retryable(f"{type(e).__name__}: {e}") from e
         raise FetchError(f"{type(e).__name__}: {e}", attempt) from e
+
+
+def _lower_keys(headers) -> dict[str, str]:
+    return {k.lower(): v for k, v in (headers or {}).items()}
 
 
 def _error_body(error: urllib.error.HTTPError) -> bytes:

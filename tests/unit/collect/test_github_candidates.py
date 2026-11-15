@@ -97,14 +97,31 @@ def test_search_query():
     assert search_query(None, date(2026, 10, 20), 200) == "created:>=2026-10-20 stars:>=200"
 
 
-def test_search_without_topic_comes_first(limits):
+def test_complete_search_without_topic_skips_topic_searches(limits):
     fake = FakeSearch({"*": [page(["no/topic"])], "llm": [page([])], "mcp": [page([])]})
     settings = replace(SETTINGS, search_without_topic=True)
     result = collect_candidates(settings, T, [], client(limits, fake), None)
     assert fake.queries[0]["q"] == "created:>=2026-10-20 stars:>=200"
     assert fake.queries[0]["sort"] == "stars"
-    assert len(fake.queries) == 3
+    assert len(fake.queries) == 1  # 全件を取れたので、トピックの検索はその一部になる
     assert ("no/topic", ("search",)) in {(c.repo, c.routes) for c in result.candidates}
+
+
+@pytest.mark.parametrize("reason", ["over_1000", "incomplete", "failed"])
+def test_topic_searches_complement_search_without_topic(limits, reason, caplog):
+    full = [f"o/r{i}" for i in range(100)]
+    without = {
+        "over_1000": [page(full, total=1500)] * 10,
+        "incomplete": [{**page(["no/topic"]), "incomplete_results": True}],
+        "failed": [FetchError("再試行を使い切った：HTTP 502", 3, 502)],
+    }[reason]
+    fake = FakeSearch({"*": without, "llm": [page(["topic/llm"])], "mcp": [page([])]})
+    settings = replace(SETTINGS, search_without_topic=True)
+    result = collect_candidates(settings, T, [], client(limits, fake), None)
+    assert "topic/llm" in {c.repo for c in result.candidates}
+    assert [q["q"].split()[0] for q in fake.queries][-2:] == ["topic:llm", "topic:mcp"]
+    if reason == "incomplete":
+        assert "途中で切られた" in caplog.text
 
 
 def test_search_without_topic_only(limits):
@@ -164,7 +181,9 @@ def test_mentions_from_fixture_records():
         # リポジトリへ直接リンクした投稿は、はてなのエントリーのページを言及元にし、
         # レコード自身もリポジトリの URL（HN）なら言及元に入れない
         "someone/agent-kit": ("https://b.hatena.ne.jp/entry/s/github.com/someone/agent-kit",),
-        "infra-team/deployer": ("https://github.com/infra-team/deployer/issues/12",),
+        # Issue（GitHub 上の活動）は自分のリポジトリへの言及にしない。ほかのリポジトリは言及にする
+        "other/lib": ("https://github.com/infra-team/deployer/issues/12",),
+        "no-key/repo": (),  # レコードの URL が正規化できなくても、リンクは拾う
     }
 
 
@@ -190,14 +209,11 @@ def test_collects_all_routes(limits, tmp_path):
             ("mention",),
             ("https://github.blog/news/2026-11-02-example", "https://zenn.dev/u/articles/abc"),
         ),
-        Candidate(
-            "infra-team/deployer",
-            ("mention",),
-            ("https://github.com/infra-team/deployer/issues/12",),
-        ),
         Candidate("new/one", ("search",)),
         Candidate("new/two", ("search",)),
+        Candidate("no-key/repo", ("mention",)),
         Candidate("old/watched", ("watch",)),
+        Candidate("other/lib", ("mention",), ("https://github.com/infra-team/deployer/issues/12",)),
         Candidate(
             "someone/agent-kit",
             ("search", "mention"),

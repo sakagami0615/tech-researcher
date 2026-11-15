@@ -169,12 +169,13 @@ def test_search_is_spaced_by_per_minute_limit(limits):
 
 
 def test_search_budget(limits):
-    api = client(replace(limits, github_search_calls=1), FakeFetch({}))
+    clock = Clock()
+    api = client(replace(limits, github_search_calls=1), FakeFetch({}), clock=clock)
     api.search("repositories", {"q": "x"})
     with pytest.raises(GitHubError) as e:
         api.search("repositories", {"q": "y"})
     assert e.value.category == github_api.BUDGET
-    assert api._sleep.__self__.sleeps == []  # 上限に達していれば間隔を待たない
+    assert clock.sleeps == []  # 上限に達していれば間隔を待たない
 
 
 def test_invalid_json_is_an_error(limits):

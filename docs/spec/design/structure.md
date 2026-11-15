@@ -296,8 +296,8 @@ threshold_increase_A = 100
 report_top_N = 10
 new_repo_days_D = 14
 new_repo_stars_C = 200
-search_days_D = 0               # PoC で決める
-search_min_stars_C = 0          # PoC で決める
+search_days_D = 14              # PoC で決める（観測までの仮の値）
+search_min_stars_C = 200        # PoC で決める（観測までの仮の値）
 
 [sources.github_releases]       # REST API で取る（D-11）
 enabled = true

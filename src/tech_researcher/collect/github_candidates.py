@@ -62,6 +62,7 @@ NON_OWNER_PATHS = frozenset(
         "login",
         "logout",
         "marketplace",
+        "mcp",
         "new",
         "notifications",
         "organizations",
@@ -176,23 +177,30 @@ def search_repos(
     件数が尽きるか、Search の上限（1,000件）まで取る。ある検索で失敗したら、その検索をやめて
     次へ進む。認証・レート制限・この実行の上限の失敗では、残りの検索も呼ばずにやめる。
     重なったリポジトリは除く。
+    トピックを付けない検索で全件（1,000件以下）を取れたら、トピックの検索はしない。条件が同じ
+    なので、トピックの検索の結果はその一部になるため。トピックの検索は、トピックを付けない検索が
+    1,000件の上限で切られたときや失敗したときに、Star の少ない側を補う。
     """
     since = day - timedelta(days=settings.search_days)
     repos: dict[str, None] = {}
     first_error: GitHubError | None = None
     for topic in search_topics(settings):
         try:
-            _search_topic(client, topic, since, settings, repos)
+            complete = _search_topic(client, topic, since, settings, repos)
         except GitHubError as e:
             first_error = first_error or e
             if e.category in _STOP_CATEGORIES:
                 break
+            continue
+        if topic is None and complete:
+            break
     return list(repos), first_error
 
 
 def search_topics(settings: GitHubRepos) -> list[str | None]:
     """行う検索のトピック。None はトピックを付けない検索。"""
-    return [None] * settings.search_without_topic + list(settings.search_topics)
+    without_topic: list[str | None] = [None] if settings.search_without_topic else []
+    return without_topic + list(settings.search_topics)
 
 
 def _search_topic(
@@ -201,20 +209,26 @@ def _search_topic(
     since: date,
     settings: GitHubRepos,
     repos: dict[str, None],
-) -> None:
-    """1つのトピックのページを送り、取れたページの分から repos に足す（途中で失敗しても残る）。"""
+) -> bool:
+    """1つのトピックのページを送り、取れたページの分から repos に足す（途中で失敗しても残る）。
+
+    検索に合う全件を取れたら True（1,000件の上限で切られた・結果が途中で切られたら False）。
+    Star の順でページを送る間に Star 数が変わると、ページの境目で取りこぼしうる（受け入れる）。
+    """
     query = search_query(topic, since, settings.search_min_stars)
     params = {"q": query, "sort": "stars", "order": "desc", "per_page": PER_PAGE}
     for page in range(1, MAX_SEARCH_RESULTS // PER_PAGE + 1):
         data = client.search("repositories", {**params, "page": page})
         names = parse_search(data)
         repos.update(dict.fromkeys(names))
-        if data.get("incomplete_results"):
+        incomplete = bool(data.get("incomplete_results"))
+        if incomplete:
             name = topic or "（トピックなし）"
             log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", name, page)
         total = min(data["total_count"], MAX_SEARCH_RESULTS)
         if len(names) < PER_PAGE or page * PER_PAGE >= total:
-            break
+            return not incomplete and data["total_count"] <= MAX_SEARCH_RESULTS
+    return False
 
 
 def search_query(topic: str | None, since: date, min_stars: int) -> str:
@@ -244,16 +258,19 @@ def mentioned_repos(records: Iterable[Record]) -> dict[str, tuple[str, ...]]:
     言及元は、そのレコードがまとまる収集項目の URL（指している先の正規化した URL）。
     それがリポジトリ自身の URL（投稿がリポジトリへ直接リンクした場合）なら、レコード自身の
     URL（はてなのエントリーのページなど）にし、それも同じなら言及元に入れない（言及の経路には入る）。
+    レコード自身の URL がリポジトリの中の活動のページ（Issue・PR・リリースなど。GitHub Search の
+    Issue・PR や GitHub Releases のレコード）なら、そのリポジトリはそのレコードでは言及にしない。
+    ほかの情報源で話題になったことにはならず、活動の多いリポジトリが監視リストに残り続けるため。
+    レコードの URL が正規化できず言及元がないときも、リンクは言及として拾う（言及元は空）。
     返す順はリポジトリを最初に見た順で、言及元も見た順に重なりを除く。
     """
     found: dict[str, dict[str, None]] = {}
     for record in records:
         key = record_key(record)
-        if key is None:
-            continue
+        own_activity = _activity_repo(record.url)
         for url in (record.url, record.link_url, *record.links):
             repo = repo_from_url(url or "")
-            if repo is None:
+            if repo is None or repo == own_activity:
                 continue
             sources = found.setdefault(repo, {})
             own = f"https://github.com/{repo}"
@@ -261,6 +278,32 @@ def mentioned_repos(records: Iterable[Record]) -> dict[str, tuple[str, ...]]:
             if source is not None and source != own:
                 sources[source] = None
     return {repo: tuple(sources) for repo, sources in found.items()}
+
+
+# リポジトリの中の、GitHub 上の活動を表すページ（`owner/repo/{ここ}/...`）
+ACTIVITY_PATHS = frozenset(
+    {
+        "issues",
+        "pull",
+        "pulls",
+        "releases",
+        "discussions",
+        "commit",
+        "commits",
+        "compare",
+        "actions",
+    }
+)
+
+
+def _activity_repo(url: str) -> str | None:
+    """URL がリポジトリの中の活動のページなら、その `owner/repo`。"""
+    repo = repo_from_url(url)
+    normalized = normalize_url(url)
+    if repo is None or normalized is None:
+        return None
+    segments = urlsplit(normalized).path.split("/")
+    return repo if len(segments) > 3 and segments[3] in ACTIVITY_PATHS else None
 
 
 def repo_from_url(url: str) -> str | None:

@@ -21,7 +21,16 @@
   },
   {
     "source_id": "github_search",
-    "url": "https://github.com/infra-team/deployer/issues/12"
+    "url": "https://github.com/infra-team/deployer/issues/12",
+    "links": [
+      "https://github.com/infra-team/deployer/pull/3",
+      "https://github.com/other/lib"
+    ]
+  },
+  {
+    "source_id": "rss:broken",
+    "url": "not a url",
+    "links": ["https://github.com/no-key/repo"]
   },
   {
     "source_id": "zenn-llm",

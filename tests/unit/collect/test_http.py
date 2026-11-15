@@ -238,7 +238,7 @@ def test_error_body_head_is_kept_for_client_errors(limits):
 def test_redirect_is_not_followed_when_asked(limits, server):
     with pytest.raises(FetchError) as e:
         fetch(server.base + "/to-ok", limits, follow_redirects=False)
-    assert e.value.status == 302 and e.value.headers["Location"] == "/ok"
+    assert e.value.status == 302 and e.value.headers["location"] == "/ok"
     assert server.paths == ["/to-ok"]
 
 
@@ -246,13 +246,13 @@ def test_response_and_error_headers_are_kept(limits):
     ok = FakeResponse(b"{}")
     ok.headers["X-RateLimit-Remaining"] = "42"
     response, _, _ = run(limits, ok)
-    assert response.headers["X-RateLimit-Remaining"] == "42"
+    assert response.headers["x-ratelimit-remaining"] == "42"  # キーは小文字にそろえる
     error = http_error(403)
     error.headers["X-RateLimit-Remaining"] = "0"
     result, _, _ = run(limits, error)
-    assert result.headers["X-RateLimit-Remaining"] == "0"
+    assert result.headers["x-ratelimit-remaining"] == "0"
     result, _, _ = run(limits, http_error(429, "1"), http_error(429, "1"), http_error(429, "1"))
-    assert result.status == 429 and result.headers["Retry-After"] == "1"
+    assert result.status == 429 and result.headers["retry-after"] == "1"
 
 
 def test_read_timeout_is_applied(limits, server):
