@@ -706,6 +706,7 @@ def test_job_timeout_in_production_removes_work_and_releases_lock(
     assert summary_of(capfd)["error_category"] == "job_timeout"
     # 止められた子プロセスも後片付けをする（一次情報の本文を次の実行まで残さない）
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]
+    monkeypatch.undo()
     monkeypatch.setattr(orchestrator, "MINUTE", 0.05)
     host.behave("ok", lock="daily")
     assert orchestrator.main(["daily"], host.environ) == 1  # ロックは外れている
