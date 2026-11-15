@@ -14,13 +14,15 @@ import binascii
 import html
 import logging
 import re
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from tech_researcher.collect import github_api
 from tech_researcher.collect.github_api import GitHubClient, GitHubError
 from tech_researcher.collect.records import Event, FailedPart, Record, SourceResult
+from tech_researcher.collect.urls import normalize_url
 from tech_researcher.config import GITHUB_REPO_NAME, GitHubReleases
 from tech_researcher.periods import Period
 
@@ -47,7 +49,12 @@ _STOP_CATEGORIES = frozenset({github_api.AUTH, github_api.RATE_LIMITED, github_a
 
 
 def collect_releases(
-    releases: GitHubReleases, period: Period, client: GitHubClient
+    releases: GitHubReleases,
+    period: Period,
+    client: GitHubClient,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> SourceResult:
     """追跡するリポジトリのリリースを、期間の始まりより前のものだけになるまでページを送って取る。
 
@@ -57,6 +64,8 @@ def collect_releases(
     取れなかったリポジトリは failed_parts に残し、取れた分は使う。すべてが取れなかったときだけ
     情報源を失敗にする（US-E6-03）。ページの上限に達したリポジトリは、取れた分を使ったうえで
     TRUNCATED として failed_parts に残す（取りこぼしたおそれを読者に伝えるため）。
+    deadline は情報源ごとの時間の上限（clock の値。structure.md 6.4）。リポジトリの間で確かめ、
+    過ぎた後のリポジトリには要求を出さず、timeout として取れなかったものにする。
     attempts はこの情報源で使った要求の回数（再試行を含む）。
     """
     before = client.rest_calls
@@ -66,6 +75,9 @@ def collect_releases(
     fetched = 0  # 取れたリポジトリの数（上限に達したものを含む）
     stopped: str | None = None  # 残りの要求をやめた分類
     for full_name in releases.repos:
+        if stopped is None and deadline is not None and clock() >= deadline:
+            log.warning("%s：情報源ごとの時間の上限に達した", SOURCE_ID)
+            stopped = github_api.TIMEOUT
         if stopped is not None:
             failed.append(FailedPart(full_name, stopped))
             continue
@@ -241,12 +253,13 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
             continue
         try:
             text = _readme_text(full_name, data)
+            links = markdown_links(text) if text is not None else ()
         except _SHAPE_ERRORS:
             log.warning("%s：%s の README を読めない", SOURCE_ID, full_name)
             errors[full_name] = github_api.INVALID_RESPONSE
             continue
         if text is not None and text.strip():
-            readmes[full_name] = Readme(full_name, text, markdown_links(text))
+            readmes[full_name] = Readme(full_name, text, links)
     return ReadmeResult(readmes, errors, client.rest_calls - before, invalid)
 
 
@@ -300,14 +313,19 @@ _REF_DEF = re.compile(r"^ {0,3}\[([^\[\]\n]+)\]:[^\n]*", re.MULTILINE)
 # IGNORECASE は Unicode の対応でケルビン記号なども [a-z] に一致させるので、スキームにだけ付ける
 _URL = re.compile(r"(?i:https?)://[!#-&*-;=?-Z\\^_a-z|~]+")
 _TRAILING = ".,;:!?*_~"
-# 1つの本文から集める候補リンクの数の上限（重なりを除いた先頭から）。外部の本文1つで、DB の
-# links_json や ② の入力を大きくできないようにする（data-model.md 2.6）
+# 1つの本文から集める候補リンクの数の上限（正規化した先で重なりを除いた先頭から）と、1つの
+# URL の長さの上限（超えるものは切り詰めずに候補から外す。切ると別の先を指しうるため）。
+# 外部の本文1つで、DB の links_json や ② の入力を大きくできないようにする（data-model.md 2.8）
 MAX_LINKS = 100
+MAX_URL_LENGTH = 2048
+# 10 進の数値文字参照で、有効な符号位置（7桁まで）より長いもの。html.unescape は桁数の上限なく
+# int() にかけ、4300 桁を超えると ValueError になるので、先に置き換える
+_LONG_DECIMAL_REF = re.compile(r"&#0*[0-9]{8,};?")
 
 
 def markdown_links(text: str | None) -> tuple[str, ...]:
-    """Markdown の本文の絶対 URL を順に、重なりを除いて先頭の MAX_LINKS 件まで集める。
-    相対リンクは集めない。
+    """Markdown の本文の絶対 URL を順に、正規化した先の重なりを除いて先頭の MAX_LINKS 件まで
+    集める。相対リンクと、正規化できない URL・MAX_URL_LENGTH より長い URL は集めない。
 
     本文に混ざる HTML の文字参照（&amp; など）は先に戻す。括弧を含む URL は括弧の前で切れる
     （Wikipedia の一部の記事など。候補リンクとしては受け入れる）。
@@ -315,16 +333,19 @@ def markdown_links(text: str | None) -> tuple[str, ...]:
     """
     if not text:
         return ()
-    text = html.unescape(_drop_comments(text))
+    text = html.unescape(_LONG_DECIMAL_REF.sub("\ufffd", _drop_comments(text)))
     images = {(label or alt).casefold() for alt, label in _REF_IMAGE.findall(text)}
     text = _REF_DEF.sub(lambda m: " " if m.group(1).casefold() in images else m.group(), text)
     text = _IMAGES.sub(" ", text)
-    links: dict[str, None] = {}
+    links: dict[str, str] = {}  # 正規化した URL → 本文の URL
     for m in _URL.finditer(text):
-        links[m.group().rstrip(_TRAILING)] = None
-        if len(links) >= MAX_LINKS:
-            break
-    return tuple(links)
+        url = m.group().rstrip(_TRAILING)
+        key = normalize_url(url) if len(url) <= MAX_URL_LENGTH else None
+        if key is not None and key not in links:
+            links[key] = url
+            if len(links) >= MAX_LINKS:
+                break
+    return tuple(links.values())
 
 
 def _drop_comments(text: str) -> str:

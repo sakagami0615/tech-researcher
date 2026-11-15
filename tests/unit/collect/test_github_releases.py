@@ -413,6 +413,7 @@ def test_readmes_are_fetched_for_given_repos(limits):
             ).encode(),
             readme_url("example/deep"): b"[" * 100_000,
             readme_url("example/nul"): readme_body("h\x00i"),
+            readme_url("example/ref"): readme_body("&#" + "9" * 5000 + "; [d](https://d.example/)"),
         }
     )
     names = [
@@ -428,11 +429,13 @@ def test_readmes_are_fetched_for_given_repos(limits):
         "example/utf16",
         "example/deep",
         "example/nul",
+        "example/ref",
         "Example/Tool",
     ]
     result = fetch_readmes(names, client(limits, fetch))
-    assert fetch.urls() == [readme_url(n) for n in names[:12]]  # 大文字・小文字の違いは1回だけ
-    assert set(result.readmes) == {"example/tool", "example/latin1"}
+    assert fetch.urls() == [readme_url(n) for n in names[:13]]  # 大文字・小文字の違いは1回だけ
+    assert set(result.readmes) == {"example/tool", "example/latin1", "example/ref"}
+    assert result.readmes["example/ref"].links == ("https://d.example/",)
     assert result.readmes["example/tool"] == Readme(
         "example/tool", text, ("https://docs.example.com/tool",)
     )
@@ -448,7 +451,7 @@ def test_readmes_are_fetched_for_given_repos(limits):
         "example/deep": "invalid_response",  # 深すぎる入れ子の JSON
         "example/nul": "invalid_response",  # NUL を含む（BOM のない UTF-16 など）
     }
-    assert result.attempts == 1 + 1 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
+    assert result.attempts == 1 + 1 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
     assert result.invalid_names == 0
 
 
@@ -574,14 +577,57 @@ def test_markdown_links(text, links):
 
 
 def test_markdown_links_are_capped_and_unique():
-    text = " ".join(f"https://a{i}.example/ https://a{i}.example/" for i in range(300))
+    # 正規化すると同じになるもの・正規化できないものは数えない
+    variants = " ".join(
+        f"https://a.example/?utm_source={i} http://user@b{i}.example/" for i in range(150)
+    )
+    text = variants + " " + " ".join(f"https://a{i}.example/" for i in range(300))
     links = markdown_links(text)
-    assert links == tuple(f"https://a{i}.example/" for i in range(100))
+    assert links[0] == "https://a.example/?utm_source=0"
+    assert links[1:] == tuple(f"https://a{i}.example/" for i in range(99))
+
+
+def test_long_urls_and_numeric_references_are_handled():
+    assert markdown_links("https://a.example/" + "a" * 3000 + " https://b.example/") == (
+        "https://b.example/",
+    )
+    # 桁数の多い数値文字参照で例外にしない（html.unescape は 4300 桁を超えると ValueError）
+    assert markdown_links("&#" + "0" * 5000 + "; https://a.example/x &#65;") == (
+        "https://a.example/x",
+    )
+
+
+def test_deadline_stops_the_rest(limits):
+    repos = ("a/one", "b/two", "c/three")
+    fetch = FakeFetch({releases_url(r): b"[]" for r in repos})
+    times = iter([0.0, 5.0, 11.0])
+    result = collect_releases(
+        replace(RELEASES, repos=repos),
+        TARGET.period,
+        client(limits, fetch),
+        deadline=10.0,
+        clock=lambda: next(times),
+    )
+    assert fetch.urls() == [releases_url("a/one"), releases_url("b/two")]
+    assert result.error is None
+    assert result.failed_parts == (FailedPart("c/three", "timeout"),)
 
 
 @pytest.mark.parametrize(
     "unit",
-    ["![a", "![a](", "<img ", "<source ", "<!--", "http://", "[a]: ", "![a][", "&amp;", "!["],
+    [
+        "![a",
+        "![a](",
+        "<img ",
+        "<source ",
+        "<!--",
+        "http://",
+        "[a]: ",
+        "![a][",
+        "&amp;",
+        "![",
+        "&#0",
+    ],
 )
 def test_markdown_links_time_is_linear(unit):
     """外部の本文の最悪の形でも、時間が本文の長さに比例する（1MB ほどで1秒より十分短い）。"""
