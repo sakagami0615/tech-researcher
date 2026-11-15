@@ -335,6 +335,12 @@ def _no_dir(h):
     h.secrets.rmdir()
 
 
+def _loop(h):
+    loop = h.secrets.parent / "loop"
+    loop.symlink_to(loop)
+    h.environ["TR_SECRETS_DIR"] = str(loop / "secrets")
+
+
 def _link_file(h):
     real = h.secrets / "real.env"
     (h.secrets / "worker.env").rename(real)
@@ -350,6 +356,7 @@ def _link_file(h):
         (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.data / "s")), "TR_DATA_DIR の外"),
         (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.data)), "TR_DATA_DIR の外"),
         (_no_dir, "フォルダ がない"),
+        (_loop, "確かめられない"),  # リンクのループもパスを出さずに止める
         (lambda h: (h.secrets / "worker.env").unlink(), "worker.env がない"),
         (lambda h: h.secrets.chmod(0o750), "フォルダ の権限は 700"),
         (lambda h: h.secrets.chmod(0o701), "フォルダ の権限は 700"),
@@ -360,6 +367,10 @@ def _link_file(h):
         (lambda h: (h.secrets / "worker.env").chmod(0o200), "worker.env の権限は 600・400"),
         (lambda h: h.secrets.chmod(0o600), "フォルダ の権限は 700"),
         (lambda h: h.secrets.chmod(0o500), "フォルダ の権限は 700"),  # 写しを作れない
+        # GNU の chmod 700 は setgid を残すので、いまの権限と直し方の例を出す
+        (lambda h: h.secrets.chmod(0o2700), "いまは 2700。"),
+        (lambda h: h.secrets.chmod(0o2700), "例：chmod 00700"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o640), "例：chmod 00600"),
         (lambda h: (h.secrets / "worker.env").chmod(0o700), "worker.env の権限は 600・400"),
         (lambda h: (h.secrets / "worker.env").chmod(0o500), "worker.env の権限は 600・400"),
         (lambda h: (h.secrets / "worker.env").chmod(0o4600), "worker.env の権限は 600・400"),

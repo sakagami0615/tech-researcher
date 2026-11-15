@@ -46,7 +46,10 @@ def secrets_dir(
         raise ValueError(f"{SECRETS_DIR_ENV} が設定されていない（{WORKER_ENV} を置くフォルダ）")
     if not Path(value).is_absolute():
         raise ValueError(f"{SECRETS_DIR_ENV} は絶対パスにする")
-    path = Path(value).resolve()
+    try:
+        path = Path(value).resolve()
+    except OSError:  # たどれないパス。例外の文にはパスが入るので使わない
+        raise ValueError(f"{SECRETS_DIR_ENV} のパスをたどれない（リンクを見直す）") from None
     if path.is_relative_to(repo.resolve()):
         raise ValueError(f"{SECRETS_DIR_ENV} はリポジトリの外にする")
     if path.is_relative_to(data.resolve()):

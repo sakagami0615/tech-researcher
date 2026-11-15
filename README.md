@@ -41,7 +41,7 @@ docker compose build worker   # compose.yaml の読み込みに worker.env が�
 worker が使う認証情報は、リポジトリの外の `${TR_SECRETS_DIR}/worker.env` に書きます。compose が worker のコンテナにだけ環境変数として渡します（agent には渡しません。フォルダもマウントしません）。変数名は `deploy/env/worker.env.example` にあります。
 
 ```sh
-install -d -m 700 "$TR_SECRETS_DIR"
+install -d -m 00700 "$TR_SECRETS_DIR"   # 00 で setgid も外す（親のフォルダから引き継がない）
 install -m 600 deploy/env/worker.env.example "$TR_SECRETS_DIR/worker.env"
 "${EDITOR:-vi}" "$TR_SECRETS_DIR/worker.env"   # 値を入れる。引用符で囲まず、1行に1つ（値に `$` を含めない）
 ```
