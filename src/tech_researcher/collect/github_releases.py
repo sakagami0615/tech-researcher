@@ -146,6 +146,9 @@ def _repo_releases(
 
 def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | None:
     """リリース1件を収集レコードにする。下書き・プレリリースは None。"""
+    for flag in ("draft", "prerelease"):
+        if not isinstance(release.get(flag, False), bool):
+            raise TypeError(f"{flag} が真偽値でない")
     if release.get("draft") or release.get("prerelease"):
         return None
     if not release.get("published_at"):

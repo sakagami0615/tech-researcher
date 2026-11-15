@@ -636,6 +636,13 @@ def test_published_release_without_date_fails_the_repo(limits):
     assert result.failed_parts == (FailedPart("example/tool", "invalid_response"),)
 
 
+def test_non_boolean_draft_flag_fails_the_repo(limits):
+    item = {"draft": "false", "prerelease": False}
+    fetch = FakeFetch({releases_url("example/tool"): json.dumps([item]).encode()})
+    result = collect_releases(RELEASES, TARGET.period, client(limits, fetch))
+    assert result.failed_parts == (FailedPart("example/tool", "invalid_response"),)
+
+
 def test_readme_deadline_stops_the_rest(limits):
     fetch = FakeFetch(
         {readme_url("a/one"): readme_body("x"), readme_url("b/two"): readme_body("y")}
