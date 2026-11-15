@@ -421,6 +421,22 @@ def test_rejects_worker_env_compose_would_misread_before_start(host, capfd):
     assert not (host.data / "locks").exists()
 
 
+def test_worker_env_swapped_for_fifo_after_check_does_not_block(host, capfd, monkeypatch):
+    # 場所と権限を確かめた直後に FIFO に差し替わっても、書式の確認で待たずに止める
+    real = orchestrator.secrets_dir
+
+    def check_then_swap(environ, repo, data):
+        path = real(environ, repo, data)
+        (path / "worker.env").unlink()
+        os.mkfifo(path / "worker.env", 0o600)
+        return path
+
+    monkeypatch.setattr(orchestrator, "secrets_dir", check_then_swap)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    assert "通常のファイル" in capfd.readouterr().err
+    assert host.calls() == []
+
+
 def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):
     other = os.geteuid() + 1
     monkeypatch.setattr(envfiles.os, "geteuid", lambda: other)

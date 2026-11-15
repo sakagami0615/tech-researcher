@@ -10,6 +10,14 @@ import pytest
 from tech_researcher.envfiles import remove_snapshot, secret_values, snapshot
 
 
+@pytest.fixture(autouse=True)
+def private_umask():
+    """worker.env は 600 でないと読まないので、テストで作るファイルを持ち主だけの権限にする。"""
+    previous = os.umask(0o077)
+    yield
+    os.umask(previous)
+
+
 def test_secret_values_follow_name_rule(tmp_path):
     path = tmp_path / "worker.env"
     path.write_text(
@@ -126,7 +134,7 @@ def test_snapshot_rejects_fifo_without_blocking(tmp_path):
 def test_snapshot_rejects_loose_permissions_found_after_check(tmp_path):
     secrets = _secrets(tmp_path)
     (secrets / "worker.env").chmod(0o644)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="いまは 644"):  # 理由をそのまま伝える
         snapshot(secrets, "run1")
     assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
 

@@ -113,8 +113,7 @@ def snapshot(secrets: Path, run_id: str) -> Path:
     """worker.env の写しを作り、そのフォルダ（compose に TR_SECRETS_DIR として渡す）を返す。
 
     写しのフォルダは 700、ファイルは 600。読み書きでシンボリックリンクはたどらない。元のファイルは
-    待たずに開き（FIFO などに差し替わっていても止まらない）、開いたものを確かめ直してから読む。
-    作れなければ ValueError（例外の文にはパスが入るので使わない）。
+    _read_private で読む。作れなければ ValueError（例外の文にはパスが入るので使わない）。
     """
     run_dir = secrets / f"{SNAPSHOT_PREFIX}{run_id}"
     message = f"{SECRETS_DIR_ENV} の {WORKER_ENV} の写しを作れない"
@@ -123,17 +122,28 @@ def snapshot(secrets: Path, run_id: str) -> Path:
     except OSError:  # 同じ名前のフォルダ（ほかの実行の写しかもしれない）は消さない
         raise ValueError(message) from None
     try:
-        src = os.open(secrets / WORKER_ENV, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(src, "rb") as f:
-            _check_stat(os.fstat(f.fileno()), message, _FILE, os.geteuid())
-            data = f.read()
+        data = _read_private(secrets / WORKER_ENV)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         with os.fdopen(os.open(run_dir / WORKER_ENV, flags, 0o600), "wb") as f:
             f.write(data)
-    except OSError, ValueError:
+    except ValueError:  # 確かめ直して違った（理由をそのまま伝える）
+        remove_snapshot(run_dir)
+        raise
+    except OSError:
         remove_snapshot(run_dir)
         raise ValueError(message) from None
     return run_dir
+
+
+def _read_private(path: Path) -> bytes:
+    """worker.env を読む。確かめた後に差し替わっても、リンクはたどらず、FIFO などで待たない。
+
+    開いたものの種類・持ち主・権限を確かめ直してから読む。違えば ValueError、開けなければ OSError。
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as f:
+        _check_stat(os.fstat(f.fileno()), f"{SECRETS_DIR_ENV} の {WORKER_ENV}", _FILE, os.geteuid())
+        return f.read()
 
 
 def remove_snapshot(run_dir: Path) -> None:
@@ -149,7 +159,7 @@ def secret_values(path: Path) -> list[str]:
     違う行があれば ValueError（行の番号だけを出し、パスも値も出さない）。読めなくても ValueError。
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = _read_private(path).decode("utf-8")
     except OSError, UnicodeDecodeError:
         raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない（UTF-8 にする）") from None
     if text.startswith("\ufeff"):
