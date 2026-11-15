@@ -269,7 +269,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `measured_at` | TEXT | 測定時刻 |
 | `stars_total` | INTEGER | 累計 Star 数 |
 | `created_at` | TEXT | リポジトリの作成日時（新規の判定用） |
-| `routes_json` | TEXT | その測定の候補を見つけた経路の配列（`search`・`mention`・`watch`。D-13）。監視リストの判定と、PoC での経路ごとの件数に使う |
+| `routes_json` | TEXT | その測定の候補を見つけた経路の配列（`search`・`mention`・`watch`。D-13。JSON の配列であることを CHECK で確かめる）。監視リストの判定と、PoC での経路ごとの件数に使う |
 
 - PK（`repo`, `target`）、UQ（`repo`, `measured_at`）。D-13 の「（リポジトリ、測定時刻）で一意」を満たしたうえで、同じ対象日の測り直しは `INSERT OR IGNORE` で最初の測定を残す。再実行が遅い時刻に動いても、6:00 の測定どうしの差が崩れないため
 - 増分は「T の行 − T−1 の行」。T−1 の行がないリポジトリは記録だけ行う（D-13）。T−1 の行が1件もない日は、ヘッダに定型文を出す（report-templates.md 1.6）
