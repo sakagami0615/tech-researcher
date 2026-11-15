@@ -359,6 +359,7 @@ def _link_file(h):
         (lambda h: (h.secrets / "worker.env").chmod(0o000), "worker.env の権限は 600"),
         (lambda h: (h.secrets / "worker.env").chmod(0o200), "worker.env の権限は 600"),
         (lambda h: h.secrets.chmod(0o600), "フォルダ の権限は 700"),
+        (lambda h: h.secrets.chmod(0o500), "フォルダ の権限は 700"),  # 写しを作れない
         (_link_file, "シンボリックリンクにしない"),
     ],
 )
@@ -424,6 +425,19 @@ def test_compose_reads_snapshot_of_worker_env_during_run(host, capfd, monkeypatc
     assert Path(seen["copy"]) == host.secrets / f".run-{summary['run_id']}"
     assert seen["modes"] == [0o700, 0o600]
     assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 終わったら写しを消す
+
+
+def test_snapshot_failure_stops_before_start(host, capfd, monkeypatch):
+    def fail(path):
+        raise ValueError("TR_SECRETS_DIR の worker.env を読めない")
+
+    monkeypatch.setattr(orchestrator, "secret_values", fail)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert "worker.env を読めない" in err
+    assert host.calls() == []
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 写しを残さない
 
 
 def test_snapshot_is_removed_after_stopped_run(host, capfd):

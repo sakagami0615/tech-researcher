@@ -65,7 +65,7 @@
 │       ├── cli.py                    # 各段階の入口（worker で動く）
 │       ├── orchestrator.py           # 統括スクリプトとその入口（ホストで動く。bin/tr-run が呼び、docker compose run を呼ぶ）
 │       ├── observe.py                # D-13 の観測の一時的な入口（ホストで動く。bin/tr-observe が呼ぶ。① だけ）
-│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env の場所・権限の確認、マスク用の秘匿値の読み出し（ホストで動く。3.7）
+│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env の場所・権限の確認、実行の間の写しの作成と削除、マスク用の秘匿値の読み出し（ホストで動く。3.7）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
 │       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）
@@ -232,7 +232,7 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
   - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env` は通常のファイル（シンボリックリンクにしない）
   - どちらも持ち主が `bin/tr-run` を動かす人で、root ではない。compose は、`bin/tr-run` を動かす人の権限で env_file を読むため
   - どちらもグループとほかの人の権限がなく、持ち主が読める（フォルダは 700、`worker.env` は 600。読み取りだけの 400 も可）
-- 統括スクリプトは、1回の実行の始めに worker.env の写し（`${TR_SECRETS_DIR}/.run-<実行ID>/worker.env`。フォルダ 700・ファイル 600）を作り、compose にはその写しのフォルダを `TR_SECRETS_DIR` として渡す。実行が終わったら（上限やシグナルで止めたときも）消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値がずれないようにするため。統括スクリプトが強制終了されたときは写しが残るが、元のファイルと同じ 700 のフォルダの中にある
+- 統括スクリプトは、1回の実行の始めに worker.env の写し（`${TR_SECRETS_DIR}/.run-<実行ID>/worker.env`。フォルダ 700・ファイル 600）を作り、compose にはその写しのフォルダを `TR_SECRETS_DIR` として渡す。実行が終わったら（上限やシグナルで止めたときも）消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値がずれないようにするため。統括スクリプトが強制終了されたときは写しが残るが、元のファイルと同じ 700 のフォルダの中にある。次の実行は自動では消さない（ロックの違う日次と週次が同時に動きうるので、動いている実行の写しを消すおそれがある）。運用者が実行していないときに消す
 - 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env の秘匿値（7.3 の名前の規則）を読む。compose は env_file の書式の誤り（閉じていない引用符など）を、その行の値ごとエラー文に出し（実機で確認）、そのエラー文が段階の失敗としてログに入るため。読んだ値は環境変数にも compose にも渡さない。書式は厳密に解釈せず、`名前=値`（compose が受け付ける `名前: 値` も）の行ごとに、値・引用符を外した値・行末のコメントを外した値を伏せる側に倒す
 - worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
 - 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env は agent コンテナ（#18）を足すときに同じ形で足す

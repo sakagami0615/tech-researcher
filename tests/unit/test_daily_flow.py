@@ -529,6 +529,7 @@ def test_observation_collects_only_and_closes_run_as_observed(host):
     assert [c["args"] for c in host.calls("compose")] == [["collect", "daily", "--run-id", run_id]]
     assert host.calls("agent") == []  # ② 以降は動かさない
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]  # 実行中のファイルは消した
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # worker.env の写しも消した
     assert host.runs() == [(run_id, "daily", "2026-10-23", "observed", None, None, 1)]
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         assert conn.execute("SELECT source_id, status FROM source_fetches").fetchall() == [

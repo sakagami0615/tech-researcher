@@ -5,7 +5,7 @@
 
 import pytest
 
-from tech_researcher.envfiles import secret_values
+from tech_researcher.envfiles import remove_snapshot, secret_values, snapshot
 
 
 def test_secret_values_follow_name_rule(tmp_path):
@@ -38,3 +38,47 @@ def test_secret_values_error_has_no_path(tmp_path):
     with pytest.raises(ValueError) as e:
         secret_values(tmp_path)  # フォルダは読めない
     assert str(tmp_path) not in str(e.value)
+
+
+def _secrets(tmp_path):
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(mode=0o700)
+    (secrets / "worker.env").write_text("GITHUB_TOKEN=fake-collect\n")
+    return secrets
+
+
+def test_snapshot_is_private_copy(tmp_path):
+    secrets = _secrets(tmp_path)
+    copy = snapshot(secrets, "run1")
+    assert copy == secrets / ".run-run1"
+    assert copy.stat().st_mode & 0o777 == 0o700
+    assert (copy / "worker.env").stat().st_mode & 0o777 == 0o600
+    assert (copy / "worker.env").read_text() == "GITHUB_TOKEN=fake-collect\n"
+    remove_snapshot(copy)
+    assert [p.name for p in secrets.iterdir()] == ["worker.env"]
+
+
+def test_snapshot_keeps_existing_folder_of_same_name(tmp_path):
+    # 同じ名前のフォルダはほかの実行の写しかもしれないので、作れなくても消さない
+    secrets = _secrets(tmp_path)
+    other = snapshot(secrets, "run1")
+    with pytest.raises(ValueError) as e:
+        snapshot(secrets, "run1")
+    assert str(secrets) not in str(e.value)
+    assert (other / "worker.env").exists()
+
+
+def test_snapshot_failure_leaves_nothing(tmp_path):
+    secrets = _secrets(tmp_path)
+    (secrets / "worker.env").unlink()
+    (secrets / "worker.env").symlink_to(tmp_path / "elsewhere")  # リンクはたどらない
+    with pytest.raises(ValueError) as e:
+        snapshot(secrets, "run1")
+    assert str(secrets) not in str(e.value)
+    assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
+
+
+def test_remove_snapshot_only_removes_snapshot_folders(tmp_path):
+    secrets = _secrets(tmp_path)
+    remove_snapshot(secrets)
+    assert (secrets / "worker.env").exists()

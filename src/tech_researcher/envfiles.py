@@ -59,8 +59,8 @@ def secrets_dir(
     return path
 
 
-# 種類の判定、種類の説明、求める権限、持ち主に要る権限（compose が読めるように）
-_DIR = (stat.S_ISDIR, "フォルダ", "700", stat.S_IRUSR | stat.S_IXUSR)
+# 種類の判定、種類の説明、求める権限、持ち主に要る権限（compose が読め、写しを作れるように）
+_DIR = (stat.S_ISDIR, "フォルダ", "700", stat.S_IRWXU)  # 写しを作るので書き込みも要る
 _FILE = (stat.S_ISREG, "通常のファイル（シンボリックリンクにしない）", "600", stat.S_IRUSR)
 
 
@@ -89,8 +89,12 @@ def snapshot(secrets: Path, run_id: str) -> Path:
     作れなければ ValueError（例外の文にはパスが入るので使わない）。
     """
     run_dir = secrets / f"{SNAPSHOT_PREFIX}{run_id}"
+    message = f"{SECRETS_DIR_ENV} の {WORKER_ENV} の写しを作れない"
     try:
         run_dir.mkdir(mode=0o700)
+    except OSError:  # 同じ名前のフォルダ（ほかの実行の写しかもしれない）は消さない
+        raise ValueError(message) from None
+    try:
         src = os.open(secrets / WORKER_ENV, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(src, "rb") as f:
             data = f.read()
@@ -99,7 +103,7 @@ def snapshot(secrets: Path, run_id: str) -> Path:
             f.write(data)
     except OSError:
         remove_snapshot(run_dir)
-        raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} の写しを作れない") from None
+        raise ValueError(message) from None
     return run_dir
 
 
