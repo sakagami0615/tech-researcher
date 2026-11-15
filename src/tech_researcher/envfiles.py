@@ -128,8 +128,8 @@ def secret_values(path: Path) -> list[str]:
 
     compose の書式を厳密にはまねず、伏せる側に倒す。`名前=値`（compose が受け付ける `名前: 値`
     も）の行ごとに、値そのものと、前後の引用符を外したものと、行末のコメント（` #` 以降）を
-    外したものを返す。書式の誤った行（閉じていない引用符など）も読む。
-    compose がその値をエラー文に出すため。
+    外したものを返す。書式の誤った行（閉じていない引用符など）も読み、引用符が閉じるまでの
+    続きの行（複数行の値）も返す。compose がその値をエラー文に出すため。
     読めなければ ValueError（例外の文にはパスが入るので使わない）。
     """
     try:
@@ -137,10 +137,17 @@ def secret_values(path: Path) -> list[str]:
     except OSError:
         raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない") from None
     values: list[str] = []
+    quote = ""  # 秘匿値の引用符が閉じていない間は、続きの行も値として伏せる（複数行の値）
     for line in text.splitlines():
+        if quote:  # 続きの行。閉じ忘れかもしれないので、下で `名前=値` としても読む
+            values += [line, line.strip(), line.strip().strip("\"'")]
+            if quote in line:
+                quote = ""
         m = _LINE.match(line)
         if not m or not is_secret_name(m["name"]):
             continue
         value = m["value"].strip()
         values += [value, value.strip("\"'"), value.split(" #")[0].strip().strip("\"'")]
+        if value[:1] in ("'", '"') and value[0] not in value[1:]:
+            quote = value[0]
     return values

@@ -385,10 +385,28 @@ def test_rejects_bad_secrets_dir(host, capfd, change, message):
     assert message in err
     assert WORKER_SECRET not in err
     assert str(host.secrets) not in err  # パスも出さない
+    if host.environ.get("TR_SECRETS_DIR"):
+        assert host.environ["TR_SECRETS_DIR"] not in err
     assert host.calls() == []
     assert not (host.data / "locks").exists()  # 起動の前に止まる
     if host.secrets.exists():
         host.secrets.chmod(0o700)  # tmp_path を片付けられるように
+
+
+def test_unresolvable_secrets_dir_is_rejected_without_path(host, capfd, monkeypatch):
+    real = envfiles.Path.resolve
+
+    def fail(self, strict=False):
+        if self == host.secrets:  # TR_SECRETS_DIR だけをたどれなくする
+            raise OSError(40, "Too many levels of symbolic links", str(self))
+        return real(self, strict)
+
+    monkeypatch.setattr(envfiles.Path, "resolve", fail)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    err = capfd.readouterr().err
+    assert "パスをたどれない" in err
+    assert str(host.secrets) not in err
+    assert host.calls() == []
 
 
 def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):

@@ -15,15 +15,18 @@ def test_secret_values_follow_name_rule(tmp_path):
         "GITHUB_TOKEN=fake-collect\n"
         "export TR_ISSUE_TOKEN = 'fake-issue'\n"
         'TR_PROJECTS_PAT="fake-pat" # コメント\n'
-        'TR_BROKEN_KEY="fake-unterminated\n'  # compose が値ごとエラー文に出す行
-        'TR_YAML_TOKEN: "fake-yaml\n'  # compose は `名前: 値` も受け付ける
+        "TR_YAML_TOKEN: 'fake-yaml'\n"  # compose は `名前: 値` も受け付ける
         "TR_ISSUE_REPO=example/repo\n"  # 投稿先は秘匿値ではない（D-20）
         "TR_EMPTY_TOKEN=\n"
-        "no equals sign\n",
+        "no equals sign\n"
+        # compose が値ごとエラー文に出す行。引用符が閉じないので、続く行も伏せる側に倒す
+        'TR_BROKEN_KEY="fake-unterminated\n'
+        "fake-after-broken\n",
         encoding="utf-8",
     )
     values = set(secret_values(path))
-    assert {"fake-collect", "fake-issue", "fake-pat", "fake-unterminated", "fake-yaml"} <= values
+    expected = {"fake-collect", "fake-issue", "fake-pat", "fake-yaml"}
+    assert expected | {"fake-unterminated", "fake-after-broken"} <= values
     assert "example/repo" not in values
     assert not any("example" in v for v in values)
 
@@ -82,3 +85,14 @@ def test_remove_snapshot_only_removes_snapshot_folders(tmp_path):
     secrets = _secrets(tmp_path)
     remove_snapshot(secrets)
     assert (secrets / "worker.env").exists()
+
+
+def test_secret_values_include_multiline_quoted_value(tmp_path):
+    path = tmp_path / "worker.env"
+    path.write_text(
+        "TR_MULTI_KEY='fake-first\n  fake-second\nfake-third'\nTR_ISSUE_REPO=example/repo\n",
+        encoding="utf-8",
+    )
+    values = set(secret_values(path))
+    assert {"fake-first", "fake-second", "fake-third"} <= values
+    assert "example/repo" not in values  # 引用符が閉じた後の行は名前の規則に戻る
