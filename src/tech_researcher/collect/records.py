@@ -129,7 +129,8 @@ class FailedPart:
     """情報源の中の、取れなかった部分（GitHub Releases の追跡先の1つなど）。
 
     name は部分の名前（`owner/repo` など。コードが設定から作る値）、error_category は理由の分類
-    （data-model.md 3.4 の source_fetches の error_category と同じ語）。
+    （data-model.md 3.4 の source_fetches の error_category と同じ語。部分だけに使う
+    `truncated`（取りこぼしたおそれ）を含む）。
     """
 
     name: str

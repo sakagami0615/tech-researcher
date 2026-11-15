@@ -168,16 +168,26 @@ def test_out_of_range_date_fails_only_that_repo(limits):
     assert result.records
 
 
-@pytest.mark.parametrize("status, category", [(401, "auth"), (429, "rate_limited")])
-def test_requests_stop_after_auth_or_rate_limit(limits, status, category):
+@pytest.mark.parametrize(
+    "error, category",
+    [
+        (FetchError("HTTP 401", 1, 401), "auth"),
+        (FetchError("HTTP 429", 1, 429), "rate_limited"),
+        (FetchError("HTTP 403", 1, 403, {"x-ratelimit-remaining": "0"}), "rate_limited"),
+    ],
+)
+def test_requests_stop_after_auth_or_rate_limit(limits, error, category):
     """トークンが無効・レート制限なら、残りのリポジトリには要求を出さない。"""
     repos = ("a/one", "b/two", "c/three")
-    fetch = FakeFetch({releases_url("a/one"): FetchError(f"HTTP {status}", 1, status)})
+    status = error.status
+    fetch = FakeFetch({releases_url("a/one"): error})
     result = collect(limits, fetch, replace(RELEASES, repos=repos))
     assert fetch.urls() == [releases_url("a/one")]
     assert result.failed_parts == tuple(FailedPart(r, category) for r in repos)
     assert result.error is not None
-    readme_fetch = FakeFetch({readme_url("a/one"): FetchError(f"HTTP {status}", 1, status)})
+    readme_fetch = FakeFetch(
+        {readme_url("a/one"): FetchError(f"HTTP {status}", 1, status, error.headers)}
+    )
     readmes = fetch_readmes(["a/one", "b/two"], client(limits, readme_fetch))
     assert readme_fetch.urls() == [readme_url("a/one")]
     assert readmes.errors == {"a/one": category, "b/two": category}
@@ -544,7 +554,11 @@ def test_bodies_are_not_stored_in_db(tmp_path, limits):
         ("![alt][]\n\n[alt]: https://a.example/logo.png", ()),
         ("<!-- https://hidden.example/a --> https://a.example/x", ("https://a.example/x",)),
         ("https://a.example/x <!-- https://hidden.example/a", ("https://a.example/x",)),
-        ("https://a.example。次に", ("https://a.example",)),  # IDNA で別のホストにしない
+        ("https://a.example。次に", ("https://a.example",)),
+        (
+            "https://a.example/\u212a https://\u017ftripe.example/",
+            ("https://a.example/",),
+        ),  # IDNA で別のホストにしない
         (
             "<!--> https://a.example/x <!---> https://b.example/y",
             ("https://a.example/x", "https://b.example/y"),
@@ -557,6 +571,12 @@ def test_bodies_are_not_stored_in_db(tmp_path, limits):
 )
 def test_markdown_links(text, links):
     assert markdown_links(text) == links
+
+
+def test_markdown_links_are_capped_and_unique():
+    text = " ".join(f"https://a{i}.example/ https://a{i}.example/" for i in range(300))
+    links = markdown_links(text)
+    assert links == tuple(f"https://a{i}.example/" for i in range(100))
 
 
 @pytest.mark.parametrize(

@@ -99,7 +99,9 @@ def _repo_releases(
     （レコード、期間の始まりまで届いたか）を返す。MAX_PAGES で届かなければ False。
 
     一覧が公開日時の順に並ぶ保証はない（公式の文書に書かれていない）ので、ページの中の
-    すべてが期間の始まりより前になったときだけ止める。日次でもふつうは2ページを取る。
+    すべてが期間の始まりより前になったときだけ止める（期間内のリリースがあれば2ページを取る）。
+    ページをまたいだ並びの乱れ（前に作った下書きを後で公開したものが後ろのページにある、など）は
+    追わない。まれで、追うにはすべてのページを取る必要があるため。
     下書き・プレリリースも件数に加わるので、プレリリースの多いリポジトリはページが増える。
     応答の形が違えば GitHubError（INVALID_RESPONSE）。途中のページで失敗したときや、1件の
     リリースの形が違うときも、取れたページの分を含めてそのリポジトリを取れなかったものにする
@@ -161,7 +163,8 @@ def _display_repo(full_name: str, html_url: str) -> str:
     設定の名前は小文字にそろえてあるので、本文に出る元の表記（microsoft/TypeScript など）を残す。
     """
     shown = "/".join(html_url.removeprefix("https://github.com/").split("/")[:2])
-    return shown if shown.lower() == full_name else full_name
+    # ASCII に限る（ケルビン記号の K なども lower() で k になるため）
+    return shown if shown.isascii() and shown.lower() == full_name else full_name
 
 
 def _utc(value: str) -> datetime:
@@ -262,7 +265,8 @@ def _readme_text(full_name: str, data) -> str | None:
         raw = base64.b64decode(re.sub(r"[\r\n]", "", data["content"]), validate=True)
     except binascii.Error as e:
         raise ValueError("content を base64 として読めない") from e
-    if b"\x00" in raw:  # UTF-16・UTF-32（BOM の有無によらない）とバイナリは NUL を含む
+    # ASCII（改行など）を含む UTF-16・UTF-32 とバイナリは NUL を含む。BOM で始まるものも止める
+    if b"\x00" in raw or raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         raise ValueError("UTF-16・UTF-32・バイナリの README は読まない")
     return raw.decode("utf-8-sig", errors="replace")  # 先頭の BOM は除く
 
@@ -293,12 +297,17 @@ _REF_DEF = re.compile(r"^ {0,3}\[([^\[\]\n]+)\]:[^\n]*", re.MULTILINE)
 # URL は ASCII の印字できる文字だけとし、< > ( ) [ ] { } " ' ` で止める。日本語の文の句読点・
 # 全角の括弧（「https://…。次に」など）を含めると、IDNA が「。」を「.」として扱い、別のホストに
 # なりうるため。ホスト名を IDN のまま書いたものは切れるが、候補リンクとしては受け入れる
-_URL = re.compile(r"https?://[!#-&*-;=?-Z\\^_a-z|~]+", re.IGNORECASE)
+# IGNORECASE は Unicode の対応でケルビン記号なども [a-z] に一致させるので、スキームにだけ付ける
+_URL = re.compile(r"(?i:https?)://[!#-&*-;=?-Z\\^_a-z|~]+")
 _TRAILING = ".,;:!?*_~"
+# 1つの本文から集める候補リンクの数の上限（重なりを除いた先頭から）。外部の本文1つで、DB の
+# links_json や ② の入力を大きくできないようにする（data-model.md 2.6）
+MAX_LINKS = 100
 
 
 def markdown_links(text: str | None) -> tuple[str, ...]:
-    """Markdown の本文の絶対 URL を順に集める。相対リンクは集めない。
+    """Markdown の本文の絶対 URL を順に、重なりを除いて先頭の MAX_LINKS 件まで集める。
+    相対リンクは集めない。
 
     本文に混ざる HTML の文字参照（&amp; など）は先に戻す。括弧を含む URL は括弧の前で切れる
     （Wikipedia の一部の記事など。候補リンクとしては受け入れる）。
@@ -310,7 +319,12 @@ def markdown_links(text: str | None) -> tuple[str, ...]:
     images = {(label or alt).casefold() for alt, label in _REF_IMAGE.findall(text)}
     text = _REF_DEF.sub(lambda m: " " if m.group(1).casefold() in images else m.group(), text)
     text = _IMAGES.sub(" ", text)
-    return tuple(m.group().rstrip(_TRAILING) for m in _URL.finditer(text))
+    links: dict[str, None] = {}
+    for m in _URL.finditer(text):
+        links[m.group().rstrip(_TRAILING)] = None
+        if len(links) >= MAX_LINKS:
+            break
+    return tuple(links)
 
 
 def _drop_comments(text: str) -> str:
