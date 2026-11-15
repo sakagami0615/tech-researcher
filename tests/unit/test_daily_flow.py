@@ -75,12 +75,14 @@ class Host:
         self.repo = tmp_path / "repo"
         self.data = tmp_path / "data"
         self.record = tmp_path / "record"
+        self.secrets = tmp_path / "secrets"
         self.environ = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(tmp_path),
             "TR_DATA_DIR": str(self.data),
+            "TR_SECRETS_DIR": str(self.secrets),
         }
-        # worker の env_file から渡る秘匿値（D-05）の代わり
+        # worker の env_file（worker.env）から compose が渡す秘匿値（D-05）の代わり
         self.worker_env = {"TR_DATA_DIR": str(self.data), "GITHUB_TOKEN": TOKEN}
         self.feed = FEED
         self.ai = select_all
@@ -153,6 +155,9 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
     h.write_config()
     h.data.mkdir()
     h.record.mkdir()
+    h.secrets.mkdir(mode=0o700)
+    (h.secrets / "worker.env").write_text(f"GITHUB_TOKEN={TOKEN}\n")
+    (h.secrets / "worker.env").chmod(0o600)
     monkeypatch.chdir(h.repo)
     monkeypatch.setattr(
         orchestrator, "new_run_id", lambda now, **kwargs: new_run_id(STARTED, **kwargs)

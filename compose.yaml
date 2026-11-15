@@ -21,6 +21,12 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # 認証情報と投稿先の指定（D-05・D-20）。worker にだけ渡し、フォルダはマウントしない。
+    # 統括スクリプトは中身を環境変数に読み込まず、場所と権限を確かめて TR_SECRETS_DIR だけを渡す
+    # （structure.md 3.7）。下の environment が env_file より優先される（TR_DATA_DIR は上書きできない）
+    env_file:
+      - path: ${TR_SECRETS_DIR:?TR_SECRETS_DIR に worker.env を置くフォルダ（リポジトリの外の絶対パス）を設定する}/worker.env
+        required: true
     environment:
       TR_DATA_DIR: /data
     volumes:

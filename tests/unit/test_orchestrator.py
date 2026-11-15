@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher import orchestrator
+from tech_researcher import envfiles, orchestrator
 from tech_researcher.agent import invoke
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import parse_config
@@ -28,6 +28,8 @@ from tech_researcher.config import parse_config
 ROOT = Path(__file__).parents[2]
 LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").split("[limits]")[1]
 TOKEN = "ghp" + "_" + "y" * 36  # テスト用のダミー。実行時に組み立てる
+# worker.env の偽の秘匿値。トークンの形ではないので、既知の値としてだけ伏せられる
+WORKER_SECRET = "fake-issue-credential-0123"
 PRODUCT_CALL_AGENT = invoke.call_agent
 
 FAKE_DOCKER = f"""#!{sys.executable}
@@ -79,10 +81,12 @@ class Host:
         self.repo = tmp_path / "repo"
         self.data = tmp_path / "data"
         self.fake = tmp_path / "fakebin"
+        self.secrets = tmp_path / "secrets"
         self.environ = {
             "PATH": f"{self.fake}:{os.environ['PATH']}",
             "HOME": str(tmp_path),
             "TR_DATA_DIR": str(self.data),
+            "TR_SECRETS_DIR": str(self.secrets),
         }
 
     def behave(self, mode: str, lock: str = "daily", **extra) -> None:
@@ -123,6 +127,10 @@ def host(tmp_path, monkeypatch) -> Host:
     monkeypatch.chdir(h.repo)
     h.data.mkdir()
     h.fake.mkdir()
+    h.secrets.mkdir(mode=0o700)
+    worker_env = h.secrets / "worker.env"
+    worker_env.write_text(f"GITHUB_TOKEN=fake-collect-token\nTR_ISSUE_TOKEN={WORKER_SECRET}\n")
+    worker_env.chmod(0o600)
     docker = h.fake / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
@@ -259,7 +267,7 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "GITHUB_TOKEN": TOKEN,
         "COMPOSE_FILE": "/tmp/evil.yaml",
         "COMPOSE_PROJECT_NAME": "evil",
-        "TR_SECRETS_DIR": "/srv/secrets",
+        "TR_SECRETS_DIR": str(host.secrets) + "/",  # 確かめて解決したパスを渡す
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
         "DOCKER_CONTEXT": "desktop-linux",  # 専用の設定のフォルダからは見えないので渡さない
         "DOCKER_CONFIG": "/home/someone/.docker",  # 利用者の設定（proxies など）は使わない
@@ -281,6 +289,7 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
         "DOCKER_CONFIG": str(Path(host.environ["HOME"]) / ".config" / "tech-researcher" / "docker"),
         "TR_DATA_DIR": str(host.data),
+        "TR_SECRETS_DIR": str(host.secrets),  # 場所だけ。worker.env の中身は compose が読む
         "TR_UID": "1001",
         "TR_GID": "1002",
     }
@@ -313,6 +322,88 @@ def test_data_dir_is_passed_resolved(host, capfd, tmp_path):
     )
     summary_of(capfd)
     assert host.calls()[0]["env"]["TR_DATA_DIR"] == str(host.data)
+
+
+# --- worker.env（TR_SECRETS_DIR。D-05・structure.md 3.7） ---
+
+
+def _no_dir(h):
+    h.secrets.chmod(0o700)
+    for f in h.secrets.iterdir():
+        f.unlink()
+    h.secrets.rmdir()
+
+
+def _link_file(h):
+    real = h.secrets / "real.env"
+    (h.secrets / "worker.env").rename(real)
+    (h.secrets / "worker.env").symlink_to(real)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda h: h.environ.pop("TR_SECRETS_DIR"), "TR_SECRETS_DIR が設定されていない"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR="secrets"), "絶対パス"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.repo / "s")), "リポジトリの外"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.data / "s")), "TR_DATA_DIR の外"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.data)), "TR_DATA_DIR の外"),
+        (_no_dir, "フォルダ がない"),
+        (lambda h: (h.secrets / "worker.env").unlink(), "worker.env がない"),
+        (lambda h: h.secrets.chmod(0o750), "フォルダ の権限は 700"),
+        (lambda h: h.secrets.chmod(0o701), "フォルダ の権限は 700"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o640), "worker.env の権限は 600"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o604), "worker.env の権限は 600"),
+        (_link_file, "シンボリックリンクにしない"),
+    ],
+)
+def test_rejects_bad_secrets_dir(host, capfd, change, message):
+    change(host)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert message in err
+    assert WORKER_SECRET not in err
+    assert host.calls() == []
+    assert not (host.data / "locks").exists()  # 起動の前に止まる
+
+
+def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):
+    other = os.geteuid() + 1
+    monkeypatch.setattr(envfiles.os, "geteuid", lambda: other)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    assert "持ち主は bin/tr-run を動かす人" in capfd.readouterr().err
+    assert host.calls() == []
+
+
+def test_read_only_worker_env_is_accepted(host, capfd):
+    (host.secrets / "worker.env").chmod(0o400)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+    summary_of(capfd)
+
+
+def test_worker_env_values_are_masked_in_stage_errors(host, capfd):
+    # compose は env_file の書式の誤りを、その行の値ごとエラー文に出す（実機で確認）
+    host.behave("fail", lock="daily-dry-run", secret=f'unterminated quoted value "{WORKER_SECRET}')
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    out, err = capfd.readouterr()
+    summary = json.loads(out)
+    log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
+    assert WORKER_SECRET not in out + err + log_text
+    assert "[MASKED:known]" in log_text
+
+
+def test_compose_passes_worker_env_only_to_worker():
+    # worker.env は worker の env_file だけ。フォルダはどのサービスにもマウントしない
+    text = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    uses = [line.strip() for line in lines if "TR_SECRETS_DIR" in line]
+    assert len(uses) == 1
+    assert uses[0].startswith("- path: ${TR_SECRETS_DIR:?")
+    assert uses[0].endswith("}/worker.env")
+    services = [line.strip() for line in lines if line.startswith("  ") and line[2] != " "]
+    assert services == ["worker:"]  # ほかのサービス（#18 の agent）を足したら、ここも見直す
+    assert sum("env_file:" in line for line in lines) == 1
 
 
 # --- 要約 ---

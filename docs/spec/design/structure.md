@@ -65,6 +65,7 @@
 │       ├── cli.py                    # 各段階の入口（worker で動く）
 │       ├── orchestrator.py           # 統括スクリプトとその入口（ホストで動く。bin/tr-run が呼び、docker compose run を呼ぶ）
 │       ├── observe.py                # D-13 の観測の一時的な入口（ホストで動く。bin/tr-observe が呼ぶ。① だけ）
+│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env の場所・権限の確認、マスク用の秘匿値の読み出し（ホストで動く。3.7）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
 │       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）
@@ -223,8 +224,17 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 ### 3.7 認証情報との関係（D-05）
 
 - Claude のトークンを渡すのは agent コンテナだけ。cron の実行では外側の Claude Code を使わないので、外側用のトークンは要らない
-- 統括スクリプト（ホスト）は env_file の中身を読まず、compose が各コンテナにだけ渡す。統括スクリプトから compose に渡す環境変数は、許可したものだけに絞る（F3 の `ANTHROPIC_API_KEY` などがホストのシェルにあっても、コンテナに入れない）
-- compose に渡すのは `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_UID`・`TR_GID` と `DOCKER_CONFIG` だけにする。リポジトリの `.env` は読ませない（`--env-file /dev/null`）
+- 統括スクリプト（ホスト）は env_file の中身を環境変数として読み込まず、compose が各コンテナにだけ渡す。統括スクリプトから compose に渡す環境変数は、許可したものだけに絞る（F3 の `ANTHROPIC_API_KEY` などがホストのシェルにあっても、コンテナに入れない）
+- compose に渡すのは `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と `DOCKER_CONFIG` だけにする。リポジトリの `.env` は読ませない（`--env-file /dev/null`）。`TR_DATA_DIR`・`TR_SECRETS_DIR` は、統括スクリプトが確かめて解決したパスを渡す
+- worker.env は、compose.yaml の worker の `env_file`（`${TR_SECRETS_DIR}/worker.env`、`required: true`）で worker にだけ渡す。`TR_SECRETS_DIR` はどのコンテナにもマウントせず、コンテナの環境変数にも入れない（compose の変数の展開にだけ使う）。worker の `environment`（`TR_DATA_DIR`）は env_file より優先されるので、worker.env から上書きできない
+- 統括スクリプトは起動の前に（ロックを取る前に）次を確かめ、満たさなければ終了コード 2 で止める。エラー文にはパスも値も入れない
+  - `TR_SECRETS_DIR` が設定されていて、絶対パスで、解決したパスがリポジトリの外かつ `TR_DATA_DIR` の外（worker にマウントするため）
+  - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env` は通常のファイル（シンボリックリンクにしない）
+  - どちらも持ち主が `bin/tr-run` を動かす人で、root ではない。compose は、`bin/tr-run` を動かす人の権限で env_file を読むため
+  - どちらもグループとほかの人の権限がない（フォルダは 700、`worker.env` は 600。読み取りだけの 400 も可）
+- 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、worker.env の秘匿値（7.3 の名前の規則）を読む。compose は env_file の書式の誤り（閉じていない引用符など）を、その行の値ごとエラー文に出し（実機で確認）、そのエラー文が段階の失敗としてログに入るため。読んだ値は環境変数にも compose にも渡さない。書式は厳密に解釈せず、`名前=値` の行ごとに、値・引用符を外した値・行末のコメントを外した値を伏せる側に倒す
+- worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
+- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env は agent コンテナ（#18）を足すときに同じ形で足す
 - `DOCKER_CONFIG` は、このプロジェクト専用のフォルダ（`${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`、権限 700）にする。利用者の `~/.docker/config.json` の `proxies` は compose がコンテナの環境変数に入れるため。`TR_DATA_DIR` の下には置かない（worker にマウントするので、コンテナの中から次のコンテナの設定を書き換えられる）。Docker のコンテキストは使えず、デーモンは `DOCKER_HOST` で指定する
 - `TR_UID`・`TR_GID` を省略したときは、`bin/tr-run` を動かしている人の ID を渡す。0（root）は拒否する
 
@@ -485,7 +495,7 @@ ${TR_DATA_DIR}/
 ### 7.3 ログ
 
 - 形式は JSON Lines。1行に、時刻（JST）・実行 ID・日次か週次か・対象日（週）・段階・出来事（開始・終了・再試行・失敗・情報源の結果・項目の除外）・情報源名・エラーの分類・件数を持たせる
-- 秘匿情報を出さない：ログに書く前に、(1) 既知の秘匿値（env_file から読んだ値）を伏せ、(2) トークンの形を検出して伏せる。US-E7-05 の秘匿情報の検査も同じ検出器を使う
+- 秘匿情報を出さない：ログに書く前に、(1) 既知の秘匿値（env_file から読んだ値。worker では環境変数、統括スクリプトでは 3.7 のとおり worker.env から読んだ値とホストの環境変数）を伏せ、(2) トークンの形を検出して伏せる。US-E7-05 の秘匿情報の検査も同じ検出器を使う
   - (1) の既知の秘匿値は、環境変数の名前に `TOKEN`・`KEY`・`SECRET`・`PASSWORD`・`AUTH`・`CREDENTIAL`、または `_` で区切られた語の `PAT`（`PATH` は含めない）を含むものの値とする（大文字・小文字は区別しない）。worker.env には投稿先のリポジトリ名なども入る（D-20）ので、すべての値を秘匿値にはしない。D-05 の各トークンの変数名が決まったら、名前の規則から明示の一覧に移す
   - (1) は値そのものに加え、例外の repr・JSON・URL のエスケープの形も照らす。重ね掛けは2段（例：repr の中の JSON）までとし、3段以上は照らさない。トークンの多くは英数字と `_`・`-` だけで、エスケープしても形が変わらず、そのままの形で拾えるため
   - (2) のトークンの形は、`gh[pousr]_` に英数字36文字以上（GitHub の classic・OAuth・App のトークン）、`github_pat_` に英数字と `_` で22文字以上（GitHub の fine-grained トークン）、`sk-ant-` に英数字と `_`・`-` で20文字以上（Anthropic の API キーと OAuth トークン）の3種とする。worker には Claude のトークンが渡らない（D-05）ので、`sk-ant-` は形での検出だけが防御になる

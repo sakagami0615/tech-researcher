@@ -37,9 +37,14 @@ class Finding:
     end: int
 
 
+def is_secret_name(name: str) -> bool:
+    """環境変数の名前が秘匿値のものか（上の名前の規則）。"""
+    return bool(_SECRET_NAME.search(name.upper()))
+
+
 def known_secret_values(environ: Mapping[str, str]) -> list[str]:
     """環境変数から既知の秘匿値を選ぶ。"""
-    return [value for name, value in environ.items() if _SECRET_NAME.search(name.upper())]
+    return [value for name, value in environ.items() if is_secret_name(name)]
 
 
 # 例外の repr・JSON・URL（パスとフォーム）でエスケープした形を作る関数
