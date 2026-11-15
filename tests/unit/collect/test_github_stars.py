@@ -317,6 +317,8 @@ def test_renamed_repos_are_kept_under_the_new_name_and_merged(limits, conn):
         {"nameWithOwner": "a/b", "stargazerCount": 1, "createdAt": "yesterday"},
         {"nameWithOwner": "../b", "stargazerCount": 1, "createdAt": "2026-10-01T00:00:00Z"},
         {"stargazerCount": 1, "createdAt": "2026-10-01T00:00:00Z"},
+        {"nameWithOwner": "\u212aube/x", "stargazerCount": 1, "createdAt": "2026-10-01T00:00:00Z"},
+        {"nameWithOwner": "a/b", "stargazerCount": 1, "createdAt": "0001-01-01T00:00:00+01:00"},
         "a/b",
     ],
 )
@@ -448,3 +450,15 @@ def test_rate_limited_error_on_an_alias_fails_the_batch():
 def test_star_count_beyond_graphql_int_is_unmeasured():
     found, _, failed = parse_batch(answer(node("a/b", 2**31)), 1)
     assert (found, failed) == ({}, [0])
+
+
+def test_renamed_repos_in_separate_queries_are_merged(limits, conn):
+    fetch = FakeFetch(answer(node("new/name", 7)), answer(node("new/name", 8)))
+    result = measure_stars(
+        [cand("new/name", ("watch",)), cand("old/name", ("search",))],
+        make_client(limits, fetch), DAILY, conn, write=True, batch_size=1, now=Clock(),
+    )  # fmt: skip
+    assert [(s.repo, s.routes, s.stars_total) for s in result.snapshots] == [
+        ("new/name", ("search", "watch"), 8)
+    ]
+    assert list(load_star_snapshot(conn, DAILY.key)) == ["new/name"]

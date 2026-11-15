@@ -1,9 +1,11 @@
 """GitHub のリポジトリの Star 数の記録：star_snapshots（data-model.md 3.4・3.5、D-13）。
 
 日次の測定ごとに、リポジトリの累計 Star 数を（リポジトリ、対象日）で残す。同じ対象日の行が
-すでにあれば書かず、最初の測定を残す（3.7。`INSERT OR IGNORE`）。再実行が遅い時刻に動いても、
-6:00 の測定どうしの差が崩れないため。週次の実行とドライランは書かない（書かないのは呼ぶ側が
-決める。ドライランは DB を読み取り専用で開く）。
+すでにあれば書かず、最初の測定を残す（3.7 の `INSERT OR IGNORE`。一意制約の衝突だけを
+無視したいので、`ON CONFLICT DO NOTHING` で書く。CHECK・NOT NULL の違反は例外にする）。
+再実行が遅い時刻に動いても、6:00 の測定どうしの差が崩れないため。
+週次の実行とドライランは書かない（書かないのは呼ぶ側が決める。ドライランは DB を読み取り専用で
+開く）。
 routes_json は、その測定の候補を見つけた経路（search・mention・watch）の JSON の配列。
 監視リスト（過去に Search・言及で候補になったリポジトリ）もここから引く。
 """
@@ -63,6 +65,8 @@ class StarSnapshot:
     def __post_init__(self):
         if not GITHUB_REPO_NAME.fullmatch(self.repo):
             raise ValueError(f"repo が owner/repo（小文字）の形でない: {self.repo!r}")
+        if self.created_at.tzinfo is None or self.measured_at.tzinfo is None:
+            raise ValueError("タイムゾーンのない日時は持たない")
         if self.stars_total < 0:
             raise ValueError("stars_total は0以上にする")
         if not self.routes or tuple(r for r in ROUTES if r in self.routes) != self.routes:
@@ -93,8 +97,8 @@ def record_star_snapshots(
     with transaction(conn):
         before = conn.total_changes
         conn.executemany(
-            "INSERT OR IGNORE INTO star_snapshots (repo, target, measured_at, stars_total,"
-            " created_at, routes_json) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO star_snapshots (repo, target, measured_at, stars_total,"
+            " created_at, routes_json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             rows,
         )
         return conn.total_changes - before

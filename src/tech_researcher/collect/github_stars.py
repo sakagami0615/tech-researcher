@@ -256,7 +256,10 @@ def _parse_node(node: object) -> tuple[str, int, datetime] | None:
         node.get("stargazerCount"),
         node.get("createdAt"),
     )
-    if not isinstance(name, str) or not GITHUB_REPO_NAME.fullmatch(name.lower()):
+    # ASCII だけを認める（Unicode の小文字化で別の ASCII の名前に化けないように）
+    if not isinstance(name, str) or not name.isascii():
+        return None
+    if not GITHUB_REPO_NAME.fullmatch(name.lower()):
         return None
     if not isinstance(stars, int) or isinstance(stars, bool) or not 0 <= stars <= _MAX_STARS:
         return None
@@ -264,9 +267,10 @@ def _parse_node(node: object) -> tuple[str, int, datetime] | None:
         return None
     try:
         created_at = datetime.fromisoformat(created)
-    except ValueError:
-        return None
-    if created_at.tzinfo is None:
+        if created_at.tzinfo is None:
+            return None
+        created_at = created_at.astimezone(UTC)  # 範囲の外の日時はここで OverflowError
+    except ValueError, OverflowError:
         return None
     return name.lower(), stars, created_at
 

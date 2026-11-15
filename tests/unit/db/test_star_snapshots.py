@@ -200,8 +200,18 @@ def test_readonly_db_cannot_be_written(tmp_path):
         lambda: snap("a/b", 1, routes=("search", "search")),
         lambda: snap("a/b", 1, routes=("trending",)),
         lambda: StarSnapshot("a/b", 1, datetime(2026, 1, 1), AT, ("search",)),
+        lambda: StarSnapshot("a/b", 1, CREATED, datetime(2026, 1, 1), ("search",)),
     ],
 )
 def test_invalid_snapshots_are_refused(make):
     with pytest.raises(ValueError):
         record_star_snapshots(None, T, [make()])
+
+
+def test_constraint_violations_other_than_uniqueness_are_not_ignored(conn):
+    conn.execute(
+        "CREATE TRIGGER broken BEFORE INSERT ON star_snapshots"
+        " BEGIN SELECT RAISE(ABORT, 'broken'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        record_star_snapshots(conn, T, [snap("a/b", 1)])
