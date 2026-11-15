@@ -25,6 +25,7 @@ from tech_researcher.validate.secret_scan import is_secret_name
 
 SECRETS_DIR_ENV = "TR_SECRETS_DIR"
 WORKER_ENV = "worker.env"
+MIN_SECRET_CHARS = 4  # これより短い値は伏せない（下の secret_values）
 SNAPSHOT_PREFIX = ".run-"  # 1回の実行の間だけ置く写しのフォルダ
 # `名前=値`・`名前: 値`（前に export が付いてもよい）。名前の文字は広めに取る（伏せる側に倒す）
 _LINE = re.compile(r"\s*(?:export\s+)?(?P<name>[^\s=:#]+)\s*[=:](?P<value>.*)")
@@ -141,13 +142,24 @@ def secret_values(path: Path) -> list[str]:
     for line in text.splitlines():
         if quote:  # 続きの行。閉じ忘れかもしれないので、下で `名前=値` としても読む
             values += [line, line.strip(), line.strip().strip("\"'")]
-            if quote in line:
+            if _closes(line, quote):
                 quote = ""
         m = _LINE.match(line)
         if not m or not is_secret_name(m["name"]):
             continue
         value = m["value"].strip()
         values += [value, value.strip("\"'"), value.split(" #")[0].strip().strip("\"'")]
-        if value[:1] in ("'", '"') and value[0] not in value[1:]:
+        if value[:1] in ("'", '"') and not _closes(value[1:], value[0]):
             quote = value[0]
-    return values
+    # 複数行の値（JSON など）の `{`・`}`・`1` のような短い行や記号だけの行は返さない。秘匿の本体では
+    # なく、伏せるとログが読めなくなる（ログの行の区切りまで伏せられる）ため
+    return [v for v in values if len(v) >= MIN_SECRET_CHARS and any(c.isalnum() for c in v)]
+
+
+# 二重引用符の中では `\"` は閉じる引用符ではない（前の `\` の数が偶数のものだけが閉じる）
+_DOUBLE_CLOSE = re.compile(r'(?:^|[^\\])(?:\\\\)*"')
+
+
+def _closes(text: str, quote: str) -> bool:
+    """text の中で引用符が閉じるか。単一引用符の中ではエスケープはない（compose の書式）。"""
+    return bool(_DOUBLE_CLOSE.search(text)) if quote == '"' else quote in text

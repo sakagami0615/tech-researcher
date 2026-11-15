@@ -96,3 +96,29 @@ def test_secret_values_include_multiline_quoted_value(tmp_path):
     values = set(secret_values(path))
     assert {"fake-first", "fake-second", "fake-third"} <= values
     assert "example/repo" not in values  # 引用符が閉じた後の行は名前の規則に戻る
+
+
+def test_escaped_double_quote_does_not_close_value(tmp_path):
+    path = tmp_path / "worker.env"
+    path.write_text(
+        'TR_MULTI_KEY="fake-first\\"\nfake-second \\" x\nfake-third"\nTR_ISSUE_REPO=example/repo\n',
+        encoding="utf-8",
+    )
+    values = set(secret_values(path))
+    assert {'fake-second \\" x', "fake-third"} <= values
+    assert "example/repo" not in values
+
+
+def test_short_or_symbol_only_lines_are_not_secret_values(tmp_path):
+    # 二重引用符の JSON。`\"` で閉じたとみなさず、最後の行まで続きとして読む
+    path = tmp_path / "worker.env"
+    path.write_text(
+        'TR_SA_KEY="{\n  \\"type\\": \\"fake-service\\",\n  \\"x\\": 1\n}"\n'
+        "TR_ISSUE_REPO=example/repo\n",
+        encoding="utf-8",
+    )
+    values = set(secret_values(path))
+    assert any("fake-service" in v for v in values)
+    assert any('\\"x\\": 1' in v for v in values)
+    assert not {"{", "}", '"{', '}"', "1"} & values
+    assert "example/repo" not in values
