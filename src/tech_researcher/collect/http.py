@@ -84,14 +84,16 @@ def fetch(
     open_url: Callable[[urllib.request.Request], http.client.HTTPResponse] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     headers: Mapping[str, str] | None = None,
+    follow_redirects: bool = True,
 ) -> Response:
     """GET して本文を返す。待ちは設定の http_retry_waits_s で、Retry-After があれば従う。
 
     headers は足す要求ヘッダ（認証など）。リダイレクトの先には送らない（別のホストへ
-    認証情報を渡さないため）。
+    認証情報を渡さないため）。follow_redirects が False なら、リダイレクトをたどらずに
+    3xx の FetchError にする（Location は headers に残る。要求の回数を呼ぶ側で数えるため）。
     """
     if open_url is None:
-        opener = _opener(limits)
+        opener = _opener(limits, follow_redirects)
 
         def open_url(req):
             return opener.open(req, timeout=limits.http_connect_timeout_s)
@@ -195,20 +197,22 @@ def _retry_after(headers) -> float | None:
     return max(0.0, (moment - datetime.now(UTC)).total_seconds())
 
 
-def _opener(limits: Limits) -> urllib.request.OpenerDirector:
-    """http・https だけを扱う opener。
+def _opener(limits: Limits, follow_redirects: bool = True) -> urllib.request.OpenerDirector:
+    """http・https だけを扱う opener。follow_redirects が False ならリダイレクトをたどらない。
 
     接続のタイムアウトは open に渡し、応答のタイムアウトは接続の後にソケットへ設定する。
     """
     read = limits.http_read_timeout_s
     opener = urllib.request.OpenerDirector()
-    for handler in (
+    handlers = [
         _HTTPHandler(read),
         _HTTPSHandler(read),
-        urllib.request.HTTPRedirectHandler(),
         urllib.request.HTTPDefaultErrorHandler(),
         urllib.request.HTTPErrorProcessor(),
-    ):
+    ]
+    if follow_redirects:
+        handlers.append(urllib.request.HTTPRedirectHandler())
+    for handler in handlers:
         opener.add_handler(handler)
     return opener
 

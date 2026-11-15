@@ -75,7 +75,7 @@ class FakeSearch:
         self.pages = pages  # topic → [応答または例外, ...]
         self.queries = []
 
-    def __call__(self, url, limits, *, headers, sleep):
+    def __call__(self, url, limits, *, headers, sleep, follow_redirects):
         query = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
         self.queries.append(query)
         first = query["q"].split()[0]

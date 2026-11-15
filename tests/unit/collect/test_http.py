@@ -235,6 +235,13 @@ def test_error_body_head_is_kept_for_client_errors(limits):
     assert result.body == b""
 
 
+def test_redirect_is_not_followed_when_asked(limits, server):
+    with pytest.raises(FetchError) as e:
+        fetch(server.base + "/to-ok", limits, follow_redirects=False)
+    assert e.value.status == 302 and e.value.headers["Location"] == "/ok"
+    assert server.paths == ["/to-ok"]
+
+
 def test_response_and_error_headers_are_kept(limits):
     ok = FakeResponse(b"{}")
     ok.headers["X-RateLimit-Remaining"] = "42"

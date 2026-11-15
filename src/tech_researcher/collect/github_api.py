@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 from tech_researcher.collect.http import FetchError, Response, fetch
 from tech_researcher.config import Limits
@@ -30,6 +30,9 @@ from tech_researcher.config import Limits
 API_ROOT = "https://api.github.com"
 API_VERSION = "2022-11-28"
 TOKEN_ENV = "GITHUB_TOKEN"  # 収集用トークン（D-05）
+# たどるリダイレクトの状態コードと回数の上限
+_REDIRECTS = frozenset({301, 302, 303, 307, 308})
+MAX_REDIRECTS = 3
 # トークンに使える形。ヘッダに入れたときに要求を壊す文字（改行など）を止める。
 # 不正な値を http.client に渡すと、例外のメッセージに値がそのまま入るため、先に確かめる
 _TOKEN = re.compile(r"[A-Za-z0-9_.\-]+")
@@ -48,6 +51,7 @@ TIMEOUT = "timeout"
 DNS = "dns"
 NETWORK = "network"
 BUDGET = "budget"  # この実行の利用量の上限に達した
+REDIRECT = "redirect"  # API の外へのリダイレクト、またはリダイレクトが多すぎる
 INVALID_RESPONSE = "invalid_response"
 
 
@@ -163,30 +167,53 @@ class GitHubClient:
         """要求して（JSON, 要求の回数）を返す。再試行は残りの回数に収まる分だけにする。
 
         min_wait は再試行の前に待つ最短の秒数（Search の間隔を再試行にも守らせる）。
-        リダイレクトをたどった応答は、要求を1回多く数える（たどった回数は分からないので、
-        1回とみなす。GitHub の API のリダイレクトは名前を変えたリポジトリなどで、まれ）。
+        リダイレクト（名前を変えたリポジトリなど）は http.fetch にたどらせず、ここで1回ずつ
+        要求として数えてたどる。先は API_ROOT の中だけにする（認証のヘッダを付けて送るため）。
         """
         if not _PATH.fullmatch(path) or {".", ".."} & set(path.split("/")):
             raise ValueError(f"API のパスにできない：{path!r}")
-        if remaining < 1:
-            raise GitHubError(f"{path}：この実行の要求の上限に達した", BUDGET, 0)
-        waits = self._limits.http_retry_waits_s[: remaining - 1]
         url = API_ROOT + path + (f"?{urlencode(params)}" if params else "")
-        try:
-            response = self._fetch(
-                url,
-                replace(self._limits, http_retry_waits_s=waits),
-                headers=self._headers,
-                sleep=lambda seconds: self._sleep(max(seconds, min_wait)),
-            )
-        except FetchError as e:
-            category = classify(e)
-            raise GitHubError(f"{path}：{category}（{e}）", category, e.attempts, e.status) from e
-        used = response.attempts + (response.url != url)
+        used = 0
+        for _ in range(MAX_REDIRECTS + 1):
+            left = remaining - used
+            if left < 1:
+                raise GitHubError(f"{path}：この実行の要求の上限に達した", BUDGET, used)
+            try:
+                response = self._fetch(
+                    url,
+                    replace(
+                        self._limits, http_retry_waits_s=self._limits.http_retry_waits_s[: left - 1]
+                    ),
+                    headers=self._headers,
+                    sleep=lambda seconds: self._sleep(max(seconds, min_wait)),
+                    follow_redirects=False,
+                )
+            except FetchError as e:
+                used += e.attempts
+                if e.status in _REDIRECTS:
+                    url = _redirect_target(url, e.headers)
+                    if url is not None:
+                        continue
+                    raise GitHubError(f"{path}：API の外へのリダイレクト", REDIRECT, used) from e
+                category = classify(e)
+                raise GitHubError(f"{path}：{category}（{e}）", category, used, e.status) from e
+            used += response.attempts
+            break
+        else:
+            raise GitHubError(f"{path}：リダイレクトが多すぎる", REDIRECT, used)
         try:
             return json.loads(response.body), used
         except ValueError as e:
             raise GitHubError(f"{path}：応答が JSON でない", INVALID_RESPONSE, used) from e
+
+
+def _redirect_target(url: str, headers: Mapping[str, str]) -> str | None:
+    """リダイレクトの先。API_ROOT の中でなければ None。"""
+    location = {k.lower(): v for k, v in headers.items()}.get("location")
+    if not location:
+        return None
+    target = urljoin(url, location.strip())
+    return target if target.startswith(API_ROOT + "/") else None
 
 
 def classify(error: FetchError) -> str:

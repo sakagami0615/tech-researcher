@@ -29,7 +29,8 @@ class FakeFetch:
         self.attempts = attempts
         self.calls = []
 
-    def __call__(self, url, limits, *, headers, sleep):
+    def __call__(self, url, limits, *, headers, sleep, follow_redirects):
+        assert follow_redirects is False
         self.calls.append((url, limits.http_retry_waits_s, dict(headers)))
         self.sleep = sleep
         outcome = self.outcomes.pop(0)
@@ -185,11 +186,66 @@ def test_invalid_json_is_an_error(limits):
     assert api.rest_calls == 1
 
 
-def test_redirected_response_counts_one_more_request(limits):
-    fetch = FakeFetch(Response("https://api.github.com/repositories/1", 200, b"{}", 1))
+def redirect(location, status=301):
+    return FetchError(f"HTTP {status}", 1, status, {"Location": location})
+
+
+def test_redirect_inside_api_is_followed_and_counted(limits):
+    fetch = FakeFetch(
+        redirect("/repositories/1"), redirect("https://api.github.com/r/2", 307), {"ok": 1}
+    )
     api = client(limits, fetch)
-    api.get("/repos/old/name")
-    assert api.rest_calls == 2
+    assert api.get("/repos/old/name") == {"ok": 1}
+    assert [c[0] for c in fetch.calls] == [
+        "https://api.github.com/repos/old/name",
+        "https://api.github.com/repositories/1",
+        "https://api.github.com/r/2",
+    ]
+    assert fetch.calls[2][2]["Authorization"] == f"Bearer {TOKEN}"
+    assert api.rest_calls == 3
+
+
+def test_redirect_stops_at_budget(limits):
+    fetch = FakeFetch(redirect("/a2"), {"never": 1})
+    api = client(replace(limits, github_rest_calls=1), fetch)
+    with pytest.raises(GitHubError) as e:
+        api.get("/a")
+    assert e.value.category == github_api.BUDGET
+    assert len(fetch.calls) == 1 and api.rest_calls == 1
+
+
+def test_failed_request_after_redirect_counts_all(limits):
+    fetch = FakeFetch(redirect("/a2"), FetchError("HTTP 404", 1, 404))
+    api = client(limits, fetch)
+    with pytest.raises(GitHubError) as e:
+        api.get("/a")
+    assert (e.value.category, api.rest_calls) == (github_api.NOT_FOUND, 2)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://evil.example/x",
+        "//evil.example/x",
+        "http://api.github.com/x",
+        "https://api.github.com.evil/x",
+        "",
+    ],
+)
+def test_redirect_outside_api_is_refused(limits, location):
+    fetch = FakeFetch(redirect(location))
+    with pytest.raises(GitHubError) as e:
+        client(limits, fetch).get("/a")
+    assert e.value.category == github_api.REDIRECT
+    assert len(fetch.calls) == 1
+
+
+def test_too_many_redirects(limits):
+    fetch = FakeFetch(*[redirect(f"/r{i}") for i in range(github_api.MAX_REDIRECTS + 1)])
+    with pytest.raises(GitHubError) as e:
+        client(limits, fetch).get("/a")
+    assert e.value.category == github_api.REDIRECT
+    assert len(fetch.calls) == github_api.MAX_REDIRECTS + 1
 
 
 def test_search_retries_also_wait_for_interval(limits):
