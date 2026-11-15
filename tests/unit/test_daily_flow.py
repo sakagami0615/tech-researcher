@@ -428,13 +428,17 @@ def test_all_sources_failed_is_error_not_empty_report(host):
     assert summary["failed_sources"] == ["Example"]
     assert host.calls("agent") == []
     assert not (Path(summary["output_dir"]) / "issue.md").exists()
+    assert not (Path(summary["output_dir"]) / "agent-input.json").exists()  # ② に進まない
 
 
 def test_production_collect_failure_closes_run_as_failed(host, monkeypatch):
     """① で実行エラーと分かった本番の実行は、running のまま残さず failed で閉じる（M 3.4）。"""
     host.feed = None
+    called = []
+    monkeypatch.setattr(cli, "write_daily_input", lambda *a: called.append(a))
     code, summary, _ = host.run()
     assert (code, summary["error_category"]) == (1, "all_sources_failed")
+    assert called == []  # ② に進まないので、② の入力も作らない
     [run] = host.runs()
     assert run[0] == summary["run_id"]
     assert run[3:] == ("failed", "collect", "all_sources_failed", 1)

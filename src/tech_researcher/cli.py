@@ -98,7 +98,9 @@ def _run(
     with closing(conn) if conn is not None else nullcontext():
         if files.dry_run:
             summary = run_collect(config, target, files.dir, log, db=conn, write_db=False)
-            daily_input()
+            # 本番と同じく、実行エラーの日は ② に進まないので ② の入力を作らない
+            if collect_failure(summary["sources"], len(summary["failed_sources"])) is None:
+                daily_input()
             return summary
         assert conn is not None
         start_run(conn, files.run_id, target, files.started_at)
