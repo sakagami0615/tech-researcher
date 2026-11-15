@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher.collect.github_api import GitHubClient
+from tech_researcher.collect.github_api import GitHubClient, collect_token
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.records import Attention, Event, GitHubRepo, Record, SourceResult
 from tech_researcher.config import Feed, load_config
@@ -524,3 +524,44 @@ def test_unexpected_error_in_last30days_fails_its_sources(tmp_path):
     )
     assert summary["failed_sources"] == ["hackernews", "github_search"]
     assert TOKEN not in log.path.read_text(encoding="utf-8")
+
+
+def test_malformed_token_fails_only_github_sources(tmp_path):
+    """収集用トークンの形が誤っていても、GitHub を使わない情報源は続ける（US-E6-04）。"""
+    calls = []
+    bad = "ghp_" + "x" * 36 + "\n改行"
+    collectors = replace(
+        all_collectors(calls, token=None), token=lambda: collect_token({"GITHUB_TOKEN": bad})
+    )
+    log = prod_log(tmp_path, "dry-20261024-060000-abcd")
+    summary = run_collect(all_sources_config(), TARGET, tmp_path, log, collectors=collectors)
+    assert summary["items"] == 2  # RSS・HN（偽物）は続けた
+    assert "github_repos" in summary["failed_sources"]
+    assert "github_graphql" not in calls  # トークンがないので GraphQL は呼ばない
+    assert bad.split("\n")[0] not in log.path.read_text(encoding="utf-8")
+
+
+def test_fetches_are_recorded_as_each_source_finishes(tmp_path):
+    """① が途中で止められても、取得を終えた情報源の記録は残る（取得失敗も履歴に残す）。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    start_run(conn, PROD, TARGET, FETCHED)
+
+    def stopped(settings, period, limits):
+        raise KeyboardInterrupt  # 上限で止められたときの代わり（情報源の失敗にはしない）
+
+    config = replace(CONFIG, feeds=(feed("a"), feed("c")), qiita=FULL.qiita)
+    collectors = Collectors(feed=fake_collect, qiita=stopped, now=lambda: FETCHED)
+    with pytest.raises(KeyboardInterrupt):
+        run_collect(
+            config,
+            TARGET,
+            tmp_path,
+            prod_log(tmp_path),
+            collectors=collectors,
+            db=conn,
+            write_db=True,
+        )
+    assert conn.execute(
+        "SELECT source_id, status, in_period_count FROM source_fetches ORDER BY rowid"
+    ).fetchall() == [("rss:a", "ok", 0), ("rss:c", "failed", 0)]
+    conn.close()

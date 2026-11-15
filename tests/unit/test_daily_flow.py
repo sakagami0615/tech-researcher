@@ -430,6 +430,27 @@ def test_all_sources_failed_is_error_not_empty_report(host):
     assert not (Path(summary["output_dir"]) / "issue.md").exists()
 
 
+def test_production_collect_failure_closes_run_as_failed(host, monkeypatch):
+    """① で実行エラーと分かった本番の実行は、running のまま残さず failed で閉じる（M 3.4）。"""
+    host.feed = None
+    code, summary, _ = host.run()
+    assert (code, summary["error_category"]) == (1, "all_sources_failed")
+    [run] = host.runs()
+    assert run[0] == summary["run_id"]
+    assert run[3:] == ("failed", "collect", "all_sources_failed", 1)
+
+
+def test_production_collect_exception_closes_run_as_failed(host, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr(cli, "run_collect", broken)
+    code, summary, _ = host.run()
+    assert (code, summary["failed_stage"], summary["error_category"]) == (1, "collect", "exit_1")
+    [run] = host.runs()
+    assert run[3:] == ("failed", "collect", "RuntimeError", 1)
+
+
 def test_dry_run_does_not_change_existing_db(host):
     """ドライランは本番の DB を読み取り専用で開き、何も書かない（D-22）。"""
     with contextlib.closing(open_db(db_path(host.data))) as conn:
@@ -527,7 +548,9 @@ def test_observation_failure_in_collect_closes_run_as_failed(host, monkeypatch):
         raise RuntimeError(f"外部の文 {TOKEN}")
 
     monkeypatch.setattr(cli, "run_collect", broken)
-    code, summary = host.observe()
+    code = observe.main([], host.environ)
+    out, err = host.capfd.readouterr()
+    summary = json.loads(out)
 
     assert code == 1
     assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
@@ -537,6 +560,11 @@ def test_observation_failure_in_collect_closes_run_as_failed(host, monkeypatch):
     )
     [run] = host.runs()
     assert run[3:] == ("failed", "collect", "RuntimeError", 1)
+    # 例外の中身（外部由来の文・秘匿値）は標準出力・標準エラー・ログに出さない
+    log = (host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl").read_text()
+    for text in (out, err, log):
+        assert TOKEN not in text
+    assert "外部の文" not in out + err
 
 
 def test_observation_uses_the_daily_lock(host):
@@ -545,6 +573,12 @@ def test_observation_uses_the_daily_lock(host):
         assert observe.main([], host.environ) == orchestrator.EXIT_BUSY
     assert host.calls("compose") == []
     assert "日次か観測" in host.capfd.readouterr().err
+
+
+def test_observation_startup_error_names_its_entry(host, capfd):
+    environ = {k: v for k, v in host.environ.items() if k != "TR_DATA_DIR"}
+    assert observe.main([], environ) == 2
+    assert capfd.readouterr().err.startswith("tr-observe: ")
 
 
 def test_observation_takes_no_arguments(host):

@@ -261,10 +261,10 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
         return _usage_error(e, environ)
 
 
-def _usage_error(e: Exception, environ: Mapping[str, str]) -> int:
+def _usage_error(e: Exception, environ: Mapping[str, str], prog: str = "tr-run") -> int:
     # 誤って秘匿値を設定した変数の値などが、そのまま cron の出力に残らないようにする
     scanner = SecretScanner(known_secret_values(environ))
-    print(scanner.mask(f"tr-run: {e}"), file=sys.stderr)
+    print(scanner.mask(f"{prog}: {e}"), file=sys.stderr)
     return EXIT_USAGE
 
 

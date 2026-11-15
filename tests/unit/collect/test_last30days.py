@@ -163,6 +163,7 @@ def test_github_search_without_token_fails_without_running():
     assert args[args.index("--search") + 1] == "hackernews"
     assert "GITHUB_TOKEN" not in run.calls[0][1]["env"]
     assert hn.error is None and gh.error == "収集用トークンがない" and gh.attempts == 0
+    assert gh.error_category == "auth"  # source_fetches の分類（GitHub の候補集めと同じ）
     assert "GITHUB_TOKEN" not in child_env("/tmp/h", None)
 
 

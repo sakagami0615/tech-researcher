@@ -45,18 +45,19 @@ from tech_researcher.orchestrator import (
 from tech_researcher.runfiles import run_files
 from tech_researcher.stages.collect import collect_failure
 
+PROG = "tr-observe"
 OBSERVED = "observed"
 LOCK = "daily"  # 日次と同じロック（D-13）
 
 
 def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.environ) -> int:
-    argparse.ArgumentParser(prog="tr-observe", allow_abbrev=False).parse_args(argv)
+    argparse.ArgumentParser(prog=PROG, allow_abbrev=False).parse_args(argv)
     repo = Path.cwd()
     try:
         data, compose_env = check_environment(environ, repo)
         config = load_config(repo / CONFIG)
     except (UsageError, ConfigError, ValueError, OSError) as e:
-        return _usage_error(e, environ)
+        return _usage_error(e, environ, PROG)
     try:
         with lock(data / "locks" / f"{LOCK}.lock"):
             job = _new_job(
@@ -64,10 +65,10 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
             )
             return supervise(job, run_observation)
     except Busy:
-        print(f"tr-observe: 日次か観測（{LOCK}）が動いている", file=sys.stderr)
+        print(f"{PROG}: 日次か観測（{LOCK}）が動いている", file=sys.stderr)
         return EXIT_BUSY
     except OSError as e:
-        return _usage_error(e, environ)
+        return _usage_error(e, environ, PROG)
 
 
 def run_observation(job: Job) -> int:
@@ -94,6 +95,7 @@ def _observe(job: Job) -> Summary:
     fields = {"items": collected["items"], "failed_sources": collected["failed_sources"]}
     category = collect_failure(collected["sources"], len(collected["failed_sources"]))
     if category is not None:
+        job.log.write("collect", "failure", error_category=category)
         return job.summary("error", failed_stage="collect", error_category=category, **fields)
     return job.summary(OBSERVED, **fields)
 

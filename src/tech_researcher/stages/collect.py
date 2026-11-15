@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tech_researcher.collect.aggregate import aggregate
-from tech_researcher.collect.github_api import GitHubClient, collect_token
+from tech_researcher.collect.github_api import GitHubClient, GitHubError, collect_token
 from tech_researcher.collect.github_candidates import collect_candidates
 from tech_researcher.collect.github_stars import measure_stars
 from tech_researcher.collect.last30days import collect_last30days
@@ -40,6 +40,7 @@ from tech_researcher.collect.records import (
 )
 from tech_researcher.collect.rss import collect_feed, feed_source_id
 from tech_researcher.config import Config, Feed, Limits, Qiita
+from tech_researcher.db.runs import record_source_fetch
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Period, Target
 from tech_researcher.stages.collect_store import (
@@ -116,14 +117,24 @@ def run_collect(
     log.write("collect", "start")
     limits = config.limits
     fetched: list[tuple[SourceResult, datetime]] = []
+
+    def keep(*pairs: tuple[SourceResult, datetime]) -> None:
+        # 取得を終えた情報源から書く（① が上限で止められても、それまでの取得の記録を残す）。
+        # 期間内に残った件数は、最後にまとめて書き直す（同じ行の upsert）
+        fetched.extend(pairs)
+        if write:
+            assert db is not None
+            for result, at in pairs:
+                record_source_fetch(db, log.run_id, source_fetch(result, at, 0))
+
     feeds = [f for f in config.feeds if f.enabled]
     for f in feeds:
-        fetched.append(
+        keep(
             _collect_one(feed_source_id(f), lambda f=f: collectors.feed(f, limits), log, collectors)
         )
     if config.qiita is not None and config.qiita.enabled:
         qiita = config.qiita
-        fetched.append(
+        keep(
             _collect_one(
                 QIITA_SOURCE_ID,
                 lambda: collectors.qiita(qiita, target.period, limits),
@@ -136,10 +147,13 @@ def run_collect(
         s is not None and s.enabled
         for s in (config.hackernews, config.github_search, config.github_repos)
     )
-    token = collectors.token() if uses_github else None
-    fetched += _collect_last30days(config, target, token, log, collectors)
+    token = _token(collectors, log) if uses_github else None
+    keep(*_collect_last30days(config, target, token, log, collectors))
     results = [r for r, _ in fetched]
     github = _collect_github(config, target, results, token, db, write, log, collectors)
+    if github is not None and write:
+        assert db is not None
+        record_source_fetch(db, log.run_id, github[0].to_fetch(github[1]))
     popular = {feed_source_id(f) for f in feeds if f.kind == "popular"}
     judged = judge_feed_entries(results, popular, target, db, write=write)
     records = mark_thresholds(judged.records, config.attention_thresholds)
@@ -171,6 +185,16 @@ def run_collect(
         "failed_sources": failed,
         "unjudged_feed_sources": list(judged.unjudged),
     }
+
+
+def _token(collectors: Collectors, log: RunLog) -> str | None:
+    """収集用トークン。形が誤っていれば、ないものとして続ける（GitHub を使う情報源だけが auth の
+    失敗になる。US-E6-04）。値はログに出さない（GitHubError のメッセージに値は入らない）。"""
+    try:
+        return collectors.token()
+    except GitHubError as e:
+        log.write("collect", "failure", error_category=e.category, detail=str(e))
+        return None
 
 
 def _collect_one(
