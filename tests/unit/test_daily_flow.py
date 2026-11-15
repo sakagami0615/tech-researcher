@@ -359,10 +359,15 @@ def test_too_large_input_does_not_call_ai(host):
 
 
 def test_ai_failure_stops_before_verify(host):
-    host.ai = lambda data: 1 / 0
-    code, summary, _ = host.run("--dry-run")
+    def broken(data):
+        raise RuntimeError(f"外部の文 {TOKEN}")  # 例外の中身は要約・ログに出さない
+
+    host.ai = broken
+    code, summary, out = host.run("--dry-run")
 
     assert code == 1
+    assert "外部の文" not in out and TOKEN not in out
+    assert TOKEN not in (Path(summary["output_dir"]) / "log.jsonl").read_text(encoding="utf-8")
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
