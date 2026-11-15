@@ -61,7 +61,7 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 - compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません
 - `DOCKER_CONFIG` は `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`（権限 700）です。`~/.docker/config.json` の `proxies` などはコンテナに入りません。このため Docker のコンテキスト（`DOCKER_CONTEXT`・`docker context use`）は使えず、デーモンは `DOCKER_HOST` で指定します。compose のプラグインは、`~/.docker/cli-plugins` ではなく、システムの場所（`/usr/libexec/docker/cli-plugins` など）に入れておきます
 - 標準出力には、実行 ID・種類・対象日・結果の種別・件数・取得できなかった情報源の名前・ドライランの出力先だけを JSON 1行で出します。ドライランでは同じものを出力のフォルダの `summary.json` に残します
-- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。ただし ② の AI の呼び出し（agent コンテナ）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。⑤ 投稿もまだないので、② をつないだ後も本番は ③ の後に実行エラーで終わります
+- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。ただし ② の AI の呼び出し（agent コンテナ）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は、① で実行エラー（`all_sources_failed`）になります。⑤ 投稿もまだないので、② をつないだ後も本番は ③ の後に実行エラーで終わります
 - 週次は ① 収集だけです。ドライランは ① の後に終わり、本番は ① の後に実行エラー（`not_implemented`）で終わります
 
 ## テストと検査

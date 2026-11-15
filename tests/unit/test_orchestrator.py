@@ -21,13 +21,14 @@ from pathlib import Path
 import pytest
 
 from tech_researcher import orchestrator
+from tech_researcher.agent import invoke
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import parse_config
 
 ROOT = Path(__file__).parents[2]
 LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").split("[limits]")[1]
 TOKEN = "ghp" + "_" + "y" * 36  # テスト用のダミー。実行時に組み立てる
-PRODUCT_CALL_AGENT = orchestrator.call_agent
+PRODUCT_CALL_AGENT = invoke.call_agent
 
 FAKE_DOCKER = f"""#!{sys.executable}
 import fcntl, json, os, sys, time
@@ -126,7 +127,7 @@ def host(tmp_path, monkeypatch) -> Host:
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
     h.behave("ok")
-    monkeypatch.setattr(orchestrator, "call_agent", lambda job, body: {"items": []})
+    monkeypatch.setattr(invoke, "call_agent", lambda body, timeout_s: {"items": []})
     monkeypatch.setattr(orchestrator, "MINUTE", 0.05)
     monkeypatch.setattr(orchestrator, "STOP_GRACE_S", 1.0)
     monkeypatch.setattr(orchestrator, "POLL_S", 0.02)
@@ -377,7 +378,7 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_daily_stops_at_analyze_until_agent_exists(host, capfd, monkeypatch, dry_run):
     """製品の ② はまだ AI を呼べない（#18）。③ を起動せずに実行エラーにする。"""
-    monkeypatch.setattr(orchestrator, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
+    monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
     host.behave("ok", lock="daily-dry-run" if dry_run else "daily")
     assert orchestrator.main(["daily", *(["--dry-run"] if dry_run else [])], host.environ) == 1
     summary = summary_of(capfd)
@@ -412,7 +413,7 @@ def test_verify_result_decides_summary(host, capfd, verify, result, stage, categ
 
 def test_all_sources_failed_is_error_without_ai(host, capfd, monkeypatch):
     """すべての情報源が取得できない日は、0件のレポートにしない（US-E6-03・US-E6-04）。"""
-    monkeypatch.setattr(orchestrator, "call_agent", PRODUCT_CALL_AGENT)
+    monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)
     host.behave("ok", lock="daily-dry-run", failed=["rss:example", "qiita"], sources=2)
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
     summary = summary_of(capfd)

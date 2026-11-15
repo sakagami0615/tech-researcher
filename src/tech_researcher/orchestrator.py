@@ -16,7 +16,7 @@
 compose には許可した環境変数だけを渡し、リポジトリの .env も読ませない（3.7）。ホストのシェルに
 ANTHROPIC_API_KEY や COMPOSE_FILE などがあっても、compose の変数の展開と設定に使わせない。
 
-日次は ① 収集（worker）→ ② 評価・要約（call_agent）→ ③ 検証・検査（worker）とつなぐ。
+日次は ① 収集（worker）→ ② 評価・要約（agent/invoke.py）→ ③ 検証・検査（worker）とつなぐ。
 ② の AI の呼び出し（agent コンテナ。#18）と ⑤ 投稿はまだないので、それまでの本番の日次は ② で
 実行エラー（not_implemented）になる。② をつないだ後も、⑤ ができるまでは ③ の後に実行エラーで
 終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗した
@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from tech_researcher.agent import invoke
 from tech_researcher.agent.daily import InputTooLarge, encode_input
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
@@ -497,16 +498,6 @@ def _run_stages(job: Job) -> Summary:
     return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
 
 
-def call_agent(job: Job, body: bytes) -> dict:
-    """② の AI を agent コンテナで呼び、構造化出力（structured_output）を返す。
-
-    agent コンテナと Claude Code の呼び出しの境界は #18 で実装する。それまでは呼べないので、
-    ② は実行エラー（not_implemented）になる。テストでは偽の実装に差し替える（製品には偽の AI の
-    モードを作らない）。
-    """
-    raise NotImplementedError
-
-
 def _analyze(job: Job) -> str | None:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
 
@@ -531,22 +522,19 @@ def _analyze(job: Job) -> str | None:
         job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
         return None
     try:
-        output = call_agent(job, body)
+        output = invoke.call_agent(body, job.limits.analyze * MINUTE)
     except NotImplementedError:
         job.log.write("analyze", "failure", error_category="not_implemented")
         return "not_implemented"
     except Exception as e:
         job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
         return "agent_failed"
-    if not isinstance(output, dict):
-        job.log.write("analyze", "failure", error_category="bad_output")
-        return "bad_output"
-    _write_output(job, output)
+    _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
     job.log.write("analyze", "end")
     return None
 
 
-def _write_output(job: Job, output: dict) -> None:
+def _write_output(job: Job, output: object) -> None:
     """② の出力（外部由来の文を含みうる）はファイルにだけ置く。中身の検査は ③ で行う。"""
     partial = job.files.dir / f"{AGENT_OUTPUT}.partial"
     partial.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")

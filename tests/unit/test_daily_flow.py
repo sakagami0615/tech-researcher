@@ -5,7 +5,8 @@
 
 - compose の起動：worker の段階の CLI（cli.main）を同じプロセスで動かす
 - HTTP：フィードの取得を、最小の RSS（tests/fixtures/minimal-feed.xml）を返す実装にする
-- AI：② の入力を受けて構造化出力を返す実装にする（製品には偽の AI のモードを作らない）
+- AI：agent/invoke.py の call_agent を、② の入力を受けて構造化出力を返す実装にする
+  （製品には偽の AI のモードを作らない）
 
 ジョブは統括スクリプトが fork した子プロセスで動くので、偽の実装が受け取ったものはファイルに残す。
 """
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tech_researcher import cli, orchestrator
+from tech_researcher.agent import invoke
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.rss import collect_feed
 from tech_researcher.db.schema import open_db
@@ -106,7 +108,8 @@ class Host:
             code = cli.main(args, self.worker_env)
         return StageResult(code, out.getvalue(), err.getvalue())
 
-    def fake_call_agent(self, job, body):
+    def fake_call_agent(self, body, timeout_s):
+        assert timeout_s > 0  # 段階の上限を渡している
         data = json.loads(body)
         self._append("agent", data)
         return self.ai(data)
@@ -143,7 +146,7 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
         orchestrator, "new_run_id", lambda now, dry_run: new_run_id(STARTED, dry_run=dry_run)
     )
     monkeypatch.setattr(orchestrator.Compose, "run", lambda c, *a: h.fake_compose_run(c, *a))
-    monkeypatch.setattr(orchestrator, "call_agent", h.fake_call_agent)
+    monkeypatch.setattr(invoke, "call_agent", h.fake_call_agent)
     collect = partial(collect_feed, fetch_url=lambda url, limits: h.fake_fetch(url, limits))
     monkeypatch.setattr(cli, "run_collect", partial(run_collect, collect=collect))
     return h
@@ -254,6 +257,18 @@ def test_zero_items_is_a_report_saying_so(host):
     assert "## 目次" not in issue
 
 
+def test_ai_choosing_nothing_is_a_report_saying_so(host):
+    """AI が1件も選ばなかった日は、除外で0件（不合格）と違い、該当なしのレポートになる。"""
+    host.ai = lambda data: {"items": []}
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    assert summary["result"] == "dry_run"
+    assert len(host.calls("agent")) == 1
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "**該当なし**：" in issue and "（収集 2 件）" in issue
+
+
 def test_production_does_not_post_or_touch_db(host):
     code, summary, _ = host.run()
 
@@ -293,6 +308,7 @@ def test_invalid_id_is_excluded_and_others_are_reported(host):
         ({"items": [entry("d9", 1)]}, "all_excluded"),
         ({"items": "x"}, "invalid_output"),
         ({"items": [entry("d1", 1, category="security")]}, "invalid_output"),
+        (["not", "object"], "invalid_output"),  # 形の誤りは D6(a) で全体を不合格（D-07）
     ],
 )
 def test_rejected_output_makes_no_report(host, output, reason):
@@ -307,7 +323,11 @@ def test_rejected_output_makes_no_report(host, output, reason):
 
 
 def test_secret_in_report_is_not_published(host):
-    """本文に秘匿情報があれば、本文を残さず実行エラーにする（US-E7-05）。"""
+    """本文に秘匿情報があれば、本文を残さず実行エラーにする（US-E7-05）。
+
+    ドライランの agent-output.json・collected.json は、AI の出力と外部の文をそのまま持つ
+    （structure.md 7.2。運用者が確かめるためのファイルで、公開しない）。ここでは確かめない。
+    """
     host.ai = lambda data: {"items": [entry("d1", 1, importance=f"値は {TOKEN}")]}
     code, summary, out = host.run("--dry-run")
 
@@ -338,16 +358,12 @@ def test_too_large_input_does_not_call_ai(host):
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
 
 
-@pytest.mark.parametrize(
-    ("ai", "category"),
-    [(lambda data: 1 / 0, "agent_failed"), (lambda data: ["not", "object"], "bad_output")],
-)
-def test_ai_failure_stops_before_verify(host, ai, category):
-    host.ai = ai
+def test_ai_failure_stops_before_verify(host):
+    host.ai = lambda data: 1 / 0
     code, summary, _ = host.run("--dry-run")
 
     assert code == 1
-    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", category)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
 
