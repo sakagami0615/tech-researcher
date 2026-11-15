@@ -64,7 +64,7 @@ def collect_releases(
     取れなかったリポジトリは failed_parts に残し、取れた分は使う。すべてが取れなかったときだけ
     情報源を失敗にする（US-E6-03）。ページの上限に達したリポジトリは、取れた分を使ったうえで
     TRUNCATED として failed_parts に残す（取りこぼしたおそれを読者に伝えるため）。
-    deadline は情報源ごとの時間の上限（clock の値。structure.md 6.4）。リポジトリとページの間で確かめ、
+    deadline は時間の上限（clock の値。structure.md 6.4）。リポジトリとページの間で確かめ、
     過ぎた後のリポジトリには要求を出さず、timeout として取れなかったものにする。
     attempts はこの情報源で使った要求の回数（再試行を含む）。
     """
@@ -146,8 +146,10 @@ def _repo_releases(
 
 def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | None:
     """リリース1件を収集レコードにする。下書き・プレリリースは None。"""
-    if release.get("draft") or release.get("prerelease") or not release.get("published_at"):
+    if release.get("draft") or release.get("prerelease"):
         return None
+    if not release.get("published_at"):
+        raise ValueError("公開済みのリリースに published_at がない")  # 応答の異常として残す
     url = release["html_url"]
     if not isinstance(url, str) or not url.startswith("https://github.com/"):
         raise ValueError("html_url が github.com の URL でない")
@@ -256,6 +258,7 @@ def fetch_readmes(
             continue
         seen.add(full_name)
         if stopped is None and deadline is not None and clock() >= deadline:
+            log.warning("%s：README の取得が上限に達した", SOURCE_ID)
             stopped = github_api.TIMEOUT
         if stopped is not None:
             errors[full_name] = stopped

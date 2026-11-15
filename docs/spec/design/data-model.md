@@ -397,7 +397,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - インデックス（items の `target`・`canonical_url`、report_entries の `section` など）
   - 実装での対応（runs・source_fetches・items）：items の（`cadence`, `target`, `canonical_url`）は一意制約の索引で足りるので、別に items の `canonical_url`（3.5 の対象をまたぐ照合）と runs の（`cadence`, `target`）（3.5 の前日の実行の取得記録）に索引を付ける
 - 月曜の日次・週次の重なりの制御。WAL と `busy_timeout` で足りるか、⑤ の Projects 登録を両方が同時に行わないよう実行の単位のロックが要るか（同じ Issue を Projects に2回追加したときの GitHub の応答は未確認）
-- 一部だけ取れなかった情報源（GitHub Releases の追跡先。2.8）の、取れなかった部分を source_fetches にどう記録するか（行を分けるか、列を足すか）。情報源ごとの時間の上限（structure.md 6.4）を `collect_releases` と `fetch_readmes` の `deadline` に渡すこと（README の時間をどちらの上限に数えるか。どちらも、リポジトリの間とページの間で確かめ、過ぎた後は `timeout` にする）
+- 一部だけ取れなかった情報源（GitHub Releases の追跡先。2.8）の、取れなかった部分を source_fetches にどう記録するか（行を分けるか、列を足すか）。情報源ごとの時間の上限（structure.md 6.4）を `collect_releases` と `fetch_readmes` の `deadline` に渡すこと（README の時間をどちらの上限に数えるか。Releases はリポジトリの間とページの間、README はリポジトリの間で確かめ、過ぎた後は `timeout` にする。要求の途中では止めないので、超過は最大で要求1回分（再試行を含む）。`failed_parts` の内訳を実行エラー Issue の表（report-templates.md）にどう出すかと、`truncated`・`forbidden`・`redirect`・`invalid_response`・`budget` の日本語の表記の対応も、配線の Issue で決める）
 - star_snapshots のキーを `owner/repo` にするか GraphQL のノード ID にするか（初期案は `owner/repo`）
   - 実装での対応：`owner/repo`（GitHub が返す `nameWithOwner` の小文字）。3.5 の「名前の変更をまたいで同じものとはみなさない」に合わせ、増分も名前で比べる
 - 不合格・実行エラー Issue を作る直前に、「作ろうとした」ことを issues に仮の状態で書くか

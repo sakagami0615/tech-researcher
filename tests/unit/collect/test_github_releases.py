@@ -614,7 +614,7 @@ def test_deadline_stops_the_rest(limits):
 
 
 def test_deadline_stops_between_pages(limits):
-    fetch = FakeFetch({releases_url("a/one"): b"[" + b",".join([b"{}"] * 30) + b"]"})
+    fetch = FakeFetch({releases_url("a/one"): json.dumps([{"prerelease": True}] * 30).encode()})
     times = iter([0.0, 0.0, 11.0])  # 1ページ目の後、2ページ目の前で上限を過ぎる
     result = collect_releases(
         replace(RELEASES, repos=("a/one",)),
@@ -624,7 +624,16 @@ def test_deadline_stops_between_pages(limits):
         clock=lambda: next(times),
     )
     assert len(fetch.calls) == 1
+    assert result.error is not None and result.records == ()
+    assert result.failed_parts == (FailedPart("a/one", "timeout"),)
+
+
+def test_published_release_without_date_fails_the_repo(limits):
+    item = {"html_url": "https://github.com/example/tool/releases/tag/v1", "tag_name": "v1"}
+    fetch = FakeFetch({releases_url("example/tool"): json.dumps([item]).encode()})
+    result = collect_releases(RELEASES, TARGET.period, client(limits, fetch))
     assert result.error is not None
+    assert result.failed_parts == (FailedPart("example/tool", "invalid_response"),)
 
 
 def test_readme_deadline_stops_the_rest(limits):
