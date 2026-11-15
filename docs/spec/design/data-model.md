@@ -147,10 +147,10 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
   - agent JSON には HN の item ページの URL がない。そのため HN のレコードは、2.3 と違い、`url` に記事の URL（記事のない投稿は item ページ）を入れ、`link_url` は空にする
 - GitHub Releases・README から収集レコードへの対応表
   - 実装での対応（`src/tech_researcher/collect/github_releases.py`）：Releases は `source_id` を `github_releases` とし、`html_url` → `url`、`name`（空なら `tag_name`）→ `title`、`published_at` → `published_at`（`published_precision` は `datetime`）と出来事 `released`、`body` → `primary_text`（`github_release`）、`owner/repo` とタグ名 → `meta_terms`。`excerpt` は持たない（抜粋は DB に保存されるため。2.7）。下書きとプレリリース（本文がほとんどない版が多い）は除く
-  - README は、渡されたリポジトリ（急上昇・新規の検出が選んだもの）について取り、そのリポジトリの項目のレコードの `primary_text`（`github_readme`）に入れる
+  - README は、渡されたリポジトリ（急上昇・新規の検出が選んだもの）について取り（API の base64 の `content` を UTF-8 として読む）、そのリポジトリの項目のレコードの `primary_text`（`github_readme`）に入れる
   - 候補リンクは、リリース本文・README の Markdown の絶対 URL から集める。画像（バッジなど）と相対リンクは集めない
-  - 1つのリポジトリの Releases が取れなければ、情報源全体を失敗にする（RSS・Qiita と同じ）。README は1件の失敗で止めず、README がないもの（HTTP 404）は失敗にしない
-  - GitHub REST のリダイレクトには従わない。名前を変えたリポジトリ（HTTP 301）は失敗にし、設定を新しい名前に直す。要求の回数に数えない要求や、収集用トークンをリダイレクト先に送ることを避けるため
+  - 追跡先の一部のリポジトリが取れなくても、取れた分は使い、情報源は成功（`ok`）とする。取れなかったリポジトリは、名前と理由の分類を収集結果に残し、レポート末尾の「取得できなかった情報源」に出す（US-E6-03。[report-templates.md](report-templates.md) 1.2 の「取得できなかった情報源」）。すべてが取れなかったときだけ、情報源を失敗（`failed`）にする。README は1件の失敗で止めず、README がないもの（HTTP 404）は失敗にしない
+  - 要求・リダイレクト・利用量の上限・理由の分類は、GitHub の REST の共通の取得処理（`collect/github_api.py`）に従う。リダイレクトは api.github.com の中だけを、要求の回数に数えてたどる
   - 一覧が公開日時の順に並ぶ保証はないので、ページの中のすべてが期間の始まりより前になるまでページを送る（1ページ30件、最大5ページ）
 
 ## 3. SQLite のテーブル
@@ -397,6 +397,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - インデックス（items の `target`・`canonical_url`、report_entries の `section` など）
   - 実装での対応（runs・source_fetches・items）：items の（`cadence`, `target`, `canonical_url`）は一意制約の索引で足りるので、別に items の `canonical_url`（3.5 の対象をまたぐ照合）と runs の（`cadence`, `target`）（3.5 の前日の実行の取得記録）に索引を付ける
 - 月曜の日次・週次の重なりの制御。WAL と `busy_timeout` で足りるか、⑤ の Projects 登録を両方が同時に行わないよう実行の単位のロックが要るか（同じ Issue を Projects に2回追加したときの GitHub の応答は未確認）
+- 一部だけ取れなかった情報源（GitHub Releases の追跡先。2.8）の、取れなかった部分を source_fetches にどう記録するか（行を分けるか、列を足すか）
 - star_snapshots のキーを `owner/repo` にするか GraphQL のノード ID にするか（初期案は `owner/repo`）
   - 実装での対応：`owner/repo`（GitHub が返す `nameWithOwner` の小文字）。3.5 の「名前の変更をまたいで同じものとはみなさない」に合わせ、増分も名前で比べる
 - 不合格・実行エラー Issue を作る直前に、「作ろうとした」ことを issues に仮の状態で書くか

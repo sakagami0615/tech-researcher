@@ -1,184 +1,99 @@
-"""GitHub Releases と README の一次情報の取得（D-11・D-14、data-model.md 2.3・2.6・2.7）。
+"""GitHub Releases と README の一次情報の取得（D-11・D-14、data-model.md 2.3・2.6〜2.8）。
 
 Releases は REST の `GET /repos/{owner}/{repo}/releases` で取る（releases.atom は robots.txt で
-禁止されているので使わない。D-11）。README は `GET /repos/{owner}/{repo}/readme` の生の本文を、
+禁止されているので使わない。D-11）。README は `GET /repos/{owner}/{repo}/readme` を、
 渡されたリポジトリ（急上昇・新規の検出が選んだもの）について取る。
 本文（リリース本文・README）は primary_text にだけ入れ、抜粋にはしない。抜粋は DB に保存される
 ため（D-18）。候補リンクは本文の Markdown から集める。
 
-GitHub REST の要求は api_get の1か所で行う。共通の取得処理（collect/github_api.py）ができたら、
-そちらに寄せる。収集用トークン（D-05）は Authorization にだけ載せ、リダイレクト先には送らない。
+要求は github_api.GitHubClient で行う（トークン・リダイレクト・利用量の上限・エラーの分類）。
 """
 
+import base64
+import binascii
 import html
-import json
 import logging
 import re
-import urllib.error
-import urllib.request
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
 
-from tech_researcher.collect.http import FetchError, Response, _opener, fetch
-from tech_researcher.collect.records import Event, Record, SourceResult
-from tech_researcher.config import REPO_NAME, GitHubReleases, Limits
+from tech_researcher.collect import github_api
+from tech_researcher.collect.github_api import GitHubClient, GitHubError
+from tech_researcher.collect.records import Event, FailedPart, Record, SourceResult
+from tech_researcher.config import GITHUB_REPO_NAME, GitHubReleases
 from tech_researcher.periods import Period
 
 log = logging.getLogger(__name__)
 
 SOURCE_ID = "github_releases"
-API_ROOT = "https://api.github.com"
-API_VERSION = "2022-11-28"
-JSON = "application/vnd.github+json"
-RAW = "application/vnd.github.raw+json"  # README の生の本文
 # 1ページの件数。100 件では本文の大きいリポジトリ（openai/codex）で HTTP 504 が続いた
 # （2026-11-04）ので、既定の 30 件にしてページを送る
 PER_PAGE = 30
 MAX_PAGES = 5  # 1リポジトリあたりのページの上限。設定の誤りなどで要求を増やしすぎないように
 
-
-def api_get(
-    url: str,
-    accept: str,
-    limits: Limits,
-    token: str | None,
-    *,
-    open_url: Callable[[urllib.request.Request], Any] | None = None,
-    fetch_url=fetch,
-) -> Response:
-    """GitHub REST の GET。再試行・タイムアウトは http.fetch に任せる。
-
-    リダイレクトには従わず、HTTP 301 などの失敗にする。名前を変えたリポジトリへの 301 で、
-    要求の回数に数えない要求を出したり、トークンなしで要求し直したりしないため。
-    名前を変えたリポジトリは、設定を新しい名前に直す。
-    トークンは念のため add_unredirected_header で載せる（リダイレクト先へ写さない置き場所）。
-    トークンの値は例外・戻り値に入れない。ヘッダに使えない文字（末尾の改行など）を含むと、
-    標準ライブラリが値を含む例外を出すので、要求の前に決まった文の失敗にする。
-    """
-    if token is not None:
-        token = token.strip()  # CRLF の env_file 対策
-        if token and not _TOKEN_CHARS.fullmatch(token):
-            raise FetchError("収集用トークンにヘッダに使えない文字がある", 0)
-    if open_url is None:
-        opener = _opener(limits)
-        opener.add_handler(_NoRedirect())
-
-        def open_url(req):
-            return opener.open(req, timeout=limits.http_connect_timeout_s)
-
-    def open_with_headers(req: urllib.request.Request):
-        req.add_header("Accept", accept)
-        req.add_header("X-GitHub-Api-Version", API_VERSION)
-        if token:
-            req.add_unredirected_header("Authorization", f"Bearer {token}")
-        return open_url(req)
-
-    return fetch_url(url, limits, open_url=open_with_headers)
-
-
-_TOKEN_CHARS = re.compile(r"[\x21-\x7e]+")
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """リダイレクトに従わない（既定の HTTPRedirectHandler より先に呼ばれる）。"""
-
-    handler_order = 400
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
-
-
-Get = Callable[[str, str, Limits], Response]
-
-
-class _Budget:
-    """1回の呼び出しの要求の回数（再試行を含む）を limits.github_rest_calls までにする。
-
-    残りの回数を超えないよう、1回の要求の再試行を残りに合わせて減らす（qiita と同じ）。
-    """
-
-    def __init__(self, limits: Limits, get: Get):
-        self.limits = limits
-        self.get = get
-        self.attempts = 0
-
-    def __call__(self, url: str, accept: str) -> Response:
-        remaining = self.limits.github_rest_calls - self.attempts
-        if remaining < 1:
-            raise FetchError(f"要求の上限 {self.limits.github_rest_calls} 回に達した", 0)
-        waits = self.limits.http_retry_waits_s[: remaining - 1]
-        try:
-            response = self.get(url, accept, replace(self.limits, http_retry_waits_s=waits))
-        except FetchError as e:
-            self.attempts += e.attempts
-            raise
-        self.attempts += response.attempts
-        return response
-
-
-def _getter(token: str | None) -> Get:
-    return lambda url, accept, limits: api_get(url, accept, limits, token)
+# 応答の形が違うときの例外。GitHubError の INVALID_RESPONSE にまとめる
+_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
+INVALID_NAME = "invalid_name"  # fetch_readmes に渡された名前が owner/repo の形でない
 
 
 def collect_releases(
-    releases: GitHubReleases,
-    period: Period,
-    limits: Limits,
-    *,
-    token: str | None = None,
-    get: Get | None = None,
+    releases: GitHubReleases, period: Period, client: GitHubClient
 ) -> SourceResult:
-    """追跡するリポジトリのリリースを、期間の始まりより前のものが出るまでページを送って取る。
+    """追跡するリポジトリのリリースを、期間の始まりより前のものだけになるまでページを送って取る。
 
     期間の絞り込みは、ほかの情報源とまとめた後に period_filter で行う。
     下書き（draft）とプレリリースは除く。プレリリースは本文がほとんどない版が多いため
     （openai/codex の alpha など。2026-11-04 に確認）。
-    どれかのリポジトリが失敗したら、情報源全体を失敗にする（rss・qiita と同じ）。
-    MAX_PAGES まで送っても期間の始まりに届かなければ、取りこぼしのおそれをログに残す。
+    取れなかったリポジトリは failed_parts に残し、取れた分は使う。すべてが取れなかったときだけ
+    情報源を失敗にする（US-E6-03）。attempts はこの情報源で使った要求の回数（再試行を含む）。
     """
-    budget = _Budget(limits, get or _getter(token))
+    before = client.rest_calls
     fetched_at = datetime.now(UTC)
     records: dict[str, Record] = {}
+    failed: list[FailedPart] = []
     for full_name in releases.repos:
         try:
-            for record in _repo_releases(full_name, period, budget, fetched_at):
-                records.setdefault(record.url, record)
-        except FetchError as e:
-            return SourceResult(SOURCE_ID, (), budget.attempts, f"{full_name}: {e}")
-        except (KeyError, TypeError, ValueError, AttributeError) as e:
-            error = f"{full_name}: Releases API の応答として読めない：{type(e).__name__}: {e}"
-            return SourceResult(SOURCE_ID, (), budget.attempts, error)
-    return SourceResult(SOURCE_ID, tuple(records.values()), budget.attempts)
+            repo_records = _repo_releases(full_name, period, client, fetched_at)
+        except GitHubError as e:
+            log.warning("%s：%s が取れない（%s）", SOURCE_ID, full_name, e.category)
+            failed.append(FailedPart(full_name, e.category))
+            continue
+        for record in repo_records:
+            records.setdefault(record.url, record)
+    attempts = client.rest_calls - before
+    if failed and len(failed) == len(releases.repos):
+        categories = sorted({f.error_category for f in failed})
+        error = f"すべての追跡先が取れない（{'・'.join(categories)}）"
+        return SourceResult(SOURCE_ID, (), attempts, error, tuple(failed))
+    return SourceResult(SOURCE_ID, tuple(records.values()), attempts, None, tuple(failed))
 
 
 def _repo_releases(
-    full_name: str, period: Period, budget: _Budget, fetched_at: datetime
+    full_name: str, period: Period, client: GitHubClient, fetched_at: datetime
 ) -> list[Record]:
     """1つのリポジトリのリリースを、新しい順のページで期間の始まりまで取る。
 
     一覧が公開日時の順に並ぶ保証はない（公式の文書に書かれていない）ので、ページの中の
     すべてが期間の始まりより前になったときだけ止める。日次でもふつうは2ページを取る。
     下書き・プレリリースも件数に数わるので、プレリリースの多いリポジトリはページが増える。
+    応答の形が違えば GitHubError（INVALID_RESPONSE）。
     """
     records = []
     for page in range(1, MAX_PAGES + 1):
-        url = f"{API_ROOT}/repos/{full_name}/releases?per_page={PER_PAGE}&page={page}"
-        data = _json_list(budget(url, JSON).body)
-        records += [r for r in (_release(full_name, x, fetched_at) for x in data) if r]
-        dates = [_utc(x["published_at"]) for x in data if x.get("published_at")]
+        data = client.get(f"/repos/{full_name}/releases", {"per_page": PER_PAGE, "page": page})
+        try:
+            if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+                raise TypeError("オブジェクトの配列でない")
+            records += [r for r in (_release(full_name, x, fetched_at) for x in data) if r]
+            dates = [_utc(x["published_at"]) for x in data if x.get("published_at")]
+        except _SHAPE_ERRORS as e:
+            message = f"{full_name}：Releases API の応答として読めない：{type(e).__name__}"
+            raise GitHubError(message, github_api.INVALID_RESPONSE, 0) from e
         if len(data) < PER_PAGE or (dates and max(dates) < period.start):
             return records
     log.warning("%s：%s の期間内のリリースを取りこぼしたおそれ", SOURCE_ID, full_name)
     return records
-
-
-def _json_list(body: bytes) -> list[dict]:
-    data = json.loads(body)
-    if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
-        raise TypeError("オブジェクトの配列でない")
-    return data
 
 
 def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | None:
@@ -232,7 +147,8 @@ class Readme:
 class ReadmeResult:
     """README の取得結果。README のないリポジトリは readmes にも errors にも入らない。
 
-    errors はリポジトリ名から失敗の理由への対応。attempts は初回を含めた要求の回数。
+    キーは `owner/repo`（小文字）。errors は失敗の理由の分類（github_api の語）。
+    attempts は使った要求の回数（再試行を含む）。
     """
 
     readmes: dict[str, Readme]
@@ -240,41 +156,47 @@ class ReadmeResult:
     attempts: int
 
 
-def fetch_readmes(
-    full_names: Iterable[str],
-    limits: Limits,
-    *,
-    token: str | None = None,
-    get: Get | None = None,
-) -> ReadmeResult:
+def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResult:
     """渡されたリポジトリ（`owner/repo`）の README を取る。
 
     1件の失敗では止めず、続きを取る（README は項目の補足で、なくても項目は載せられるため）。
-    要求の上限に達したら、残りを失敗にする。README がない（HTTP 404）ものは失敗にしない。
-    名前は外部の URL から抜き出したものでありうるので、`owner/repo` の形でなければ要求しない。
-    GitHub の名前は大文字・小文字を区別しないので、違いがそれだけの名前は最初のものだけを取る。
+    README がない（HTTP 404）ものは失敗にしない。名前は外部の URL から抜き出したものでありうる
+    ので、`owner/repo` の形でなければ要求しない。GitHub の名前は大文字・小文字を区別しないので、
+    小文字にそろえて重なりを除く。
     """
-    budget = _Budget(limits, get or _getter(token))
+    before = client.rest_calls
     readmes: dict[str, Readme] = {}
     errors: dict[str, str] = {}
-    seen: set[str] = set()
-    for full_name in full_names:
-        if not isinstance(full_name, str) or not REPO_NAME.fullmatch(full_name):
-            errors[str(full_name)] = "owner/repo の形でない"
+    for name in full_names:
+        full_name = name.lower() if isinstance(name, str) else str(name)
+        if full_name in readmes or full_name in errors:
             continue
-        if full_name.casefold() in seen:
+        if not GITHUB_REPO_NAME.fullmatch(full_name):
+            errors[full_name] = INVALID_NAME
             continue
-        seen.add(full_name.casefold())
         try:
-            response = budget(f"{API_ROOT}/repos/{full_name}/readme", RAW)
-        except FetchError as e:
-            if e.status != 404:
-                errors[full_name] = str(e)
+            text = _readme_text(client.get(f"/repos/{full_name}/readme"))
+        except GitHubError as e:
+            if e.category != github_api.NOT_FOUND:
+                errors[full_name] = e.category
             continue
-        text = response.body.decode("utf-8", errors="replace")
+        except _SHAPE_ERRORS:
+            errors[full_name] = github_api.INVALID_RESPONSE
+            continue
         if text.strip():
             readmes[full_name] = Readme(full_name, text, markdown_links(text))
-    return ReadmeResult(readmes, errors, budget.attempts)
+    return ReadmeResult(readmes, errors, client.rest_calls - before)
+
+
+def _readme_text(data) -> str:
+    """README の API の応答（base64 の content）を文字列にする。形が違えば ValueError など。"""
+    if data["encoding"] != "base64":
+        raise ValueError("encoding が base64 でない")
+    try:
+        raw = base64.b64decode(data["content"], validate=False)
+    except binascii.Error as e:
+        raise ValueError("content を base64 として読めない") from e
+    return raw.decode("utf-8", errors="replace")
 
 
 def with_readme(record: Record, readme: Readme) -> Record:

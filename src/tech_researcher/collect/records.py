@@ -125,13 +125,28 @@ class Item:
 
 
 @dataclass(frozen=True)
+class FailedPart:
+    """情報源の中の、取れなかった部分（GitHub Releases の追跡先の1つなど）。
+
+    name は部分の名前（`owner/repo` など。コードが設定から作る値）、error_category は理由の分類
+    （data-model.md 3.4 の source_fetches の error_category と同じ語）。
+    """
+
+    name: str
+    error_category: str
+
+
+@dataclass(frozen=True)
 class SourceResult:
     """1つの情報源の取得結果。error が None で records が空なら、0件の成功。
 
     attempts は初回を含めた要求の回数（US-E6-04 の再試行回数の元）。
+    failed_parts は、情報源としては取れた（error が None）が、一部が取れなかったときの
+    その部分（レポート末尾の「取得できなかった情報源」に出す元。US-E6-03）。
     """
 
     source_id: str
     records: tuple[Record, ...]
     attempts: int
     error: str | None = None
+    failed_parts: tuple[FailedPart, ...] = ()

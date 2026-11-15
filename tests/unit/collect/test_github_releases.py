@@ -1,22 +1,19 @@
+import base64
 import json
 import logging
-import threading
-import urllib.error
 from dataclasses import replace
 from datetime import UTC, date, datetime
-from email.message import Message
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from tech_researcher.collect.aggregate import aggregate
+from tech_researcher.collect.github_api import GitHubClient
+from tech_researcher.collect.github_candidates import mentioned_repos
 from tech_researcher.collect.github_releases import (
-    JSON,
-    RAW,
+    INVALID_NAME,
     SOURCE_ID,
     Readme,
-    api_get,
     collect_releases,
     fetch_readmes,
     markdown_links,
@@ -24,7 +21,7 @@ from tech_researcher.collect.github_releases import (
 )
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.period_filter import in_period
-from tech_researcher.collect.records import Event, Record
+from tech_researcher.collect.records import Event, FailedPart, Record
 from tech_researcher.config import GitHubReleases
 from tech_researcher.db.items import ItemRow, upsert_items
 from tech_researcher.db.runs import start_run
@@ -34,26 +31,33 @@ from tech_researcher.periods import daily_target
 FIXTURE = (Path(__file__).parent / "fixtures" / "github_releases.json").read_bytes()
 RELEASES = GitHubReleases(True, "GitHub Releases", ("example/tool",))
 TARGET = daily_target(date(2026, 11, 3), 1)  # 期間は 11/2 0:00〜11/3 0:00（JST）
-TOKEN = "dummy-collect-token-9f3e"
+TOKEN = "ghp_" + "x" * 36  # 形だけの偽のトークン
 BODY_MARK = "リリース本文の目印-a41c"
 README_MARK = "README の本文の目印-77d2"
 
 
-class FakeApi:
-    """URL ごとの応答（bytes か例外）を返す。受けた要求と、渡された再試行の待ちを残す。"""
+class FakeFetch:
+    """URL ごとの応答（bytes か例外）を返す http.fetch の偽物。受けた要求を残す。"""
 
     def __init__(self, responses, attempts=1):
         self.responses = responses
         self.attempts = attempts
         self.calls = []
 
-    def __call__(self, url, accept, limits):
-        self.calls.append((url, accept, limits.http_retry_waits_s))
+    def __call__(self, url, limits, *, headers, sleep, follow_redirects):
+        self.calls.append((url, limits.http_retry_waits_s, dict(headers), follow_redirects))
         body = self.responses[url]
         if isinstance(body, Exception):
             raise body
         # 本物の fetch と同じく、試行は渡された再試行の回数＋1を超えない
         return Response(url, 200, body, min(self.attempts, len(limits.http_retry_waits_s) + 1))
+
+    def urls(self):
+        return [url for url, *_ in self.calls]
+
+
+def client(limits, fetch, token=TOKEN):
+    return GitHubClient(token, limits, fetch_url=fetch, sleep=lambda s: None)
 
 
 def releases_url(repo, page=1):
@@ -64,11 +68,23 @@ def readme_url(repo):
     return f"https://api.github.com/repos/{repo}/readme"
 
 
+def readme_body(text):
+    encoded = base64.encodebytes(text.encode()).decode()  # GitHub と同じく改行を含む
+    return json.dumps({"encoding": "base64", "content": encoded}).encode()
+
+
+def collect(limits, fetch, releases=RELEASES):
+    return collect_releases(releases, TARGET.period, client(limits, fetch))
+
+
 def test_releases_become_records(limits):
-    api = FakeApi({releases_url("example/tool"): FIXTURE})
-    result = collect_releases(RELEASES, TARGET.period, limits, get=api)
+    fetch = FakeFetch({releases_url("example/tool"): FIXTURE})
+    result = collect(limits, fetch)
     assert (result.source_id, result.error, result.attempts) == (SOURCE_ID, None, 1)
-    assert api.calls == [(releases_url("example/tool"), JSON, (5, 20))]
+    assert result.failed_parts == ()
+    url, _, headers, follow = fetch.calls[0]
+    assert url == releases_url("example/tool")
+    assert headers["Authorization"] == f"Bearer {TOKEN}" and follow is False
     # 下書きとプレリリースは除く
     assert [r.url for r in result.records] == [
         "https://github.com/example/tool/releases/tag/v1.2.0",
@@ -96,34 +112,53 @@ def test_releases_become_records(limits):
     assert (empty.primary_text, empty.primary_text_origin, empty.links) == (None, None, ())
 
 
+def test_blank_body_is_no_primary_text(limits):
+    release = {
+        "html_url": "https://github.com/a/b/releases/tag/v1",
+        "tag_name": "v1",
+        "published_at": "2026-11-02T00:00:00Z",
+        "body": " \r\n",
+    }
+    fetch = FakeFetch({releases_url("example/tool"): json.dumps([release]).encode()})
+    (record,) = collect(limits, fetch).records
+    assert (record.primary_text, record.primary_text_origin) == (None, None)
+
+
 def test_release_in_period_is_kept_and_old_one_is_dropped(limits):
-    api = FakeApi({releases_url("example/tool"): FIXTURE})
-    records = collect_releases(RELEASES, TARGET.period, limits, get=api).records
+    records = collect(limits, FakeFetch({releases_url("example/tool"): FIXTURE})).records
     items = [i for i in aggregate(records) if in_period(i, TARGET)]
     assert [i.url for i in items] == ["https://github.com/example/tool/releases/tag/v1.2.0"]
     # 候補リンクは正規化して持つ（D-06）
     assert "https://github.com/example/tool/pull/42" in items[0].links
 
 
+def test_release_is_not_a_mention_of_its_own_repo(limits):
+    """リリースのレコードは、そのリポジトリの言及にしない（github_candidates の活動のページ）。"""
+    records = collect(limits, FakeFetch({releases_url("example/tool"): FIXTURE})).records
+    assert "example/tool" not in mentioned_repos(records)
+
+
 def test_each_repo_is_requested_and_attempts_add_up(limits):
     repos = ("a/one", "b/two")
-    api = FakeApi({releases_url(r): b"[]" for r in repos}, attempts=2)
-    result = collect_releases(replace(RELEASES, repos=repos), TARGET.period, limits, get=api)
-    assert [url for url, _, _ in api.calls] == [releases_url(r) for r in repos]
+    fetch = FakeFetch({releases_url(r): b"[]" for r in repos}, attempts=2)
+    result = collect(limits, fetch, replace(RELEASES, repos=repos))
+    assert fetch.urls() == [releases_url(r) for r in repos]
     assert (result.records, result.error, result.attempts) == ((), None, 4)
 
 
 @pytest.mark.parametrize(
-    "response, message",
+    "response, category",
     [
-        (FetchError("HTTP 404", 1, 404), "b/two: HTTP 404"),
-        (b"{}", "b/two: Releases API の応答として読めない"),
-        (b"not json", "読めない"),
+        (FetchError("HTTP 404", 1, 404), "not_found"),
+        (FetchError("HTTP 401", 1, 401), "auth"),
+        (FetchError("再試行を使い切った：HTTP 504", 3, 504), "http_5xx"),
+        (b"{}", "invalid_response"),
+        (b"not json", "invalid_response"),
         (  # tag_name がない
             json.dumps(
                 [{"html_url": "https://github.com/b/two/x", "published_at": "2026-11-02T00:00:00Z"}]
             ).encode(),
-            "読めない：KeyError",
+            "invalid_response",
         ),
         (
             json.dumps(
@@ -135,27 +170,51 @@ def test_each_repo_is_requested_and_attempts_add_up(limits):
                     }
                 ]
             ).encode(),
-            "github.com の URL でない",
+            "invalid_response",
         ),
     ],
 )
-def test_one_failed_repo_fails_the_source(limits, response, message):
+def test_failed_repo_is_kept_as_failed_part(limits, response, category):
+    """1件が取れなくても、取れたリポジトリの分は使い、取れなかったものを残す（US-E6-03）。"""
     repos = ("a/one", "b/two")
-    api = FakeApi({releases_url("a/one"): FIXTURE, releases_url("b/two"): response})
-    result = collect_releases(replace(RELEASES, repos=repos), TARGET.period, limits, get=api)
+    fetch = FakeFetch({releases_url("a/one"): FIXTURE, releases_url("b/two"): response})
+    result = collect(limits, fetch, replace(RELEASES, repos=repos))
+    assert result.error is None
+    assert len(result.records) == 2
+    assert result.failed_parts == (FailedPart("b/two", category),)
+
+
+def test_all_repos_failing_fails_the_source(limits):
+    repos = ("a/one", "b/two")
+    fetch = FakeFetch(
+        {
+            releases_url("a/one"): FetchError("HTTP 404", 1, 404),
+            releases_url("b/two"): FetchError("HTTP 401", 1, 401),
+        }
+    )
+    result = collect(limits, fetch, replace(RELEASES, repos=repos))
     assert result.records == ()
-    assert message in result.error
+    assert result.error == "すべての追跡先が取れない（auth・not_found）"
+    assert result.failed_parts == (FailedPart("a/one", "not_found"), FailedPart("b/two", "auth"))
     assert result.attempts == 2
 
 
-def test_request_budget_is_shared_by_repos(limits):
+def test_request_budget_is_shared_through_client(limits):
     repos = ("a/one", "b/two", "c/three")
-    api = FakeApi({releases_url(r): b"[]" for r in repos})
-    small = replace(limits, github_rest_calls=2)
-    result = collect_releases(replace(RELEASES, repos=repos), TARGET.period, small, get=api)
-    assert "要求の上限 2 回に達した" in result.error
+    fetch = FakeFetch({releases_url(r): b"[]" for r in repos})
+    result = collect(replace(limits, github_rest_calls=2), fetch, replace(RELEASES, repos=repos))
+    assert result.error is None and len(fetch.calls) == 2
+    assert result.failed_parts == (FailedPart("c/three", "budget"),)
     # 残りが1回なら、再試行の待ちを渡さない（上限を超えて再試行しない）
-    assert [waits for _, _, waits in api.calls] == [(5,), ()]
+    assert [waits for _, waits, _, _ in fetch.calls] == [(5,), ()]
+
+
+def test_token_does_not_appear_in_results(limits):
+    fetch = FakeFetch({releases_url("example/tool"): FetchError("HTTP 401", 1, 401)})
+    github = client(limits, fetch)
+    result = collect_releases(RELEASES, TARGET.period, github)
+    readmes = fetch_readmes(["example/tool"], github)
+    assert TOKEN not in repr(result) and TOKEN not in repr(readmes)
 
 
 def page_of(start, published_at, count=30):
@@ -172,19 +231,16 @@ def page_of(start, published_at, count=30):
 
 
 def test_pages_are_followed_until_period_start(limits, caplog):
-    # 1ページ目はすべて期間内。2ページ目に期間の始まりより前のものがあれば、そこで止める
-    api = FakeApi(
+    # 1ページ目はすべて期間内。2ページ目がすべて期間の始まりより前なら、そこで止める
+    fetch = FakeFetch(
         {
             releases_url("example/tool", 1): page_of(0, "2026-11-02T12:00:00Z"),
             releases_url("example/tool", 2): page_of(30, "2026-10-01T00:00:00Z"),
         }
     )
     with caplog.at_level(logging.WARNING):
-        result = collect_releases(RELEASES, TARGET.period, limits, get=api)
-    assert [url for url, _, _ in api.calls] == [
-        releases_url("example/tool", 1),
-        releases_url("example/tool", 2),
-    ]
+        result = collect(limits, fetch)
+    assert fetch.urls() == [releases_url("example/tool", 1), releases_url("example/tool", 2)]
     assert len(result.records) == 60 and result.attempts == 2
     assert "取りこぼしたおそれ" not in caplog.text
 
@@ -193,61 +249,71 @@ def test_pages_are_not_cut_by_one_old_release(limits):
     """一覧が公開日時の順に並ぶ保証はないので、古いものが混ざっても次のページを取る。"""
     mixed = json.loads(page_of(0, "2026-11-02T12:00:00Z"))
     mixed[5]["published_at"] = "2026-09-01T00:00:00Z"
-    api = FakeApi(
+    fetch = FakeFetch(
         {
             releases_url("example/tool", 1): json.dumps(mixed).encode(),
             releases_url("example/tool", 2): page_of(30, "2026-11-02T13:00:00Z", count=3),
         }
     )
-    result = collect_releases(RELEASES, TARGET.period, limits, get=api)
-    assert len(api.calls) == 2 and len(result.records) == 33
+    result = collect(limits, fetch)
+    assert len(fetch.calls) == 2 and len(result.records) == 33
 
 
 def test_possible_truncation_is_logged(limits, caplog):
     recent = "2026-11-02T12:00:00Z"
-    api = FakeApi({releases_url("example/tool", p): page_of(p * 30, recent) for p in range(1, 7)})
+    fetch = FakeFetch(
+        {releases_url("example/tool", p): page_of(p * 30, recent) for p in range(1, 7)}
+    )
     with caplog.at_level(logging.WARNING):
-        result = collect_releases(RELEASES, TARGET.period, limits, get=api)
-    assert len(api.calls) == 5  # ページの上限で止める
+        result = collect(limits, fetch)
+    assert len(fetch.calls) == 5  # ページの上限で止める
     assert result.error is None and len(result.records) == 150
     assert "取りこぼしたおそれ" in caplog.text
 
 
 def test_readmes_are_fetched_for_given_repos(limits):
     text = f"# Tool\n\n{README_MARK}\n\n[docs](https://docs.example.com/tool)\n"
-    api = FakeApi(
+    fetch = FakeFetch(
         {
-            readme_url("example/tool"): text.encode(),
+            readme_url("example/tool"): readme_body(text),
             readme_url("example/none"): FetchError("HTTP 404", 1, 404),
-            readme_url("example/broken"): FetchError("HTTP 500", 3, 500),
-            readme_url("example/empty"): b"  \n",
+            readme_url("example/broken"): FetchError("再試行を使い切った：HTTP 500", 3, 500),
+            readme_url("example/empty"): readme_body("  \n"),
+            readme_url("example/odd"): json.dumps({"encoding": "none", "content": ""}).encode(),
         }
     )
-    names = ["example/tool", "example/none", "example/broken", "example/empty", "Example/Tool"]
-    result = fetch_readmes(names, limits, get=api)
-    assert [(url, accept) for url, accept, _ in api.calls] == [
-        (readme_url(n), RAW) for n in names[:4]
-    ]  # 同じ名前は1回だけ
+    names = [
+        "example/tool",
+        "example/none",
+        "example/broken",
+        "example/empty",
+        "example/odd",
+        "Example/Tool",
+    ]
+    result = fetch_readmes(names, client(limits, fetch))
+    assert fetch.urls() == [readme_url(n) for n in names[:5]]  # 大文字・小文字の違いは1回だけ
     assert result.readmes == {
         "example/tool": Readme("example/tool", text, ("https://docs.example.com/tool",))
     }
     # README がない（404）のは失敗にしない。ほかの失敗では止めずに続ける
-    assert result.errors == {"example/broken": "HTTP 500"}
-    assert result.attempts == 1 + 1 + 3 + 1
+    assert result.errors == {"example/broken": "http_5xx", "example/odd": "invalid_response"}
+    assert result.attempts == 1 + 1 + 3 + 1 + 1
 
 
 def test_readme_names_must_be_repo_names(limits):
-    api = FakeApi({})
-    result = fetch_readmes(["../../user", "a/..", "a/b/c", None], limits, get=api)
-    assert api.calls == []
-    assert set(result.errors) == {"../../user", "a/..", "a/b/c", "None"}
+    fetch = FakeFetch({})
+    result = fetch_readmes(["../../user", "a/..", "a/b/c", "a/b+c", None], client(limits, fetch))
+    assert fetch.calls == []
+    assert result.errors == dict.fromkeys(
+        ["../../user", "a/..", "a/b/c", "a/b+c", "None"], INVALID_NAME
+    )
 
 
 def test_readme_budget_stops_the_rest(limits):
-    api = FakeApi({readme_url(n): b"x" for n in ("a/one", "b/two")})
-    result = fetch_readmes(["a/one", "b/two"], replace(limits, github_rest_calls=1), get=api)
+    fetch = FakeFetch({readme_url(n): readme_body("x") for n in ("a/one", "b/two")})
+    result = fetch_readmes(["a/one", "b/two"], client(replace(limits, github_rest_calls=1), fetch))
     assert set(result.readmes) == {"a/one"}
-    assert "要求の上限 1 回に達した" in result.errors["b/two"]
+    assert result.errors == {"b/two": "budget"}
 
 
 def repo_record(**extra):
@@ -274,8 +340,7 @@ def test_readme_is_attached_as_primary_text():
 
 def test_bodies_are_not_stored_in_db(tmp_path, limits):
     """リリース本文・README は DB に残らず、ハッシュと文字数だけが残る（D-14・D-18）。"""
-    api = FakeApi({releases_url("example/tool"): FIXTURE})
-    release = collect_releases(RELEASES, TARGET.period, limits, get=api).records[0]
+    release = collect(limits, FakeFetch({releases_url("example/tool"): FIXTURE})).records[0]
     repo = with_readme(repo_record(), Readme("example/tool", README_MARK, ()))
     db_path = tmp_path / "tech-researcher.sqlite3"
     conn = open_db(db_path)
@@ -304,118 +369,6 @@ def test_bodies_are_not_stored_in_db(tmp_path, limits):
     assert BODY_MARK.encode() not in data
     assert README_MARK.encode() not in data
     assert b"Tool 1.2.0" in data  # 確かめ方が正しいことの対照（タイトルは保存する）
-
-
-class _Opened:
-    """open_url の偽の応答（http.fetch が読む分だけ）。"""
-
-    status = 200
-    headers = Message()
-
-    def __init__(self, url):
-        self.url = url
-
-    def read(self, _size):
-        return b"[]"
-
-    def geturl(self):
-        return self.url
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-
-def test_api_get_sends_headers_and_keeps_token_off_redirects(limits):
-    seen = []
-
-    def open_url(req):
-        seen.append(req)
-        return _Opened(req.full_url)
-
-    api_get(releases_url("a/b"), JSON, limits, TOKEN, open_url=open_url)
-    req = seen[0]
-    assert req.get_header("Accept") == JSON
-    assert req.get_header("X-github-api-version") == "2022-11-28"
-    assert req.get_header("User-agent").startswith("tech-researcher/")
-    # リダイレクトで写されない置き場所にだけ載せる
-    assert req.unredirected_hdrs["Authorization"] == f"Bearer {TOKEN}"
-    assert "Authorization" not in req.headers
-
-    seen.clear()
-    api_get(releases_url("a/b"), JSON, limits, None, open_url=open_url)
-    assert not seen[0].has_header("Authorization")
-
-
-def test_token_does_not_appear_in_errors(limits):
-    def open_url(req):
-        raise urllib.error.HTTPError(req.full_url, 401, "Bad credentials", Message(), None)
-
-    def get(url, accept, limits):
-        return api_get(url, accept, limits, TOKEN, open_url=open_url)
-
-    result = collect_releases(RELEASES, TARGET.period, limits, get=get)
-    assert result.error == "example/tool: HTTP 401"
-    readmes = fetch_readmes(["example/tool"], limits, get=get)
-    assert TOKEN not in repr(readmes) and TOKEN not in repr(result)
-
-
-class _RedirectHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.server.seen.append((self.path, self.headers.get("Authorization")))
-        if self.path == "/from":
-            self.send_response(301)
-            self.send_header("Location", "/to")
-            self.end_headers()
-            return
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"[]")
-
-    def log_message(self, *args):
-        pass
-
-
-def test_redirect_is_not_followed(limits):
-    """名前を変えたリポジトリの 301 には従わない。数えない要求も、トークンなしの要求も出さない。"""
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
-    srv.seen = []
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    try:
-        url = f"http://127.0.0.1:{srv.server_address[1]}/from"
-        with pytest.raises(FetchError) as caught:
-            api_get(url, JSON, limits, TOKEN)
-    finally:
-        srv.shutdown()
-        srv.server_close()
-        thread.join()
-    assert (caught.value.status, caught.value.attempts) == (301, 1)
-    assert srv.seen == [("/from", f"Bearer {TOKEN}")]
-
-
-def test_token_with_invalid_characters_is_rejected_without_its_value(limits):
-    seen = []
-
-    def open_url(req):
-        seen.append(req)
-        return _Opened(req.full_url)
-
-    with pytest.raises(FetchError) as caught:
-        api_get(releases_url("a/b"), JSON, limits, "abc\ndef-secret", open_url=open_url)
-    assert "secret" not in str(caught.value) and seen == []
-    # 末尾の改行（CRLF の env_file）は落として使う
-    api_get(releases_url("a/b"), JSON, limits, f"{TOKEN}\r\n", open_url=open_url)
-    assert seen[0].unredirected_hdrs["Authorization"] == f"Bearer {TOKEN}"
-    result = collect_releases(
-        RELEASES,
-        TARGET.period,
-        limits,
-        get=lambda url, accept, lim: api_get(url, accept, lim, "x\ny-secret", open_url=open_url),
-    )
-    assert "secret" not in result.error
 
 
 @pytest.mark.parametrize(
