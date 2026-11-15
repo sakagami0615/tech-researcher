@@ -59,15 +59,16 @@ def secrets_dir(
     return path
 
 
-# 種類の判定、種類の説明、求める権限、持ち主に要る権限（compose が読め、写しを作れるように）
-_DIR = (stat.S_ISDIR, "フォルダ", "700", stat.S_IRWXU)  # 写しを作るので書き込みも要る
-_FILE = (stat.S_ISREG, "通常のファイル（シンボリックリンクにしない）", "600", stat.S_IRUSR)
+# 種類の判定、種類の説明、認める権限（setuid なども含めて、この値だけ）。フォルダは compose が
+# 読めて写しを作れる 700、worker.env は compose が読める 600 か、読み取りだけの 400
+_DIR = (stat.S_ISDIR, "フォルダ", (0o700,))
+_FILE = (stat.S_ISREG, "通常のファイル（シンボリックリンクにしない）", (0o600, 0o400))
 
 
 def _check_private(
-    path: Path, label: str, kind: tuple[Callable[[int], bool], str, str, int], owner: int
+    path: Path, label: str, kind: tuple[Callable[[int], bool], str, tuple[int, ...]], owner: int
 ) -> None:
-    is_kind, kind_name, mode, needed = kind
+    is_kind, kind_name, modes = kind
     try:
         st = path.lstat()  # シンボリックリンクはたどらない（別の場所のファイルを渡さない）
     except FileNotFoundError:
@@ -78,8 +79,9 @@ def _check_private(
         raise ValueError(f"{label} は{kind_name}にする")
     if st.st_uid == 0 or st.st_uid != owner:
         raise ValueError(f"{label} の持ち主は bin/tr-run を動かす人にする（root にしない）")
-    if st.st_mode & 0o077 or st.st_mode & needed != needed:
-        raise ValueError(f"{label} の権限は {mode} にする（グループとほかの人の権限を外す）")
+    if stat.S_IMODE(st.st_mode) not in modes:
+        allowed = "・".join(f"{m:o}" for m in modes)
+        raise ValueError(f"{label} の権限は {allowed} にする（グループとほかの人の権限を外す）")
 
 
 def snapshot(secrets: Path, run_id: str) -> Path:

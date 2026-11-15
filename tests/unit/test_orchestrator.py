@@ -353,13 +353,16 @@ def _link_file(h):
         (lambda h: (h.secrets / "worker.env").unlink(), "worker.env がない"),
         (lambda h: h.secrets.chmod(0o750), "フォルダ の権限は 700"),
         (lambda h: h.secrets.chmod(0o701), "フォルダ の権限は 700"),
-        (lambda h: (h.secrets / "worker.env").chmod(0o640), "worker.env の権限は 600"),
-        (lambda h: (h.secrets / "worker.env").chmod(0o604), "worker.env の権限は 600"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o640), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o604), "worker.env の権限は 600・400"),
         # 持ち主が読めなければ compose も読めない
-        (lambda h: (h.secrets / "worker.env").chmod(0o000), "worker.env の権限は 600"),
-        (lambda h: (h.secrets / "worker.env").chmod(0o200), "worker.env の権限は 600"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o000), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o200), "worker.env の権限は 600・400"),
         (lambda h: h.secrets.chmod(0o600), "フォルダ の権限は 700"),
         (lambda h: h.secrets.chmod(0o500), "フォルダ の権限は 700"),  # 写しを作れない
+        (lambda h: (h.secrets / "worker.env").chmod(0o700), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o500), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o4600), "worker.env の権限は 600・400"),
         (_link_file, "シンボリックリンクにしない"),
     ],
 )
