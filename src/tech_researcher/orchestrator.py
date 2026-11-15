@@ -47,7 +47,14 @@ from tech_researcher.agent import invoke
 from tech_researcher.agent.daily import InputTooLarge, encode_input
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
-from tech_researcher.envfiles import SECRETS_DIR_ENV, WORKER_ENV, secret_values, secrets_dir
+from tech_researcher.envfiles import (
+    SECRETS_DIR_ENV,
+    WORKER_ENV,
+    remove_snapshot,
+    secret_values,
+    secrets_dir,
+    snapshot,
+)
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import JST, Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
@@ -265,7 +272,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     except Busy:
         print(f"tr-run: 同じ種類の実行（{name}）が動いている", file=sys.stderr)
         return EXIT_BUSY
-    except (OSError, ValueError) as e:  # ロックのファイル・fork・worker.env の読み出しなど
+    except (OSError, UsageError) as e:  # ロックのファイル・fork・worker.env の写しなど
         return _usage_error(e, environ)
 
 
@@ -353,8 +360,17 @@ def _new_job(
     files = RunFiles(data, run_id)
     days = config.daily_period_days if cadence == "daily" else config.weekly_period_days
     target = _TARGETS[cadence](files.started_on, days)
-    # compose のエラー文（段階の stderr）に出る worker.env の値も伏せる
-    worker_secrets = secret_values(Path(compose_env[SECRETS_DIR_ENV]) / WORKER_ENV)
+    # compose にはこの実行の間だけの写しを読ませ、そのエラー文（段階の stderr）に出る値も伏せる
+    try:
+        copy = snapshot(Path(compose_env[SECRETS_DIR_ENV]), run_id)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    try:
+        worker_secrets = secret_values(copy / WORKER_ENV)
+    except ValueError as e:
+        remove_snapshot(copy)
+        raise UsageError(str(e)) from None
+    compose_env = {**compose_env, SECRETS_DIR_ENV: str(copy)}
     scanner = SecretScanner(known_secret_values(environ) + worker_secrets)
     return Job(
         repo=repo,
@@ -368,6 +384,14 @@ def _new_job(
 
 
 def supervise(job: Job, run: Callable[[Job], int] | None = None) -> int:
+    """ジョブを動かし、終わったら（止めたときも）worker.env の写しを消す（envfiles.py）。"""
+    try:
+        return _supervise(job, run)
+    finally:
+        remove_snapshot(Path(job.compose.env[SECRETS_DIR_ENV]))
+
+
+def _supervise(job: Job, run: Callable[[Job], int] | None) -> int:
     """ジョブを子プロセスで動かし、ジョブ全体の上限を超えたら止める（structure.md 6.4）。
 
     run は子プロセスで動かすジョブの本体（既定は run_job。観測は observe.py の本体）。
@@ -584,22 +608,12 @@ def _worker(
         if summary is not None:
             return summary, None
         category = "bad_output"
-    # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す。
-    # 実行の途中で worker.env を書き換えても、compose が読んだいまの値を伏せられるよう読み直す
-    detail = _current_worker_secrets(job).mask(job.scanner.mask(result.stderr))
-    detail = detail[-STDERR_TAIL_CHARS:]
+    # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
+    detail = job.scanner.mask(result.stderr)[-STDERR_TAIL_CHARS:]
     job.log.write(stage, "failure", error_category=category, detail=detail)
     if result.remove_failed:
         job.log.write(stage, "failure", error_category="container_remove_failed")
     return None, category
-
-
-def _current_worker_secrets(job: Job) -> SecretScanner:
-    """いまの worker.env の秘匿値。読めなければ空（起動のときに読んだ値では伏せている）。"""
-    try:
-        return SecretScanner(secret_values(Path(job.compose.env[SECRETS_DIR_ENV]) / WORKER_ENV))
-    except ValueError:
-        return SecretScanner()
 
 
 def _last_json(stdout: str) -> dict | None:

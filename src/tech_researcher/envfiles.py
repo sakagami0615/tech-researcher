@@ -7,11 +7,16 @@ worker.env の中身は、compose が env_file として worker のコンテナ�
 
 - 起動の前に、置き場所と権限を確かめる（誤りなら ValueError。統括スクリプトは終了コード 2 にする）。
   メッセージにはパスも値も入れない
-- ログに書く前のマスクに使う秘匿値を読む。compose は env_file の書式の誤りを、その行の値ごと
-  エラー文に出す（実機で確認）ので、そのエラー文を伏せるため
+- 1回の実行の間、compose に読ませる写し（`${TR_SECRETS_DIR}/.run-<実行ID>/worker.env`）を作り、
+  終わったら消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値が
+  ずれないようにするため
+- ログに書く前のマスクに使う秘匿値を、その写しから読む。compose は env_file の書式の誤りを、
+  その行の値ごとエラー文に出す（実機で確認）ので、そのエラー文を伏せるため
 """
 
 import os
+import re
+import shutil
 import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -20,7 +25,9 @@ from tech_researcher.validate.secret_scan import is_secret_name
 
 SECRETS_DIR_ENV = "TR_SECRETS_DIR"
 WORKER_ENV = "worker.env"
-_EXPORT = "export "
+SNAPSHOT_PREFIX = ".run-"  # 1回の実行の間だけ置く写しのフォルダ
+# `名前=値`・`名前: 値`（前に export が付いてもよい）。名前の文字は広めに取る（伏せる側に倒す）
+_LINE = re.compile(r"\s*(?:export\s+)?(?P<name>[^\s=:#]+)\s*[=:](?P<value>.*)")
 
 
 def secrets_dir(
@@ -75,12 +82,40 @@ def _check_private(
         raise ValueError(f"{label} の権限は {mode} にする（グループとほかの人の権限を外す）")
 
 
+def snapshot(secrets: Path, run_id: str) -> Path:
+    """worker.env の写しを作り、そのフォルダ（compose に TR_SECRETS_DIR として渡す）を返す。
+
+    写しのフォルダは 700、ファイルは 600。読み書きでシンボリックリンクはたどらない。
+    作れなければ ValueError（例外の文にはパスが入るので使わない）。
+    """
+    run_dir = secrets / f"{SNAPSHOT_PREFIX}{run_id}"
+    try:
+        run_dir.mkdir(mode=0o700)
+        src = os.open(secrets / WORKER_ENV, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(src, "rb") as f:
+            data = f.read()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        with os.fdopen(os.open(run_dir / WORKER_ENV, flags, 0o600), "wb") as f:
+            f.write(data)
+    except OSError:
+        remove_snapshot(run_dir)
+        raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} の写しを作れない") from None
+    return run_dir
+
+
+def remove_snapshot(run_dir: Path) -> None:
+    """写しを消す。消せなくても止めない（フォルダは 700 で、持ち主にしか読めない）。"""
+    if run_dir.name.startswith(SNAPSHOT_PREFIX):
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
 def secret_values(path: Path) -> list[str]:
     """worker.env の秘匿値（名前の規則は secret_scan と同じ）。ログのマスクにだけ使う。
 
-    compose の書式を厳密にはまねず、伏せる側に倒す。`名前=値` の行ごとに、値そのものと、
-    前後の引用符を外したものと、行末のコメント（` #` 以降）を外したものを返す。書式の誤った行
-    （閉じていない引用符など）も読む。compose がその値をエラー文に出すため。
+    compose の書式を厳密にはまねず、伏せる側に倒す。`名前=値`（compose が受け付ける `名前: 値`
+    も）の行ごとに、値そのものと、前後の引用符を外したものと、行末のコメント（` #` 以降）を
+    外したものを返す。書式の誤った行（閉じていない引用符など）も読む。
+    compose がその値をエラー文に出すため。
     読めなければ ValueError（例外の文にはパスが入るので使わない）。
     """
     try:
@@ -89,10 +124,9 @@ def secret_values(path: Path) -> list[str]:
         raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない") from None
     values: list[str] = []
     for line in text.splitlines():
-        name, sep, value = line.partition("=")
-        name = name.strip().removeprefix(_EXPORT).strip()
-        if not sep or not is_secret_name(name):
+        m = _LINE.match(line)
+        if not m or not is_secret_name(m["name"]):
             continue
-        value = value.strip()
+        value = m["value"].strip()
         values += [value, value.strip("\"'"), value.split(" #")[0].strip().strip("\"'")]
     return values

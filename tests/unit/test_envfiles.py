@@ -16,13 +16,14 @@ def test_secret_values_follow_name_rule(tmp_path):
         "export TR_ISSUE_TOKEN = 'fake-issue'\n"
         'TR_PROJECTS_PAT="fake-pat" # コメント\n'
         'TR_BROKEN_KEY="fake-unterminated\n'  # compose が値ごとエラー文に出す行
+        'TR_YAML_TOKEN: "fake-yaml\n'  # compose は `名前: 値` も受け付ける
         "TR_ISSUE_REPO=example/repo\n"  # 投稿先は秘匿値ではない（D-20）
         "TR_EMPTY_TOKEN=\n"
         "no equals sign\n",
         encoding="utf-8",
     )
     values = set(secret_values(path))
-    assert {"fake-collect", "fake-issue", "fake-pat", "fake-unterminated"} <= values
+    assert {"fake-collect", "fake-issue", "fake-pat", "fake-unterminated", "fake-yaml"} <= values
     assert "example/repo" not in values
     assert not any("example" in v for v in values)
 

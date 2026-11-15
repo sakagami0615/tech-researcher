@@ -48,7 +48,7 @@ install -m 600 deploy/env/worker.env.example "$TR_SECRETS_DIR/worker.env"
 
 - いまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
 - `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env` は 600（または 400）で、どちらも `bin/tr-run` を動かす人（root 以外）が持ち主です。`worker.env` はシンボリックリンクにしません。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります
-- 統括スクリプトは worker.env を環境変数として読み込みません。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
+- 統括スクリプトは worker.env を環境変数として読み込みません。実行の始めに同じフォルダの `.run-<実行ID>/` に写しを作って compose に読ませ、実行が終わったら消します（実行の途中で worker.env を書き換えても、その実行には効きません）。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
 
 - `config/` は読み取り専用で、`${TR_DATA_DIR}` はコンテナの `/data` にマウントします。ほかの場所（ルートのファイルシステム）は読み取り専用で、書けるのは `/data` と `/tmp` だけです
 - root では動かさず、権限（capabilities）をすべて外します。Docker のソケットは渡しません

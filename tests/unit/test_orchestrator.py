@@ -267,7 +267,7 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "GITHUB_TOKEN": TOKEN,
         "COMPOSE_FILE": "/tmp/evil.yaml",
         "COMPOSE_PROJECT_NAME": "evil",
-        "TR_SECRETS_DIR": str(host.secrets) + "/",  # 確かめて解決したパスを渡す
+        "TR_SECRETS_DIR": str(host.secrets) + "/",  # 確かめて解決したパスの下の写しを渡す
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
         "DOCKER_CONTEXT": "desktop-linux",  # 専用の設定のフォルダからは見えないので渡さない
         "DOCKER_CONFIG": "/home/someone/.docker",  # 利用者の設定（proxies など）は使わない
@@ -289,7 +289,8 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
         "DOCKER_CONFIG": str(Path(host.environ["HOME"]) / ".config" / "tech-researcher" / "docker"),
         "TR_DATA_DIR": str(host.data),
-        "TR_SECRETS_DIR": str(host.secrets),  # 場所だけ。worker.env の中身は compose が読む
+        # この実行の間だけの worker.env の写しの場所だけ。中身は compose が読む
+        "TR_SECRETS_DIR": str(host.secrets / f".run-{run_id}"),
         "TR_UID": "1001",
         "TR_GID": "1002",
     }
@@ -400,21 +401,36 @@ def test_worker_env_values_are_masked_in_stage_errors(host, capfd):
     assert "[MASKED:known]" in log_text
 
 
-def test_worker_env_rewritten_during_run_is_masked(host, capfd, monkeypatch):
-    # 起動の後に worker.env を書き換えても、compose が読んだいまの値を伏せる
-    rewritten = "fake-rewritten-credential-4567"
-    host.behave("fail", lock="daily-dry-run", secret=rewritten)
-    real_mask = orchestrator.SecretScanner.mask
+def test_compose_reads_snapshot_of_worker_env_during_run(host, capfd, monkeypatch, tmp_path):
+    # 実行の途中で worker.env を書き換えても、compose が読む値はマスクに使う値と同じ（写し）
+    record = tmp_path / "snapshot.json"
 
-    def rewrite_then_mask(self, text):
-        (host.secrets / "worker.env").write_text(f"TR_ISSUE_TOKEN={rewritten}\n")
-        return real_mask(self, text)
+    def run(self, service, args, timeout_s):  # ジョブの子プロセスで動く
+        (host.secrets / "worker.env").write_text("TR_ISSUE_TOKEN=fake-rewritten-credential\n")
+        copy = Path(self.env["TR_SECRETS_DIR"])
+        text = (copy / "worker.env").read_text()
+        modes = [copy.stat().st_mode & 0o777, (copy / "worker.env").stat().st_mode & 0o777]
+        record.write_text(json.dumps({"copy": str(copy), "modes": modes}))
+        return orchestrator.StageResult(1, "", f"failed to read: {text}")
 
-    monkeypatch.setattr(orchestrator.SecretScanner, "mask", rewrite_then_mask)
+    monkeypatch.setattr(orchestrator.Compose, "run", run)
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
     summary = json.loads(capfd.readouterr().out)
     log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
-    assert rewritten not in log_text
+    assert WORKER_SECRET not in log_text
+    assert "fake-rewritten" not in log_text  # 写しには書き換える前の値しかない
+    assert "[MASKED:known]" in log_text
+    seen = json.loads(record.read_text())
+    assert Path(seen["copy"]) == host.secrets / f".run-{summary['run_id']}"
+    assert seen["modes"] == [0o700, 0o600]
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 終わったら写しを消す
+
+
+def test_snapshot_is_removed_after_stopped_run(host, capfd):
+    host.behave("sleep", lock="daily-dry-run")
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary_of(capfd)
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]
 
 
 def test_compose_passes_worker_env_only_to_worker():
