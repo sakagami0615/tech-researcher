@@ -523,13 +523,13 @@ def _analyze(job: Job) -> str | None:
         return None
     try:
         output = invoke.call_agent(body, job.limits.analyze * MINUTE)
+        _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
     except NotImplementedError:
         job.log.write("analyze", "failure", error_category="not_implemented")
         return "not_implemented"
-    except Exception as e:
+    except Exception as e:  # JSON にできない値を返したときも含む
         job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
         return "agent_failed"
-    _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
     job.log.write("analyze", "end")
     return None
 

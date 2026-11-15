@@ -88,7 +88,9 @@ def run_verify(
     kinds = sorted({f.kind for f in scanner.find(_issue_text(report))})
     _write(run_dir / SECRET_SCAN, json.dumps({"detected": bool(kinds), "kinds": kinds}))
     if kinds:
-        log.write("verify", "secret_detected", error_category=",".join(kinds))
+        log.write(
+            "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(kinds)
+        )
         return _finish(run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons)
     _write(run_dir / ISSUE, _issue_text(report))
     return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons)
