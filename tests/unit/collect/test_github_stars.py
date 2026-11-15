@@ -509,7 +509,15 @@ def test_measured_at_is_kept_to_the_second(limits, conn):
     assert load_star_snapshot(conn, DAILY.key)["a/b"] == result.snapshots[0]
 
 
-@pytest.mark.parametrize("stop", [FetchError("HTTP 401", 1, 401), FetchError("HTTP 403", 1, 403)])
+@pytest.mark.parametrize(
+    "stop",
+    [
+        FetchError("HTTP 401", 1, 401),
+        FetchError("HTTP 403", 1, 403),
+        FetchError("再試行を使い切った：HTTP 429", 1, 429),
+        {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
+    ],
+)
 def test_stopping_failure_after_another_failure_also_skips_the_rest(limits, conn, stop):
     fetch = FakeFetch(FetchError("再試行を使い切った：HTTP 502", 3, 502), stop)
     result = measure_stars(
@@ -518,4 +526,5 @@ def test_stopping_failure_after_another_failure_also_skips_the_rest(limits, conn
     )  # fmt: skip
     assert len(fetch.requests) == 2
     assert result.error_category == github_api.HTTP_5XX  # 返すのは最初の失敗
+    assert result.calls == 4  # 502 の再試行を含む3回と、止める失敗の1回
     assert result.unmeasured == ("a/a", "b/b", "c/c", "d/d")
