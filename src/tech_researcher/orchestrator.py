@@ -295,7 +295,7 @@ def _parser() -> argparse.ArgumentParser:
 def check_environment(environ: Mapping[str, str], repo: Path) -> tuple[Path, dict[str, str]]:
     """データ用フォルダと、compose に渡す環境変数（許可リスト）を返す。
 
-    worker.env の場所と権限もここで確かめる（中身は読まない。D-05）。
+    worker.env の場所・権限と書式もここで確かめる（中身を環境変数として読み込まない。D-05）。
     """
     data = data_dir(environ, repo).resolve()  # リポジトリの外であることも確かめる（D-22）
     if not data.is_dir():

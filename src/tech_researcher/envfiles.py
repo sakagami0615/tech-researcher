@@ -29,7 +29,7 @@ SECRETS_DIR_ENV = "TR_SECRETS_DIR"
 WORKER_ENV = "worker.env"
 ORIGINAL_LABEL = f"{SECRETS_DIR_ENV} の {WORKER_ENV}"  # エラー文での呼び方
 # 写しを確かめて違ったときの呼び方。写しはすぐ消すので、直す先は元のファイルだと分かるようにする
-SNAPSHOT_LABEL = f"{ORIGINAL_LABEL}（実行の始めに写した内容。元のファイルを直す）"
+SNAPSHOT_LABEL = f"{ORIGINAL_LABEL}（実行の始めに写した内容。書式の誤りは元のファイルを直す）"
 SNAPSHOT_PREFIX = ".run-"  # 1回の実行の間だけ置く写しのフォルダ
 # worker.env の1行。compose が解釈を変えたり（引用符・`$`・`\`・前後の空白）、エラー文に値を
 # 出したりする文字を値に含めない

@@ -449,7 +449,7 @@ def test_bad_snapshot_points_to_original_and_is_removed(host, capfd, monkeypatch
     monkeypatch.setattr(orchestrator, "snapshot", snapshot_then_break)
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
     err = capfd.readouterr().err
-    assert "実行の始めに写した内容。元のファイルを直す" in err
+    assert "実行の始めに写した内容。書式の誤りは元のファイルを直す" in err
     assert "1 行目" in err
     assert host.calls() == []
     assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]
