@@ -107,7 +107,9 @@ def test_complete_search_without_topic_skips_topic_searches(limits):
     assert ("no/topic", ("search",)) in {(c.repo, c.routes) for c in result.candidates}
 
 
-@pytest.mark.parametrize("reason", ["over_1000", "incomplete", "incomplete_first", "failed"])
+@pytest.mark.parametrize(
+    "reason", ["over_1000", "incomplete", "incomplete_first", "failed", "short"]
+)
 def test_topic_searches_complement_search_without_topic(limits, reason, caplog):
     full = [f"o/r{i}" for i in range(100)]
     without = {
@@ -119,6 +121,8 @@ def test_topic_searches_complement_search_without_topic(limits, reason, caplog):
             page(["o/last"], total=150),
         ],
         "failed": [FetchError("再試行を使い切った：HTTP 502", 3, 502)],
+        # 短いページで終わったが、total_count に届いていない
+        "short": [page(full, total=250), page(full[:30], total=250)],
     }[reason]
     fake = FakeSearch({"*": without, "llm": [page(["topic/llm"])], "mcp": [page([])]})
     settings = replace(SETTINGS, search_without_topic=True)
@@ -190,6 +194,17 @@ def test_mentions_from_fixture_records():
         "other/lib": ("https://github.com/infra-team/deployer/issues/12",),
         "no-key/repo": (),  # レコードの URL が正規化できなくても、リンクは拾う
     }
+
+
+def test_link_to_activity_page_from_other_source_is_a_mention():
+    record = replace(
+        fixture_records()[0],
+        source_id="hackernews",
+        url="https://news.ycombinator.com/item?id=1",
+        link_url="https://github.com/x/y/releases/tag/v1",
+        links=(),
+    )
+    assert mentioned_repos([record]) == {"x/y": ("https://github.com/x/y/releases/tag/v1",)}
 
 
 def test_collects_all_routes(limits, tmp_path):

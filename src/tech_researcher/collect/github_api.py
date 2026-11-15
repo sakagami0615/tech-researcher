@@ -39,8 +39,8 @@ _TOKEN = re.compile(r"[A-Za-z0-9_.\-]+")
 # API のパス。`/` で区切った空でない部分だけにし、ホストを差し替えられないようにする
 # （`.`・`..` の部分は別に止める）
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
-# リダイレクトの先のクエリに使えない文字（空白・制御文字・#）
-_UNSAFE_QUERY = re.compile(r"[\x00-\x20\x7f#]")
+# リダイレクトの先のクエリに使えない文字（印字できる ASCII 以外と #）
+_UNSAFE_QUERY = re.compile(r"[^\x21-\x7e]|#")
 
 # error_category に使う語
 AUTH = "auth"  # 401。トークンがない・無効
@@ -125,7 +125,7 @@ class GitHubClient:
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> Any:
         """REST の GET（Search 以外）。応答の JSON を返す。"""
-        if path.startswith("/search/"):
+        if _is_search(path):
             raise ValueError("Search は search() で呼ぶ")
         remaining = self._limits.github_rest_calls - self.rest_calls
         try:
@@ -193,7 +193,7 @@ class GitHubClient:
             except FetchError as e:
                 used += e.attempts
                 if e.status in _REDIRECTS:
-                    url = _redirect_target(url, e.headers, path.startswith("/search/"))
+                    url = _redirect_target(url, e.headers, _is_search(path))
                     if url is not None:
                         self._sleep(min_wait)  # Search の間隔はリダイレクトの先にも守る
                         continue
@@ -208,6 +208,10 @@ class GitHubClient:
             return json.loads(response.body), used
         except ValueError as e:
             raise GitHubError(f"{path}：応答が JSON でない", INVALID_RESPONSE, used) from e
+
+
+def _is_search(path: str) -> bool:
+    return path.lower().startswith("/search/")
 
 
 def _redirect_target(url: str, headers: Mapping[str, str], search: bool) -> str | None:
@@ -225,7 +229,7 @@ def _redirect_target(url: str, headers: Mapping[str, str], search: bool) -> str 
     path, _, query = target.removeprefix(API_ROOT).partition("?")
     if not _PATH.fullmatch(path) or {".", ".."} & set(path.split("/")):
         return None
-    if _UNSAFE_QUERY.search(query) or path.startswith("/search/") != search:
+    if _UNSAFE_QUERY.search(query) or _is_search(path) != search:
         return None
     return target
 

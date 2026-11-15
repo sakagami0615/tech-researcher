@@ -18,7 +18,7 @@ CONFIG = load_config(Path(__file__).parents[2] / "config" / "tech-researcher.tom
 
 
 @pytest.mark.network
-def test_configured_topics_can_be_searched():
+def test_configured_search_finds_candidates():
     token = collect_token()
     if token is None:
         pytest.skip("GITHUB_TOKEN がない")

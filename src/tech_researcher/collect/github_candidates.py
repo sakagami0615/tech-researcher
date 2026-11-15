@@ -228,7 +228,9 @@ def _search_topic(
             log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", name, page)
         total = min(data["total_count"], MAX_SEARCH_RESULTS)
         if len(names) < PER_PAGE or page * PER_PAGE >= total:
-            return not incomplete and data["total_count"] <= MAX_SEARCH_RESULTS
+            # 受け取った件数が total_count に届いたときだけ、全件を取れたとみなす
+            received = (page - 1) * PER_PAGE + len(names)
+            return not incomplete and received >= data["total_count"]
     return False
 
 

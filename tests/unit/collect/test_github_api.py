@@ -246,6 +246,7 @@ def test_redirect_outside_api_is_refused(limits, location):
     [
         ("/a", "/x y"),  # パスに空白
         ("/a", "/x?q=a b"),  # クエリに空白
+        ("/a", "/x?q=\u00e9"),  # クエリに ASCII 以外
         ("/a", "/search/repositories?q=x"),  # REST から Search へ
         ("/search/repositories", "/repos/a/b"),  # Search から REST へ
     ],

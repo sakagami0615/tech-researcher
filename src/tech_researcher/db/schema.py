@@ -103,7 +103,8 @@ MIGRATIONS: tuple[str, ...] = (
         measured_at TEXT NOT NULL,
         stars_total INTEGER NOT NULL,
         created_at TEXT NOT NULL,
-        routes_json TEXT NOT NULL,
+        routes_json TEXT NOT NULL
+            CHECK (json_valid(routes_json) AND json_type(routes_json) = 'array'),
         PRIMARY KEY (repo, target),
         UNIQUE (repo, measured_at)
     ) STRICT;

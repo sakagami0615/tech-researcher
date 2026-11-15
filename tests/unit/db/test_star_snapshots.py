@@ -71,6 +71,16 @@ def test_star_snapshots_keys(conn):
         )  # 同じ（リポジトリ、測定時刻）
 
 
+@pytest.mark.parametrize("routes", ["not json", '"search"', "{}"])
+def test_routes_json_must_be_an_array(conn, routes):
+    with pytest.raises(Exception, match="CHECK"):
+        conn.execute(
+            "INSERT INTO star_snapshots VALUES ('a/b', '2026-11-02', '2026-11-02T21:00:00Z', 1,"
+            " 'x', ?)",
+            (routes,),
+        )
+
+
 def test_days_must_be_positive(conn):
     with pytest.raises(ValueError):
         recent_repos(conn, T, 0)
