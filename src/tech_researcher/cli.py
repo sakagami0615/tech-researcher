@@ -123,12 +123,13 @@ def _collect(
     """
     try:
         summary = run_collect(config, target, files.dir, log, db=conn, write_db=True)
-        then()
+        category = collect_failure(summary["sources"], len(summary["failed_sources"]))
+        if category is None:  # 実行エラーの日は ② に進まないので、② の入力も作らない
+            then()
     except Exception as e:
         with suppress(Exception):  # 閉じられなくても、元の失敗を伝える（running のまま残る）
             _finish(conn, files.run_id, type(e).__name__)
         raise
-    category = collect_failure(summary["sources"], len(summary["failed_sources"]))
     if category is not None or files.observation:
         _finish(conn, files.run_id, category)
     return summary
