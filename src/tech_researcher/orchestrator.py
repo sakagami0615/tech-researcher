@@ -16,8 +16,11 @@
 compose には許可した環境変数だけを渡し、リポジトリの .env も読ませない（3.7）。ホストのシェルに
 ANTHROPIC_API_KEY や COMPOSE_FILE などがあっても、compose の変数の展開と設定に使わせない。
 
-いまある段階は ① 収集だけ。② 〜 ⑤ はそれぞれの Issue で足す。それまでの本番の実行は、① の後に
-実行エラー（not_implemented）で終わる。段階が失敗したときの ④・⑤ への分岐も、それらの Issue で足す。
+日次は ① 収集（worker）→ ② 評価・要約（agent/invoke.py）→ ③ 検証・検査（worker）とつなぐ。
+② の AI の呼び出し（agent コンテナ。#18）と ⑤ 投稿はまだないので、それまでの本番の日次は ② で
+実行エラー（not_implemented）になる。② をつないだ後も、⑤ ができるまでは ③ の後に実行エラーで
+終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗した
+ときの ④・⑤ への分岐も、それらの Issue で足す。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -32,18 +35,21 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from tech_researcher.collect.qiita import SOURCE_ID as QIITA_SOURCE_ID
-from tech_researcher.collect.rss import feed_source_id
+from tech_researcher.agent import invoke
+from tech_researcher.agent.daily import InputTooLarge, encode_input
+from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import JST, Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
+from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
+from tech_researcher.stages.daily import RESULTS as VERIFY_RESULTS
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -454,75 +460,159 @@ def run_job(job: Job) -> int:
 
 
 def _run_stages(job: Job) -> Summary:
-    collected, category = _collect(job, source_names(job.config))
+    names = source_names(job.config)
+    collected, category = _worker(
+        job, "collect", job.limits.collect, lambda out: _stage_summary(out, names)
+    )
     if collected is None:
         return job.summary("error", failed_stage="collect", error_category=category)
     fields = {"items": collected["items"], "failed_sources": collected["failed_sources"]}
-    if job.files.dry_run:
+    if len(collected["failed_sources"]) == collected["sources"]:
+        # 1つも取得できなかった日は、0件のレポートにせず実行エラーにする（US-E6-03・US-E6-04）。
+        # 有効な情報源がない（設定の誤り）ときも同じに扱う
+        category = "no_sources" if collected["sources"] == 0 else "all_sources_failed"
+        job.log.write("collect", "failure", error_category=category)
+        return job.summary("error", failed_stage="collect", error_category=category, **fields)
+    if job.cadence == "weekly":
+        # 週次の ② 〜 ⑤ はまだない。本番はレポートを作れないので実行エラーにする
+        if job.files.dry_run:
+            return job.summary("dry_run", **fields)
+        job.log.write("analyze", "failure", error_category="not_implemented")
+        return job.summary(
+            "error", failed_stage="analyze", error_category="not_implemented", **fields
+        )
+    category = _analyze(job)
+    if category is not None:
+        return job.summary("error", failed_stage="analyze", error_category=category, **fields)
+    verified, category = _worker(job, "verify", job.limits.verify, _verify_summary)
+    if verified is None:
+        return job.summary("error", failed_stage="verify", error_category=category, **fields)
+    if verified["result"] == REJECTED:  # 不合格（US-E7-02）。④ と不合格 Issue は後の Issue で足す
+        return job.summary("rejected", **fields)
+    if verified["result"] == SECRET_DETECTED:  # 本文を公開しない（US-E7-05）
+        return job.summary("error", failed_stage="verify", error_category=SECRET_DETECTED, **fields)
+    if job.files.dry_run:  # ドライランは ⑤ だけを飛ばす（D-04）
         return job.summary("dry_run", **fields)
-    # ② 〜 ⑤ はまだない。本番は レポートを作れないので実行エラーにする
-    job.log.write("analyze", "failure", error_category="not_implemented")
-    return job.summary("error", failed_stage="analyze", error_category="not_implemented", **fields)
+    # ⑤ 投稿はまだない。本番はレポートを公開できないので実行エラーにする
+    job.log.write("post", "failure", error_category="not_implemented")
+    return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
 
 
-def _collect(job: Job, names: Mapping[str, str]) -> tuple[dict | None, str | None]:
-    """① 収集を worker で動かし、件数と失敗した情報源の表示名を返す。失敗なら分類を返す。"""
-    args = ["collect", job.cadence, "--run-id", job.files.run_id]
+def _analyze(job: Job) -> str | None:
+    """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
+
+    入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。収集結果が0件の
+    日も AI を呼ばず、項目のない出力をコードが作る（③ が「該当なし」の本文にする。
+    report-templates.md 1.5）。
+    """
+    job.log.write("analyze", "start")
     try:
-        result = job.compose.run(WORKER, args, job.limits.collect * MINUTE)
+        data = json.loads((job.files.dir / AGENT_INPUT).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ValueError("② の入力に items の配列がない")
+        body = encode_input(data, job.limits.agent_input_bytes)
+    except InputTooLarge as e:
+        job.log.write("analyze", "failure", error_category="input_too_large", detail=str(e))
+        return "input_too_large"
+    except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
+        job.log.write("analyze", "failure", error_category="bad_input", exc=e)
+        return "bad_input"
+    if data["items"]:
+        try:
+            output = invoke.call_agent(body, job.limits.analyze * MINUTE)
+        except NotImplementedError:
+            job.log.write("analyze", "failure", error_category="not_implemented")
+            return "not_implemented"
+        except Exception as e:
+            job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
+            return "agent_failed"
+    else:
+        output = {"items": []}
+    try:
+        _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
+    except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
+        job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
+        return "output_write_failed"
+    if data["items"]:
+        job.log.write("analyze", "end")
+    else:
+        job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
+    return None
+
+
+def _write_output(job: Job, output: object) -> None:
+    """② の出力（外部由来の文を含みうる）はファイルにだけ置く。中身の検査は ③ で行う。"""
+    partial = job.files.dir / f"{AGENT_OUTPUT}.partial"
+    partial.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
+    partial.replace(job.files.dir / AGENT_OUTPUT)
+
+
+def _worker(
+    job: Job, stage: str, minutes: int, parse: Callable[[str], dict | None]
+) -> tuple[dict | None, str | None]:
+    """worker の段階を1つ動かし、要約を parse で読んで返す。失敗なら分類を返す。"""
+    args = [stage, job.cadence, "--run-id", job.files.run_id]
+    try:
+        result = job.compose.run(WORKER, args, minutes * MINUTE)
     except OSError as e:
-        job.log.write("collect", "failure", error_category="launch_failed", exc=e)
+        job.log.write(stage, "failure", error_category="launch_failed", exc=e)
         return None, "launch_failed"
     if result.returncode is None:
         category = "timeout"
     elif result.returncode != 0:
         category = f"exit_{result.returncode}"
     else:
-        summary = _stage_summary(result.stdout, names)
+        summary = parse(result.stdout)
         if summary is not None:
             return summary, None
         category = "bad_output"
     # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
     detail = job.scanner.mask(result.stderr)[-STDERR_TAIL_CHARS:]
-    job.log.write("collect", "failure", error_category=category, detail=detail)
+    job.log.write(stage, "failure", error_category=category, detail=detail)
     if result.remove_failed:
-        job.log.write("collect", "failure", error_category="container_remove_failed")
+        job.log.write(stage, "failure", error_category="container_remove_failed")
     return None, category
 
 
-def _stage_summary(stdout: str, names: Mapping[str, str]) -> dict | None:
-    """段階の CLI の要約（cli.py）を読み、情報源 ID を設定ファイルの表示名にする。
-
-    形が違うとき、または設定にない情報源 ID があるときは None（要約に設定の名前以外を出さない）。
-    要約は最後の行だけを読む。イメージがないと compose run がビルドし、その進み具合を標準出力に
-    出すため（実機で確認）。
-    """
+def _last_json(stdout: str) -> dict | None:
+    """段階の CLI の要約（cli.py）。最後の行だけを読む。イメージがないと compose run がビルドし、
+    その進み具合を標準出力に出すため（実機で確認）。"""
     lines = stdout.strip().splitlines()
     try:
         data = json.loads(lines[-1]) if lines else None
     except json.JSONDecodeError:
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _stage_summary(stdout: str, names: Mapping[str, str]) -> dict | None:
+    """① の要約を読み、情報源 ID を設定ファイルの表示名にする。
+
+    形が違うとき、または設定にない情報源 ID があるときは None（要約に設定の名前以外を出さない）。
+    """
+    data = _last_json(stdout)
+    if data is None:
         return None
-    items, failed = data.get("items"), data.get("failed_sources")
-    if not isinstance(items, int) or isinstance(items, bool) or items < 0:
+    items, sources, failed = data.get("items"), data.get("sources"), data.get("failed_sources")
+    if not (_count(items) and _count(sources)):
         return None
     if not isinstance(failed, list) or not all(isinstance(s, str) and s in names for s in failed):
         return None
-    return {"items": items, "failed_sources": [names[s] for s in failed]}
+    if len(set(failed)) != len(failed) or len(failed) > sources:
+        return None
+    return {"items": items, "sources": sources, "failed_sources": [names[s] for s in failed]}
 
 
-def source_names(config: Config) -> dict[str, str]:
-    """情報源 ID → 設定ファイルの表示名。"""
-    names = {feed_source_id(f): f.display_name for f in config.feeds}
-    for source_id, source in (
-        ("hackernews", config.hackernews),
-        ("github_search", config.github_search),
-        (QIITA_SOURCE_ID, config.qiita),
-    ):
-        if source is not None:
-            names[source_id] = source.display_name
-    return names
+def _verify_summary(stdout: str) -> dict | None:
+    """③ の要約の結果の種別を読む。知らない種別なら None（件数はログと validation.json にある）。"""
+    data = _last_json(stdout)
+    if data is None or data.get("result") not in VERIFY_RESULTS:
+        return None
+    return {"result": data["result"]}
+
+
+def _count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _emit(job: Job, summary: Summary) -> None:

@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher.collect.records import Attention, Event, Record, SourceResult
+from tech_researcher.collect.records import Attention, Event, GitHubRepo, Record, SourceResult
 from tech_researcher.config import Feed, load_config
 from tech_researcher.db.runs import SourceFetch, record_source_fetch, start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import daily_target
-from tech_researcher.stages.collect import COLLECTED, run_collect
+from tech_researcher.stages.collect import COLLECTED, load_collected, run_collect
 from tech_researcher.validate.secret_scan import SecretScanner
 
 CONFIG = load_config(Path(__file__).parents[3] / "config" / "tech-researcher.toml")
@@ -196,3 +196,40 @@ def test_db_needs_explicit_write_flag(tmp_path):
     with pytest.raises(ValueError, match="write_db"):
         run_collect(CONFIG, TARGET, tmp_path, log, collect=fake_collect, db=conn)
     conn.close()
+
+
+def test_collected_items_can_be_loaded_back(tmp_path):
+    """③ は collected.json から元の収集項目を作り直して照合する（D-04）。"""
+    repo = GitHubRepo("o/r", OLD, 120, 30, ("https://x.example.com/1",))
+    records = (
+        replace(
+            record("rss:x", "https://x.example.com/1", IN),
+            excerpt="抜粋",
+            primary_text="本文",
+            primary_text_origin="rss_full",
+            links=("https://docs.example.com/x",),
+            meta_terms=("o/r",),
+        ),
+        Record(
+            source_id="rss:x",
+            url="https://x.example.com/repo",
+            title="o/r",
+            published_precision="unknown",
+            fetched_at=FETCHED,
+            events=(Event("attention_spike", IN, "star_growth"),),
+            posted_at=IN,
+            attention=(Attention("stars", 120.0, FETCHED),),
+            github=repo,
+        ),
+    )
+    log = RunLog(
+        tmp_path / "log.jsonl", "dry-20261024-060000-abcd", "daily", TARGET.key, SecretScanner()
+    )
+    config = replace(CONFIG, feeds=(feed("x"),))
+    run_collect(
+        config, TARGET, tmp_path, log, collect=lambda f, limits: SourceResult("rss:x", records, 1)
+    )
+
+    items = load_collected(tmp_path / COLLECTED)
+    assert [i.sources for i in items] == [(records[0],), (records[1],)]  # 日時・入れ子も元どおり
+    assert items[1].github == repo and items[0].links == ("https://docs.example.com/x",)

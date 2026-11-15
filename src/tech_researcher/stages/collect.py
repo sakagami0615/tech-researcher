@@ -6,6 +6,7 @@
 保存は、それぞれを実装する Issue で足す。
 外部由来の文（タイトル・本文）はファイルにだけ書き、戻り値（標準出力に出す要約）には件数と
 情報源の ID だけを入れる（structure.md 3.2）。
+collected.json は load_collected で収集項目に戻せる（② の入力の用意と ③ の照合に使う）。
 """
 
 import json
@@ -18,7 +19,14 @@ from pathlib import Path
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.period_filter import in_period
 from tech_researcher.collect.popularity import judge_feed_entries, mark_thresholds
-from tech_researcher.collect.records import SourceResult
+from tech_researcher.collect.records import (
+    Attention,
+    Event,
+    GitHubRepo,
+    Item,
+    Record,
+    SourceResult,
+)
 from tech_researcher.collect.rss import collect_feed, feed_source_id
 from tech_researcher.config import Config, Feed, Limits
 from tech_researcher.logging import RunLog
@@ -99,3 +107,58 @@ def _json_value(value: object) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     raise TypeError(f"JSON にできない値: {type(value).__name__}")
+
+
+def load_collected(path: Path) -> list[Item]:
+    """collected.json を収集項目に戻す（③ が worker 側の元の収集結果と照合するため。D-04）。"""
+    return [_item(raw) for raw in json.loads(path.read_text(encoding="utf-8"))]
+
+
+def _item(raw: dict) -> Item:
+    return Item(
+        url=raw["url"],
+        sources=tuple(_record(r) for r in raw["sources"]),
+        events=tuple(_event(e) for e in raw["events"]),
+        attention=tuple(_attention(a) for a in raw["attention"]),
+        links=tuple(raw["links"]),
+        meta_terms=tuple(raw["meta_terms"]),
+        github=_github(raw["github"]),
+    )
+
+
+def _record(raw: dict) -> Record:
+    return Record(
+        **{
+            **raw,
+            **{k: _time(raw[k]) for k in ("fetched_at", "published_at", "posted_at")},
+            "events": tuple(_event(e) for e in raw["events"]),
+            "attention": tuple(_attention(a) for a in raw["attention"]),
+            "links": tuple(raw["links"]),
+            "github": _github(raw["github"]),
+            "meta_terms": tuple(raw["meta_terms"]),
+        }
+    )
+
+
+def _event(raw: dict) -> Event:
+    return Event(raw["type"], _time(raw["at"]), raw["basis"])
+
+
+def _attention(raw: dict) -> Attention:
+    return Attention(raw["metric"], raw["value"], _time(raw["measured_at"]))
+
+
+def _github(raw: dict | None) -> GitHubRepo | None:
+    if raw is None:
+        return None
+    return GitHubRepo(
+        **{
+            **raw,
+            "created_at": _time(raw["created_at"]),
+            "mentioned_by": tuple(raw["mentioned_by"]),
+        }
+    )
+
+
+def _time(text: str | None) -> datetime | None:
+    return None if text is None else datetime.fromisoformat(text)
