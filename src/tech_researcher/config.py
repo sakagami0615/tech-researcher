@@ -141,6 +141,10 @@ class StageLimits:
     agent_input_bytes: int
 
 
+# 1回の GraphQL の問い合わせでまとめるリポジトリの数の上限（structure.md 6.5）
+GRAPHQL_BATCH_MAX = 100
+
+
 @dataclass(frozen=True)
 class Limits:
     """再試行・実行時間・API 利用量の上限（D-21、structure.md 6章）。"""
@@ -548,4 +552,9 @@ def _limits(t: _Table) -> Limits:
         weekly=_stage_limits(t.table("weekly")),
     )
     t.done()
+    if result.github_graphql_batch > GRAPHQL_BATCH_MAX:
+        raise ConfigError(
+            f"limits.github_graphql_batch: {GRAPHQL_BATCH_MAX} 以下にする"
+            f"（{result.github_graphql_batch}）"
+        )
     return result

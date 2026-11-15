@@ -28,10 +28,12 @@ class FakeFetch:
         self.outcomes = list(outcomes)
         self.attempts = attempts
         self.calls = []
+        self.bodies = []  # POST の本文（GET は None）
 
-    def __call__(self, url, limits, *, headers, sleep, follow_redirects):
+    def __call__(self, url, limits, *, headers, sleep, follow_redirects, data=None):
         assert follow_redirects is False
         self.calls.append((url, limits.http_retry_waits_s, dict(headers)))
+        self.bodies.append(data)
         self.sleep = sleep
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -347,3 +349,68 @@ def test_error_message_has_no_token(limits):
         client(limits, fetch).get("/user")
     assert TOKEN not in str(e.value) and TOKEN not in repr(e.value)
     assert e.value.category == github_api.AUTH
+
+
+def test_graphql_posts_query_with_token_and_counts_calls(limits):
+    fetch = FakeFetch({"data": {"r0": None}}, attempts=2)
+    api = client(limits, fetch)
+    assert api.graphql("query($o0: String!) { x }", {"o0": "a"}) == {"data": {"r0": None}}
+    url, waits, headers = fetch.calls[0]
+    assert url == "https://api.github.com/graphql"
+    assert headers["Authorization"] == f"Bearer {TOKEN}"
+    assert headers["Content-Type"] == "application/json"
+    assert json.loads(fetch.bodies[0]) == {
+        "query": "query($o0: String!) { x }",
+        "variables": {"o0": "a"},
+    }
+    assert waits == (5, 20)
+    assert (api.graphql_calls, api.rest_calls, api.search_calls) == (2, 0, 0)
+
+
+def test_graphql_without_token_sends_nothing(limits):
+    fetch = FakeFetch()
+    with pytest.raises(GitHubError) as e:
+        client(limits, fetch, token=None).graphql("{ x }", {})
+    assert (e.value.category, e.value.attempts, fetch.calls) == (github_api.AUTH, 0, [])
+
+
+def test_graphql_budget_counts_retries_and_trims_them(limits):
+    fetch = FakeFetch({}, attempts=3)
+    api = client(replace(limits, github_graphql_calls=2), fetch)
+    api.graphql("{ x }", {})
+    assert fetch.calls[0][1] == (5,)  # 残り2回なので再試行は1回まで
+    assert api.graphql_calls == 2
+    with pytest.raises(GitHubError) as e:
+        api.graphql("{ x }", {})
+    assert e.value.category == github_api.BUDGET
+    assert len(fetch.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "category"),
+    [
+        (FetchError("HTTP 401", 1, 401), github_api.AUTH),
+        (FetchError("HTTP 403", 1, 403, {"x-ratelimit-remaining": "0"}), github_api.RATE_LIMITED),
+        (FetchError("再試行を使い切った：HTTP 502", 3, 502), github_api.HTTP_5XX),
+        (
+            FetchError("HTTP 301", 1, 301, {"location": "https://api.github.com/x"}),
+            github_api.REDIRECT,
+        ),
+    ],
+)
+def test_graphql_http_failures_are_classified_and_counted(limits, error, category):
+    api = client(limits, FakeFetch(error))
+    with pytest.raises(GitHubError) as e:
+        api.graphql("{ x }", {})
+    assert e.value.category == category
+    assert api.graphql_calls == error.attempts
+    assert TOKEN not in str(e.value)
+
+
+def test_graphql_invalid_json_is_an_error(limits):
+    fetch = FakeFetch(Response("https://api.github.com/graphql", 200, b"<html>", 1))
+    api = client(limits, fetch)
+    with pytest.raises(GitHubError) as e:
+        api.graphql("{ x }", {})
+    assert e.value.category == github_api.INVALID_RESPONSE
+    assert api.graphql_calls == 1

@@ -86,8 +86,12 @@ def fetch(
     sleep: Callable[[float], None] = time.sleep,
     headers: Mapping[str, str] | None = None,
     follow_redirects: bool = True,
+    data: bytes | None = None,
 ) -> Response:
     """GET して本文を返す。待ちは設定の http_retry_waits_s で、Retry-After があれば従う。
+
+    data を渡すと、それを本文にして POST する（GitHub の GraphQL の問い合わせ用）。POST でも
+    同じく再試行するので、読み取りだけの要求（何度送っても結果が変わらないもの）にだけ使う。
 
     headers は足す要求ヘッダ（認証など）。リダイレクトの先には送らない（別のホストへ
     認証情報を渡さないため）。follow_redirects が False なら、リダイレクトをたどらずに
@@ -99,7 +103,7 @@ def fetch(
         def open_url(req):
             return opener.open(req, timeout=limits.http_connect_timeout_s)
 
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT})
     for name, value in (headers or {}).items():
         request.add_unredirected_header(name, value)
     waits = limits.http_retry_waits_s
