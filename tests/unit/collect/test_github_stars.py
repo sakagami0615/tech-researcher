@@ -319,6 +319,7 @@ def test_renamed_repos_are_kept_under_the_new_name_and_merged(limits, conn):
         {"stargazerCount": 1, "createdAt": "2026-10-01T00:00:00Z"},
         {"nameWithOwner": "\u212aube/x", "stargazerCount": 1, "createdAt": "2026-10-01T00:00:00Z"},
         {"nameWithOwner": "a/b", "stargazerCount": 1, "createdAt": "0001-01-01T00:00:00+01:00"},
+        {"nameWithOwner": "a/b", "stargazerCount": 1, "createdAt": "9999-12-31T23:00:00-01:00"},
         "a/b",
     ],
 )
@@ -348,6 +349,8 @@ def test_entry_errors_other_than_not_found_are_failures():
         ({"errors": [{"type": "MAX_NODE_LIMIT_EXCEEDED", "message": "x"}]}, github_api.GRAPHQL),
         ({"data": None, "errors": [{"message": "Something went wrong"}]}, github_api.GRAPHQL),
         ({"data": {}, "errors": [{"type": "RATE_LIMITED", "path": ["other"]}]},
+         github_api.RATE_LIMITED),
+        ({"errors": [{"message": "You have exceeded a secondary rate limit."}]},
          github_api.RATE_LIMITED),
     ],
 )  # fmt: skip
@@ -462,3 +465,32 @@ def test_renamed_repos_in_separate_queries_are_merged(limits, conn):
         ("new/name", ("search", "watch"), 8)
     ]
     assert list(load_star_snapshot(conn, DAILY.key)) == ["new/name"]
+
+
+def test_invalid_candidates_are_not_queried(limits):
+    fetch = FakeFetch(answer(node("a/b", 1)))
+    candidates = [cand('x") { evil }'), cand("a/b"), cand("c/d", routes=())]
+    result = fetch_stars(make_client(limits, fetch), candidates, batch_size=100, now=Clock())
+    assert [r["variables"] for r in fetch.requests] == [{"o0": "a", "n0": "b"}]
+    assert [s.repo for s in result.snapshots] == ["a/b"]
+    assert result.unmeasured == ('x") { evil }', "c/d")
+
+
+def test_row_written_first_by_another_run_is_returned(limits, conn, monkeypatch):
+    """読んでから書くまでに別の実行が書いた行があれば、DB の値を返す。"""
+    from tech_researcher.collect import github_stars
+
+    real = github_stars.record_star_snapshots
+
+    def record_after_other_run(c, day, snapshots):
+        created = datetime(2026, 10, 1, tzinfo=UTC)
+        real(c, day, [StarSnapshot("a/b", 3, created, AT - timedelta(minutes=1), ("watch",))])
+        return real(c, day, snapshots)
+
+    monkeypatch.setattr(github_stars, "record_star_snapshots", record_after_other_run)
+    fetch = FakeFetch(answer(node("a/b", 9)))
+    result = measure_stars(
+        [cand("a/b")], make_client(limits, fetch), DAILY, conn, write=True, batch_size=100,
+        now=Clock(),
+    )  # fmt: skip
+    assert [s.stars_total for s in result.snapshots] == [3]

@@ -295,6 +295,7 @@ def test_data_is_posted_and_kept_on_retry(limits):
         sleep=lambda _: None,
         headers={"Content-Type": "application/json"},
         data=b'{"query":"{}"}',
+        follow_redirects=False,
     )
     assert response.body == b"ok"
     assert [r.get_method() for r in requests] == ["POST", "POST"]
@@ -306,3 +307,10 @@ def test_without_data_the_request_is_get(limits):
     _, _, requests = run(limits, b"ok")
     assert requests[0].get_method() == "GET"
     assert requests[0].data is None
+
+
+def test_data_with_redirects_followed_is_refused(limits):
+    open_url, requests = scripted(b"ok")
+    with pytest.raises(ValueError):
+        fetch(URL, limits, open_url=open_url, data=b"{}")
+    assert requests == []

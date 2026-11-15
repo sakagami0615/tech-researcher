@@ -102,6 +102,8 @@ def measure_stars(
     if conn is not None and write and result.snapshots:
         written = record_star_snapshots(conn, target.key, result.snapshots)
         log.info("Star 数：%d 件を記録した（測定 %d 件）", written, len(result.snapshots))
+        if written < len(result.snapshots):  # 先に書かれた行があった。DB の値を返す
+            stored = load_star_snapshot(conn, target.key)
     snapshots = {s.repo: stored.get(s.repo, s) for s in result.snapshots}
     mentioned = {r: dict.fromkeys(m) for r, m in result.mentioned_by.items()}
     for c in candidates:
@@ -133,7 +135,9 @@ def fetch_stars(
     measured: dict[str, StarSnapshot] = {}
     mentioned: dict[str, dict[str, None]] = {}
     missing: list[str] = []
-    unmeasured: list[str] = []
+    # 名前・経路の形が違う候補は問い合わせない（問い合わせの文と記録を壊さないため）
+    unmeasured = [c.repo for c in candidates if not _valid(c)]
+    candidates = [c for c in candidates if _valid(c)]
     first_error: GitHubError | None = None
     for start in range(0, len(candidates), batch_size):
         batch = candidates[start : start + batch_size]
@@ -173,6 +177,15 @@ def fetch_stars(
         tuple(unmeasured),
         client.graphql_calls - before,
         **_error(first_error),
+    )
+
+
+def _valid(candidate: Candidate) -> bool:
+    routes = candidate.routes
+    return bool(
+        GITHUB_REPO_NAME.fullmatch(candidate.repo)
+        and routes
+        and tuple(r for r in ROUTES if r in routes) == routes
     )
 
 
@@ -219,6 +232,9 @@ def parse_batch(
     for error in errors:
         kind = error.get("type") if isinstance(error, dict) else None
         kind = kind if isinstance(kind, str) and _ERROR_TYPE.fullmatch(kind) else "UNKNOWN"
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str) and "rate limit" in message.lower():
+            kind = "RATE_LIMITED"  # 二次レート制限は type がなく、文言だけで示されることがある
         path = error.get("path") if isinstance(error, dict) else None
         if kind != "RATE_LIMITED" and isinstance(path, list) and path:
             alias = path[0]

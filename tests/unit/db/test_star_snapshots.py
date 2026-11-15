@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from tech_researcher.db import star_snapshots
 from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.schema import open_db, transaction
 from tech_researcher.db.star_snapshots import (
@@ -208,10 +209,9 @@ def test_invalid_snapshots_are_refused(make):
         record_star_snapshots(None, T, [make()])
 
 
-def test_constraint_violations_other_than_uniqueness_are_not_ignored(conn):
-    conn.execute(
-        "CREATE TRIGGER broken BEFORE INSERT ON star_snapshots"
-        " BEGIN SELECT RAISE(ABORT, 'broken'); END"
-    )
+def test_constraint_violations_other_than_uniqueness_are_not_ignored(conn, monkeypatch):
+    """CHECK の違反（routes_json が配列でない）は黙って捨てずに失敗にする。"""
+    monkeypatch.setattr(star_snapshots.json, "dumps", lambda _: "{}")
     with pytest.raises(sqlite3.IntegrityError):
         record_star_snapshots(conn, T, [snap("a/b", 1)])
+    assert load_star_snapshot(conn, T) == {}

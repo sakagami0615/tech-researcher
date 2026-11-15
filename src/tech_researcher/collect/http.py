@@ -97,6 +97,9 @@ def fetch(
     認証情報を渡さないため）。follow_redirects が False なら、リダイレクトをたどらずに
     3xx の FetchError にする（Location は headers に残る。要求の回数を呼ぶ側で数えるため）。
     """
+    if data is not None and follow_redirects:
+        # urllib は POST の 301〜303 を本文のない GET に変えてたどるため、組み合わせない
+        raise ValueError("data を送るときは follow_redirects=False にする")
     if open_url is None:
         opener = _opener(limits, follow_redirects)
 

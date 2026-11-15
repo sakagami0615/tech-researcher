@@ -271,7 +271,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `created_at` | TEXT | リポジトリの作成日時（新規の判定用） |
 | `routes_json` | TEXT | その測定の候補を見つけた経路の配列（`search`・`mention`・`watch`。D-13。JSON の配列であることを CHECK で確かめる）。監視リストの判定と、PoC での経路ごとの件数に使う |
 
-- PK（`repo`, `target`）、UQ（`repo`, `measured_at`）。D-13 の「（リポジトリ、測定時刻）で一意」を満たしたうえで、同じ対象日の測り直しは `INSERT OR IGNORE` で最初の測定を残す。再実行が遅い時刻に動いても、6:00 の測定どうしの差が崩れないため
+- PK（`repo`, `target`）、UQ（`repo`, `measured_at`）。D-13 の「（リポジトリ、測定時刻）で一意」を満たしたうえで、同じ対象日の測り直しは `INSERT ... ON CONFLICT DO NOTHING` で最初の測定を残す（一意制約の衝突だけを無視し、CHECK・NOT NULL の違反は失敗にする）。再実行が遅い時刻に動いても、6:00 の測定どうしの差が崩れないため
 - 増分は「T の行 − T−1 の行」。T−1 の行がないリポジトリは記録だけ行う（D-13）。T−1 の行が1件もない日は、ヘッダに定型文を出す（report-templates.md 1.6）
 - 週次は日次の増分を合計して判定する（D-13）ので、週次の実行は書かない
 - 監視リスト（過去に候補になったリポジトリ）は「直近30日に、`routes_json` に `search` か `mention` を持つ行があるリポジトリ」で引く。別のテーブルは作らない。監視リストの経路（`watch`）だけの行を数えると、監視リストのリポジトリを毎日測るたびに行ができ、一度候補になったリポジトリがいつまでも外れないため
@@ -357,7 +357,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | source_fetches | `run_id`, `source_id` | 更新 |
 | items | `cadence`, `target`, `canonical_url` | upsert。同じ対象の再実行でも行は増えない。日次で AI に渡すのは、その実行で更新した行（`last_run_id` が今回）だけ |
 | feed_snapshots | `source_id`, `target`, `canonical_url` | 同じ（情報源、対象日）の行がすでにあれば書かない（最初に成功した取得を残す） |
-| star_snapshots | `repo`, `target` | `INSERT OR IGNORE`（最初の測定を残す） |
+| star_snapshots | `repo`, `target` | `INSERT ... ON CONFLICT DO NOTHING`（最初の測定を残す） |
 | reports・report_entries | `run_id`（と `entry_no`） | 同じ実行の中の ③ の再試行は置き換え。別の実行は別の行（生成履歴） |
 | issues（レポート） | 部分一意（`cadence`, `target`） | report-templates.md 4.3 の手順。DB に記録がなければ、ラベルと識別子で GitHub を探し、見つかれば DB を補う |
 | issues（不合格・実行エラー） | `run_id`, `kind` | 同じ実行の中の ⑤ の再試行は、行に番号があれば作らない |
