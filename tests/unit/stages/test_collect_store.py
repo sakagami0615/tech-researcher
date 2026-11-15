@@ -129,7 +129,9 @@ def test_source_fetch_states():
     assert (empty.status, empty.error_category) == ("no_results", None)
     failed = source_fetch(SourceResult("rss:a", (), 3, "HTTP 503"), AT, 0)
     assert (failed.status, failed.error_category, failed.attempts) == ("failed", "fetch_failed", 3)
-    timeout = source_fetch(SourceResult("hackernews", (), 2, "上限", error_category="timeout"), AT, 0)
+    timeout = source_fetch(
+        SourceResult("hackernews", (), 2, "上限", error_category="timeout"), AT, 0
+    )
     assert timeout.error_category == "timeout"
 
 
