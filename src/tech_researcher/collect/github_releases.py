@@ -34,7 +34,6 @@ MAX_PAGES = 5  # 1リポジトリあたりのページの上限。設定の誤�
 
 # 応答の形が違うときの例外。GitHubError の INVALID_RESPONSE にまとめる
 _SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
-INVALID_NAME = "invalid_name"  # fetch_readmes に渡された名前が owner/repo の形でない
 
 
 def collect_releases(
@@ -76,8 +75,10 @@ def _repo_releases(
 
     一覧が公開日時の順に並ぶ保証はない（公式の文書に書かれていない）ので、ページの中の
     すべてが期間の始まりより前になったときだけ止める。日次でもふつうは2ページを取る。
-    下書き・プレリリースも件数に数わるので、プレリリースの多いリポジトリはページが増える。
-    応答の形が違えば GitHubError（INVALID_RESPONSE）。
+    下書き・プレリリースも件数に加わるので、プレリリースの多いリポジトリはページが増える。
+    応答の形が違えば GitHubError（INVALID_RESPONSE）。途中のページで失敗したときや、1件の
+    リリースの形が違うときも、取れたページの分を含めてそのリポジトリを取れなかったものにする
+    （応答の異常を見逃さないため。取りこぼしは「取得できなかった情報源」に出る）。
     """
     records = []
     for page in range(1, MAX_PAGES + 1):
@@ -107,6 +108,9 @@ def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | No
     if not isinstance(tag, str) or not tag:
         raise ValueError("tag_name がない")
     published_at = _utc(release["published_at"])
+    name = release.get("name")
+    if name is not None and not isinstance(name, str):
+        raise TypeError("name が文字列でない")
     body = release.get("body")
     if body is not None and not isinstance(body, str):
         raise TypeError("body が文字列でない")
@@ -115,7 +119,7 @@ def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | No
     return Record(
         source_id=SOURCE_ID,
         url=url,
-        title=release.get("name") or tag,
+        title=name if name and name.strip() else tag,
         published_precision="datetime",
         fetched_at=fetched_at,
         events=(Event("released", published_at),),
@@ -123,8 +127,17 @@ def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | No
         primary_text_origin="github_release" if body else None,
         published_at=published_at,
         links=markdown_links(body),
-        meta_terms=(full_name, tag),
+        meta_terms=(_display_repo(full_name, url), tag),
     )
+
+
+def _display_repo(full_name: str, html_url: str) -> str:
+    """meta_terms に入れるリポジトリ名。html_url の名前が同じ（大文字・小文字だけの違い）なら使う。
+
+    設定の名前は小文字にそろえてあるので、本文に出る元の表記（microsoft/TypeScript など）を残す。
+    """
+    shown = "/".join(html_url.removeprefix("https://github.com/").split("/")[:2])
+    return shown if shown.lower() == full_name else full_name
 
 
 def _utc(value: str) -> datetime:
@@ -147,13 +160,16 @@ class Readme:
 class ReadmeResult:
     """README の取得結果。README のないリポジトリは readmes にも errors にも入らない。
 
-    キーは `owner/repo`（小文字）。errors は失敗の理由の分類（github_api の語）。
-    attempts は使った要求の回数（再試行を含む）。
+    キーは `owner/repo`（小文字。形を確かめた名前だけ）。errors は失敗の理由の分類
+    （github_api の語）。attempts は使った要求の回数（再試行を含む）。
+    invalid_names は `owner/repo` の形でなかった名前の数。名前は外部の URL から抜き出したもので
+    ありうるので、外部の文をコードの値に混ぜないよう、名前そのものは残さない（US-E7-06）。
     """
 
     readmes: dict[str, Readme]
     errors: dict[str, str]
     attempts: int
+    invalid_names: int = 0
 
 
 def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResult:
@@ -161,19 +177,28 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
 
     1件の失敗では止めず、続きを取る（README は項目の補足で、なくても項目は載せられるため）。
     README がない（HTTP 404）ものは失敗にしない。名前は外部の URL から抜き出したものでありうる
-    ので、`owner/repo` の形でなければ要求しない。GitHub の名前は大文字・小文字を区別しないので、
-    小文字にそろえて重なりを除く。
+    ので、`owner/repo` の形（ASCII）でなければ要求せず、数だけを数える。GitHub の名前は
+    大文字・小文字を区別しないので、小文字にそろえて重なりを除く。
+    1MB を超える README は API が本文を返さない（encoding が none）ので、README がないものと
+    同じく失敗にしない。
     """
     before = client.rest_calls
     readmes: dict[str, Readme] = {}
     errors: dict[str, str] = {}
+    seen: set[str] = set()
+    invalid = 0
     for name in full_names:
-        full_name = name.lower() if isinstance(name, str) else str(name)
-        if full_name in readmes or full_name in errors:
+        # 小文字にする前に ASCII に限る（ケルビン記号 K が k になるなど、別の名前に化けるため）
+        if not isinstance(name, str) or not name.isascii():
+            invalid += 1
             continue
+        full_name = name.lower()
         if not GITHUB_REPO_NAME.fullmatch(full_name):
-            errors[full_name] = INVALID_NAME
+            invalid += 1
             continue
+        if full_name in seen:
+            continue
+        seen.add(full_name)
         try:
             text = _readme_text(client.get(f"/repos/{full_name}/readme"))
         except GitHubError as e:
@@ -183,14 +208,20 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
         except _SHAPE_ERRORS:
             errors[full_name] = github_api.INVALID_RESPONSE
             continue
-        if text.strip():
+        if text is not None and text.strip():
             readmes[full_name] = Readme(full_name, text, markdown_links(text))
-    return ReadmeResult(readmes, errors, client.rest_calls - before)
+    return ReadmeResult(readmes, errors, client.rest_calls - before, invalid)
 
 
-def _readme_text(data) -> str:
-    """README の API の応答（base64 の content）を文字列にする。形が違えば ValueError など。"""
-    if data["encoding"] != "base64":
+def _readme_text(data) -> str | None:
+    """README の API の応答（base64 の content）を文字列にする。形が違えば ValueError など。
+
+    1MB を超えて本文が返らないもの（encoding が none）は None。
+    """
+    if data["encoding"] == "none":
+        log.info("%s：1MB を超える README は本文が返らない", SOURCE_ID)
+        return None
+    if data["encoding"] != "base64" or not isinstance(data["content"], str):
         raise ValueError("encoding が base64 でない")
     try:
         raw = base64.b64decode(data["content"], validate=False)
@@ -214,12 +245,12 @@ def with_readme(record: Record, readme: Readme) -> Record:
     )
 
 
-# Markdown の画像（![alt](url)）と <img> タグ。バッジなどの画像は候補リンクにしない。
-# 外部の本文に使うので、文字の種類で探索を次の括弧・改行・< で止め、時間を本文の長さに比例させる
-# （[^\]]* だと、閉じない ![ の繰り返しで二次的に遅くなる）
-_IMAGES = re.compile(r"!\[[^\[\]\n]*\]\([^()\s]*\)|<img\b[^<>]*>", re.IGNORECASE)
-# 参照形式の画像（![alt][label]）と、その定義の行（[label]: url）
-_REF_IMAGE = re.compile(r"!\[[^\[\]\n]*\]\[([^\[\]\n]+)\]")
+# Markdown の画像（![alt](url "title")）と <img>・<source>（<picture> の中）のタグ。
+# バッジなどの画像は候補リンクにしない。外部の本文に使うので、文字の種類で探索を次の括弧・改行・
+# < で止め、時間を本文の長さに比例させる（[^\]]* だと、閉じない ![ の繰り返しで二次的に遅くなる）
+_IMAGES = re.compile(r"!\[[^\[\]\n]*\]\([^()\n]*\)|<(?:img|source)\b[^<>]*>", re.IGNORECASE)
+# 参照形式の画像（![alt][label]・![alt][]・![label]）。その定義の行（[label]: url）を除く
+_REF_IMAGE = re.compile(r"!\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?(?!\()")
 _REF_DEF = re.compile(r"^ {0,3}\[([^\[\]\n]+)\]:[^\n]*", re.MULTILINE)
 # 絶対 URL。Markdown のリンク・自動リンク・裸の URL・HTML の href をまとめて拾う
 _URL = re.compile(r"https?://[^\s<>()\[\]{}\"'`]+", re.IGNORECASE)
@@ -235,8 +266,25 @@ def markdown_links(text: str | None) -> tuple[str, ...]:
     """
     if not text:
         return ()
-    text = html.unescape(text)
-    images = {label.casefold() for label in _REF_IMAGE.findall(text)}
+    text = html.unescape(_drop_comments(text))
+    images = {(label or alt).casefold() for alt, label in _REF_IMAGE.findall(text)}
     text = _REF_DEF.sub(lambda m: " " if m.group(1).casefold() in images else m.group(), text)
     text = _IMAGES.sub(" ", text)
     return tuple(m.group().rstrip(_TRAILING) for m in _URL.finditer(text))
+
+
+def _drop_comments(text: str) -> str:
+    """HTML のコメント（<!-- … -->。読者に見えない）を除く。閉じないコメントは末尾まで除く。
+
+    正規表現の .*? は閉じない <!-- の繰り返しで二次的に遅くなるので、find で1回ずつ進める。
+    """
+    parts = []
+    position = 0
+    while (start := text.find("<!--", position)) != -1:
+        parts.append(text[position:start])
+        end = text.find("-->", start + 4)
+        if end == -1:
+            return "".join(parts)
+        position = end + 3
+    parts.append(text[position:])
+    return "".join(parts)
