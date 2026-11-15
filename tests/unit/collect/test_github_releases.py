@@ -144,6 +144,20 @@ def test_blank_name_falls_back_to_tag(limits, name):
     assert record.meta_terms == ("Example/Tool", "v1")
 
 
+def test_published_at_without_timezone_fails_the_repo(limits):
+    body = json.dumps([release_json(published_at="2026-11-02T00:00:00")]).encode()
+    result = collect(limits, FakeFetch({releases_url("example/tool"): body}))
+    assert result.failed_parts == (FailedPart("example/tool", "invalid_response"),)
+    assert result.error is not None  # 追跡先がこれだけなので、情報源は失敗
+
+
+def test_long_tag_is_not_a_meta_term(limits):
+    """長いタグで D4 の一致の判定を外せないよう、meta_terms に入れない。"""
+    body = json.dumps([release_json(tag_name="v" * 101)]).encode()
+    (record,) = collect(limits, FakeFetch({releases_url("example/tool"): body})).records
+    assert record.meta_terms == ("Example/Tool",)
+
+
 def test_name_of_wrong_type_fails_the_repo(limits):
     body = json.dumps([release_json(name={"x": 1})]).encode()
     result = collect(limits, FakeFetch({releases_url("example/tool"): body}))
@@ -320,7 +334,8 @@ def test_failure_on_later_page_fails_the_repo(limits):
     assert {r.meta_terms[0] for r in result.records} == {"a/one"}
 
 
-def test_possible_truncation_is_logged(limits, caplog):
+def test_possible_truncation_is_kept_as_failed_part(limits, caplog):
+    """ページの上限に達したら、取れた分を使い、取りこぼしたおそれを読者に伝えられる形で残す。"""
     recent = "2026-11-02T12:00:00Z"
     fetch = FakeFetch(
         {releases_url("example/tool", p): page_of(p * 30, recent) for p in range(1, 7)}
@@ -329,6 +344,7 @@ def test_possible_truncation_is_logged(limits, caplog):
         result = collect(limits, fetch)
     assert len(fetch.calls) == 5  # ページの上限で止める
     assert result.error is None and len(result.records) == 150
+    assert result.failed_parts == (FailedPart("example/tool", "truncated"),)
     assert "取りこぼしたおそれ" in caplog.text
 
 
@@ -345,8 +361,22 @@ def test_readmes_are_fetched_for_given_repos(limits):
                 {"encoding": "base64", "content": "abc"}
             ).encode(),
             readme_url("example/latin1"): json.dumps(
-                {"encoding": "base64", "content": base64.b64encode(b"caf\xe9 ok").decode()}
+                {
+                    "encoding": "base64",
+                    "content": base64.b64encode(b"\xef\xbb\xbfcaf\xe9 ok").decode(),
+                }
             ).encode(),
+            readme_url("example/list"): b"[]",
+            readme_url("example/junk64"): json.dumps(
+                {"encoding": "base64", "content": "!!!!eA==!!!"}
+            ).encode(),
+            readme_url("example/utf16"): json.dumps(
+                {
+                    "encoding": "base64",
+                    "content": base64.b64encode("\ufeffhi".encode("utf-16")).decode(),
+                }
+            ).encode(),
+            readme_url("example/deep"): b"[" * 100_000,
         }
     )
     names = [
@@ -357,18 +387,30 @@ def test_readmes_are_fetched_for_given_repos(limits):
         "example/large",
         "example/bad64",
         "example/latin1",
+        "example/list",
+        "example/junk64",
+        "example/utf16",
+        "example/deep",
         "Example/Tool",
     ]
     result = fetch_readmes(names, client(limits, fetch))
-    assert fetch.urls() == [readme_url(n) for n in names[:7]]  # 大文字・小文字の違いは1回だけ
+    assert fetch.urls() == [readme_url(n) for n in names[:11]]  # 大文字・小文字の違いは1回だけ
     assert set(result.readmes) == {"example/tool", "example/latin1"}
     assert result.readmes["example/tool"] == Readme(
         "example/tool", text, ("https://docs.example.com/tool",)
     )
-    assert result.readmes["example/latin1"].text == "caf\ufffd ok"  # UTF-8 でない文字は置き換える
+    # 先頭の BOM は除き、UTF-8 でない文字は置き換える
+    assert result.readmes["example/latin1"].text == "caf\ufffd ok"
     # README がない（404）、1MB を超えて本文が返らないものは失敗にしない。ほかの失敗では止めない
-    assert result.errors == {"example/broken": "http_5xx", "example/bad64": "invalid_response"}
-    assert result.attempts == 1 + 1 + 3 + 1 + 1 + 1 + 1
+    assert result.errors == {
+        "example/broken": "http_5xx",
+        "example/bad64": "invalid_response",
+        "example/list": "invalid_response",
+        "example/junk64": "invalid_response",  # base64 以外の文字は読まない
+        "example/utf16": "invalid_response",
+        "example/deep": "invalid_response",  # 深すぎる入れ子の JSON
+    }
+    assert result.attempts == 1 + 1 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
     assert result.invalid_names == 0
 
 
@@ -474,6 +516,15 @@ def test_bodies_are_not_stored_in_db(tmp_path, limits):
         ("![alt][]\n\n[alt]: https://a.example/logo.png", ()),
         ("<!-- https://hidden.example/a --> https://a.example/x", ("https://a.example/x",)),
         ("https://a.example/x <!-- https://hidden.example/a", ("https://a.example/x",)),
+        ("https://a.example。次に", ("https://a.example",)),  # IDNA で別のホストにしない
+        (
+            "<!--> https://a.example/x <!---> https://b.example/y",
+            ("https://a.example/x", "https://b.example/y"),
+        ),
+        (
+            "詳しくは（https://a.example/x）、https://b.example/y。",
+            ("https://a.example/x", "https://b.example/y"),
+        ),
     ],
 )
 def test_markdown_links(text, links):

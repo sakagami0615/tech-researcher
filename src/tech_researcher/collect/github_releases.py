@@ -32,8 +32,13 @@ SOURCE_ID = "github_releases"
 PER_PAGE = 30
 MAX_PAGES = 5  # 1リポジトリあたりのページの上限。設定の誤りなどで要求を増やしすぎないように
 
-# 応答の形が違うときの例外。GitHubError の INVALID_RESPONSE にまとめる
-_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError)
+# 応答の形が違うときの例外。GitHubError の INVALID_RESPONSE にまとめる（応答を読む所だけを囲む）
+_SHAPE_ERRORS = (KeyError, TypeError, ValueError, RecursionError)
+# meta_terms（D-07 の D4 で一致の判定から外す語句）に入れるタグ名の長さの上限。
+# 長い語句で検査を外せないようにする
+MAX_META_TERM = 100
+# ページの上限に達し、期間内のリリースを取りこぼしたおそれがあるリポジトリの理由の分類
+TRUNCATED = "truncated"
 
 
 def collect_releases(
@@ -45,23 +50,30 @@ def collect_releases(
     下書き（draft）とプレリリースは除く。プレリリースは本文がほとんどない版が多いため
     （openai/codex の alpha など。2026-11-04 に確認）。
     取れなかったリポジトリは failed_parts に残し、取れた分は使う。すべてが取れなかったときだけ
-    情報源を失敗にする（US-E6-03）。attempts はこの情報源で使った要求の回数（再試行を含む）。
+    情報源を失敗にする（US-E6-03）。ページの上限に達したリポジトリは、取れた分を使ったうえで
+    TRUNCATED として failed_parts に残す（取りこぼしたおそれを読者に伝えるため）。
+    attempts はこの情報源で使った要求の回数（再試行を含む）。
     """
     before = client.rest_calls
     fetched_at = datetime.now(UTC)
     records: dict[str, Record] = {}
     failed: list[FailedPart] = []
+    fetched = 0  # 取れたリポジトリの数（上限に達したものを含む）
     for full_name in releases.repos:
         try:
-            repo_records = _repo_releases(full_name, period, client, fetched_at)
+            repo_records, complete = _repo_releases(full_name, period, client, fetched_at)
         except GitHubError as e:
             log.warning("%s：%s が取れない（%s）", SOURCE_ID, full_name, e.category)
             failed.append(FailedPart(full_name, e.category))
             continue
+        fetched += 1
+        if not complete:
+            log.warning("%s：%s の期間内のリリースを取りこぼしたおそれ", SOURCE_ID, full_name)
+            failed.append(FailedPart(full_name, TRUNCATED))
         for record in repo_records:
             records.setdefault(record.url, record)
     attempts = client.rest_calls - before
-    if failed and len(failed) == len(releases.repos):
+    if failed and not fetched:
         categories = sorted({f.error_category for f in failed})
         error = f"すべての追跡先が取れない（{'・'.join(categories)}）"
         return SourceResult(SOURCE_ID, (), attempts, error, tuple(failed))
@@ -70,8 +82,10 @@ def collect_releases(
 
 def _repo_releases(
     full_name: str, period: Period, client: GitHubClient, fetched_at: datetime
-) -> list[Record]:
+) -> tuple[list[Record], bool]:
     """1つのリポジトリのリリースを、新しい順のページで期間の始まりまで取る。
+
+    （レコード、期間の始まりまで届いたか）を返す。MAX_PAGES で届かなければ False。
 
     一覧が公開日時の順に並ぶ保証はない（公式の文書に書かれていない）ので、ページの中の
     すべてが期間の始まりより前になったときだけ止める。日次でもふつうは2ページを取る。
@@ -92,9 +106,8 @@ def _repo_releases(
             message = f"{full_name}：Releases API の応答として読めない：{type(e).__name__}"
             raise GitHubError(message, github_api.INVALID_RESPONSE, 0) from e
         if len(data) < PER_PAGE or (dates and max(dates) < period.start):
-            return records
-    log.warning("%s：%s の期間内のリリースを取りこぼしたおそれ", SOURCE_ID, full_name)
-    return records
+            return records, True
+    return records, False
 
 
 def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | None:
@@ -127,7 +140,7 @@ def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | No
         primary_text_origin="github_release" if body else None,
         published_at=published_at,
         links=markdown_links(body),
-        meta_terms=(_display_repo(full_name, url), tag),
+        meta_terms=(_display_repo(full_name, url), *([tag] if len(tag) <= MAX_META_TERM else [])),
     )
 
 
@@ -200,11 +213,13 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
             continue
         seen.add(full_name)
         try:
-            text = _readme_text(client.get(f"/repos/{full_name}/readme"))
+            data = client.get(f"/repos/{full_name}/readme")
         except GitHubError as e:
             if e.category != github_api.NOT_FOUND:
                 errors[full_name] = e.category
             continue
+        try:
+            text = _readme_text(full_name, data)
         except _SHAPE_ERRORS:
             errors[full_name] = github_api.INVALID_RESPONSE
             continue
@@ -213,21 +228,24 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
     return ReadmeResult(readmes, errors, client.rest_calls - before, invalid)
 
 
-def _readme_text(data) -> str | None:
+def _readme_text(full_name: str, data) -> str | None:
     """README の API の応答（base64 の content）を文字列にする。形が違えば ValueError など。
 
     1MB を超えて本文が返らないもの（encoding が none）は None。
     """
     if data["encoding"] == "none":
-        log.info("%s：1MB を超える README は本文が返らない", SOURCE_ID)
+        log.info("%s：%s の README は 1MB を超え、本文が返らない", SOURCE_ID, full_name)
         return None
     if data["encoding"] != "base64" or not isinstance(data["content"], str):
         raise ValueError("encoding が base64 でない")
     try:
-        raw = base64.b64decode(data["content"], validate=False)
+        # GitHub は 60 字ごとに改行を入れる。改行を除いたうえで、base64 以外の文字を拒む
+        raw = base64.b64decode(re.sub(r"[\r\n]", "", data["content"]), validate=True)
     except binascii.Error as e:
         raise ValueError("content を base64 として読めない") from e
-    return raw.decode("utf-8", errors="replace")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        raise ValueError("UTF-16・UTF-32 の README は読まない")
+    return raw.decode("utf-8-sig", errors="replace")  # 先頭の BOM は除く
 
 
 def with_readme(record: Record, readme: Readme) -> Record:
@@ -252,8 +270,11 @@ _IMAGES = re.compile(r"!\[[^\[\]\n]*\]\([^()\n]*\)|<(?:img|source)\b[^<>]*>", re
 # 参照形式の画像（![alt][label]・![alt][]・![label]）。その定義の行（[label]: url）を除く
 _REF_IMAGE = re.compile(r"!\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?(?!\()")
 _REF_DEF = re.compile(r"^ {0,3}\[([^\[\]\n]+)\]:[^\n]*", re.MULTILINE)
-# 絶対 URL。Markdown のリンク・自動リンク・裸の URL・HTML の href をまとめて拾う
-_URL = re.compile(r"https?://[^\s<>()\[\]{}\"'`]+", re.IGNORECASE)
+# 絶対 URL。Markdown のリンク・自動リンク・裸の URL・HTML の href をまとめて拾う。
+# URL は ASCII の印字できる文字だけとし、< > ( ) [ ] { } " ' ` で止める。日本語の文の句読点・
+# 全角の括弧（「https://…。次に」など）を含めると、IDNA が「。」を「.」として扱い、別のホストに
+# なりうるため。ホスト名を IDN のまま書いたものは切れるが、候補リンクとしては受け入れる
+_URL = re.compile(r"https?://[!#-&*-;=?-Z\\^_a-z|~]+", re.IGNORECASE)
 _TRAILING = ".,;:!?*_~"
 
 
@@ -282,9 +303,15 @@ def _drop_comments(text: str) -> str:
     position = 0
     while (start := text.find("<!--", position)) != -1:
         parts.append(text[position:start])
-        end = text.find("-->", start + 4)
-        if end == -1:
-            return "".join(parts)
-        position = end + 3
+        # <!--> と <!---> は空のコメントとして閉じる（HTML の仕様と同じ）
+        for empty in ("<!-->", "<!--->"):
+            if text.startswith(empty, start):
+                position = start + len(empty)
+                break
+        else:
+            end = text.find("-->", start + 4)
+            if end == -1:
+                return "".join(parts)
+            position = end + 3
     parts.append(text[position:])
     return "".join(parts)
