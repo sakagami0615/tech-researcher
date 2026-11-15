@@ -143,9 +143,10 @@ def fetch_stars(
     unmeasured = [c.repo for c in candidates if not _valid(c)]
     candidates = [c for c in candidates if _valid(c)]
     first_error: GitHubError | None = None
+    stopped = False  # 止める種類の失敗があった（最初の失敗でなくても）
     for start in range(0, len(candidates), batch_size):
         batch = candidates[start : start + batch_size]
-        if first_error is not None and first_error.category in _STOP_CATEGORIES:
+        if stopped:
             unmeasured += [c.repo for c in batch]
             continue
         try:
@@ -154,6 +155,7 @@ def fetch_stars(
         except GitHubError as e:
             log.warning("GitHub GraphQL：%d 件を測れなかった（%s）", len(batch), e.category)
             first_error = first_error or e
+            stopped = stopped or e.category in _STOP_CATEGORIES
             unmeasured += [c.repo for c in batch]
             continue
         at = now().replace(microsecond=0)  # DB に残す精度（秒）にそろえる
