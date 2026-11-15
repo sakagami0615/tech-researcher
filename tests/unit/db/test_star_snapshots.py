@@ -50,6 +50,12 @@ def test_repo_found_again_by_mention_is_watched_again(conn):
     assert recent_repos(conn, T, 30) == ("a/back",)
 
 
+def test_recent_repos_skips_names_not_in_owner_repo_form(conn):
+    insert(conn, "../x", T - timedelta(days=1))
+    insert(conn, "a/b", T - timedelta(days=1))
+    assert recent_repos(conn, T, 30) == ("a/b",)
+
+
 def test_recent_repos_empty_db(conn):
     assert recent_repos(conn, T, 30) == ()
 

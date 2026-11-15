@@ -39,6 +39,8 @@ _TOKEN = re.compile(r"[A-Za-z0-9_.\-]+")
 # API のパス。`/` で区切った空でない部分だけにし、ホストを差し替えられないようにする
 # （`.`・`..` の部分は別に止める）
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
+# リダイレクトの先のクエリに使えない文字（空白・制御文字・#）
+_UNSAFE_QUERY = re.compile(r"[\x00-\x20\x7f#]")
 
 # error_category に使う語
 AUTH = "auth"  # 401。トークンがない・無効
@@ -191,10 +193,11 @@ class GitHubClient:
             except FetchError as e:
                 used += e.attempts
                 if e.status in _REDIRECTS:
-                    url = _redirect_target(url, e.headers)
+                    url = _redirect_target(url, e.headers, path.startswith("/search/"))
                     if url is not None:
+                        self._sleep(min_wait)  # Search の間隔はリダイレクトの先にも守る
                         continue
-                    raise GitHubError(f"{path}：API の外へのリダイレクト", REDIRECT, used) from e
+                    raise GitHubError(f"{path}：たどれないリダイレクト", REDIRECT, used) from e
                 category = classify(e)
                 raise GitHubError(f"{path}：{category}（{e}）", category, used, e.status) from e
             used += response.attempts
@@ -207,13 +210,24 @@ class GitHubClient:
             raise GitHubError(f"{path}：応答が JSON でない", INVALID_RESPONSE, used) from e
 
 
-def _redirect_target(url: str, headers: Mapping[str, str]) -> str | None:
-    """リダイレクトの先。API_ROOT の中でなければ None。"""
+def _redirect_target(url: str, headers: Mapping[str, str], search: bool) -> str | None:
+    """リダイレクトの先。たどれなければ None。
+
+    たどるのは、API_ROOT の中で、パスが API のパスの形のもの（空白などを含まない）だけ。
+    Search とそれ以外をまたぐ先もたどらない（利用量と間隔を数え分けているため）。
+    """
     location = {k.lower(): v for k, v in headers.items()}.get("location")
     if not location:
         return None
     target = urljoin(url, location.strip())
-    return target if target.startswith(API_ROOT + "/") else None
+    if not target.startswith(API_ROOT + "/"):
+        return None
+    path, _, query = target.removeprefix(API_ROOT).partition("?")
+    if not _PATH.fullmatch(path) or {".", ".."} & set(path.split("/")):
+        return None
+    if _UNSAFE_QUERY.search(query) or path.startswith("/search/") != search:
+        return None
+    return target
 
 
 def classify(error: FetchError) -> str:

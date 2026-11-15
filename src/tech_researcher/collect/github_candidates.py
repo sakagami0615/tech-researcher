@@ -155,7 +155,7 @@ def _search(
     settings: GitHubRepos, day: date, client: GitHubClient | None
 ) -> tuple[list[str], int, GitHubError | None]:
     """Search の経路。（見つけたリポジトリ、要求の回数、最初の失敗）を返す。"""
-    if not search_topics(settings):
+    if not searches(settings):
         return [], 0, None
     if client is None or not client.authenticated:
         return [], 0, GitHubError("収集用トークンがない", github_api.AUTH, 0)
@@ -173,7 +173,7 @@ def search_repos(
 ) -> tuple[list[str], GitHubError | None]:
     """検索ごとに Search API を呼び、（見つかったリポジトリ、最初の失敗）を返す。
 
-    検索は search_topics の順（トピックを付けない検索が先）。Star 数の順にページを送り、
+    検索は searches の順（トピックを付けない検索が先）。Star 数の順にページを送り、
     件数が尽きるか、Search の上限（1,000件）まで取る。ある検索で失敗したら、その検索をやめて
     次へ進む。認証・レート制限・この実行の上限の失敗では、残りの検索も呼ばずにやめる。
     重なったリポジトリは除く。
@@ -184,7 +184,7 @@ def search_repos(
     since = day - timedelta(days=settings.search_days)
     repos: dict[str, None] = {}
     first_error: GitHubError | None = None
-    for topic in search_topics(settings):
+    for topic in searches(settings):
         try:
             complete = _search_topic(client, topic, since, settings, repos)
         except GitHubError as e:
@@ -197,8 +197,8 @@ def search_repos(
     return list(repos), first_error
 
 
-def search_topics(settings: GitHubRepos) -> list[str | None]:
-    """行う検索のトピック。None はトピックを付けない検索。"""
+def searches(settings: GitHubRepos) -> list[str | None]:
+    """行う検索のトピックの並び。None はトピックを付けない検索（先頭）。"""
     without_topic: list[str | None] = [None] if settings.search_without_topic else []
     return without_topic + list(settings.search_topics)
 
@@ -217,12 +217,13 @@ def _search_topic(
     """
     query = search_query(topic, since, settings.search_min_stars)
     params = {"q": query, "sort": "stars", "order": "desc", "per_page": PER_PAGE}
+    incomplete = False  # どれかのページが途中で切られたか
     for page in range(1, MAX_SEARCH_RESULTS // PER_PAGE + 1):
         data = client.search("repositories", {**params, "page": page})
         names = parse_search(data)
         repos.update(dict.fromkeys(names))
-        incomplete = bool(data.get("incomplete_results"))
-        if incomplete:
+        if data.get("incomplete_results"):
+            incomplete = True
             name = topic or "（トピックなし）"
             log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", name, page)
         total = min(data["total_count"], MAX_SEARCH_RESULTS)

@@ -1,7 +1,7 @@
 """設定のトピックで GitHub Search を実際に呼ぶ（マーカー network。CI では流さない）。
 
-収集用トークン（GITHUB_TOKEN）があるときだけ流す。トピックの数だけ Search を使うので、
-続けて何度も流さない。
+収集用トークン（GITHUB_TOKEN）があるときだけ流す。トピックを付けない検索で全件を取れれば
+その検索だけ、取れなければトピックの数だけ Search を使うので、続けて何度も流さない。
 """
 
 from datetime import datetime

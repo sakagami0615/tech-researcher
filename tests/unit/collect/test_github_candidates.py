@@ -107,12 +107,17 @@ def test_complete_search_without_topic_skips_topic_searches(limits):
     assert ("no/topic", ("search",)) in {(c.repo, c.routes) for c in result.candidates}
 
 
-@pytest.mark.parametrize("reason", ["over_1000", "incomplete", "failed"])
+@pytest.mark.parametrize("reason", ["over_1000", "incomplete", "incomplete_first", "failed"])
 def test_topic_searches_complement_search_without_topic(limits, reason, caplog):
     full = [f"o/r{i}" for i in range(100)]
     without = {
         "over_1000": [page(full, total=1500)] * 10,
         "incomplete": [{**page(["no/topic"]), "incomplete_results": True}],
+        # 1ページ目だけ切られ、2ページ目で終わる
+        "incomplete_first": [
+            {**page(full, total=150), "incomplete_results": True},
+            page(["o/last"], total=150),
+        ],
         "failed": [FetchError("再試行を使い切った：HTTP 502", 3, 502)],
     }[reason]
     fake = FakeSearch({"*": without, "llm": [page(["topic/llm"])], "mcp": [page([])]})
@@ -120,7 +125,7 @@ def test_topic_searches_complement_search_without_topic(limits, reason, caplog):
     result = collect_candidates(settings, T, [], client(limits, fake), None)
     assert "topic/llm" in {c.repo for c in result.candidates}
     assert [q["q"].split()[0] for q in fake.queries][-2:] == ["topic:llm", "topic:mcp"]
-    if reason == "incomplete":
+    if reason.startswith("incomplete"):
         assert "途中で切られた" in caplog.text
 
 

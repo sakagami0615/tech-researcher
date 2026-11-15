@@ -241,6 +241,33 @@ def test_redirect_outside_api_is_refused(limits, location):
     assert len(fetch.calls) == 1
 
 
+@pytest.mark.parametrize(
+    "path, location",
+    [
+        ("/a", "/x y"),  # パスに空白
+        ("/a", "/x?q=a b"),  # クエリに空白
+        ("/a", "/search/repositories?q=x"),  # REST から Search へ
+        ("/search/repositories", "/repos/a/b"),  # Search から REST へ
+    ],
+)
+def test_unusable_redirect_is_refused(limits, path, location):
+    fetch = FakeFetch(redirect(location))
+    api = client(limits, fetch)
+    with pytest.raises(GitHubError) as e:
+        api.search("repositories", {}) if path.startswith("/search/") else api.get(path)
+    assert e.value.category == github_api.REDIRECT
+    assert len(fetch.calls) == 1
+
+
+def test_search_redirect_waits_for_interval(limits):
+    clock = Clock()
+    fetch = FakeFetch(redirect("/search/repositories?q=y"), {})
+    api = client(replace(limits, github_search_per_minute=25), fetch, clock=clock)
+    api.search("repositories", {"q": "x"})
+    assert clock.sleeps == [pytest.approx(2.4)]
+    assert api.search_calls == 2
+
+
 def test_too_many_redirects(limits):
     fetch = FakeFetch(*[redirect(f"/r{i}") for i in range(github_api.MAX_REDIRECTS + 1)])
     with pytest.raises(GitHubError) as e:

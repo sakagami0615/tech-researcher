@@ -8,6 +8,8 @@ routes_json は、その測定の候補を見つけた経路（search・mention�
 import sqlite3
 from datetime import date, timedelta
 
+from tech_researcher.config import GITHUB_REPO_NAME
+
 # 監視リストに数える経路。watch だけの行は数えない（数えると、一度候補になったリポジトリが
 # 毎日の測定で行を足し続け、監視リストから外れないため）
 WATCH_SOURCE_ROUTES = ("search", "mention")
@@ -19,6 +21,7 @@ def recent_repos(conn: sqlite3.Connection, target: date, days: int) -> tuple[str
 
     target の日の行は見ない。同じ対象の再実行・ドライランで、最初の実行が書いた行によって
     監視リストが変わらないようにするため。
+    `owner/repo` の形でない行は返さない（API のパスに使うため）。
     """
     if days < 1:
         raise ValueError(f"days は1以上にする: {days}")
@@ -33,4 +36,5 @@ def recent_repos(conn: sqlite3.Connection, target: date, days: int) -> tuple[str
             " ORDER BY s.repo",
             (start.isoformat(), target.isoformat(), *WATCH_SOURCE_ROUTES),
         )
+        if GITHUB_REPO_NAME.fullmatch(repo)
     )
