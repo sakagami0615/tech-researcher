@@ -13,7 +13,7 @@
 - 見つからないリポジトリ（消えた・非公開になった・リポジトリでない URL）は missing、取れなかった
   リポジトリは unmeasured に分け、記録しない。どちらも前日比を判定できないだけになる
 - 部分失敗：ある問い合わせが失敗しても、ほかの問い合わせの分は残す（error に最初の失敗）。
-  認証・レート制限・この実行の上限の失敗では、残りの問い合わせを出さない
+  認証・権限不足（403）・レート制限・この実行の上限の失敗では、残りの問い合わせを出さない
 - 日次だけで測る。週次は日次の増分を合計するので測らない（3.4）。ドライランは書かない
 - Star の履歴を取る API（Stargazers の一覧）は使わない（D-13）
 """
@@ -45,7 +45,9 @@ _FIELDS = "nameWithOwner stargazerCount createdAt"
 _ERROR_TYPE = re.compile(r"[A-Z_]{1,40}")
 # Star 数の上限。GitHub の GraphQL の Int は32ビットなので、それを超える値は応答の崩れとみなす
 _MAX_STARS = 2**31 - 1
-# これらの失敗では、次の問い合わせも同じく失敗するのでやめる（FORBIDDEN はトークンの権限不足など）
+# これらの失敗では、次の問い合わせも同じく失敗するのでやめる。GraphQL の 403 は問い合わせ全体への
+# 拒否（トークンの権限不足など）なので止める。Search の 403 は検索ごとにありうるので、候補集めでは
+# 止めない
 _STOP_CATEGORIES = frozenset(
     {github_api.AUTH, github_api.FORBIDDEN, github_api.RATE_LIMITED, github_api.BUDGET}
 )

@@ -272,7 +272,7 @@ def test_failed_batch_keeps_the_others(limits, conn):
          github_api.RATE_LIMITED),
     ],
 )  # fmt: skip
-def test_auth_or_rate_limit_failure_stops_the_rest(limits, conn, outcome, category):
+def test_stopping_failures_skip_the_rest(limits, conn, outcome, category):
     fetch = FakeFetch(answer(node("a/a", 1)), outcome)
     result = measure_stars(
         [cand("a/a"), cand("b/b"), cand("c/c"), cand("d/d")], make_client(limits, fetch), DAILY,
@@ -496,3 +496,14 @@ def test_row_written_first_by_another_run_is_returned(limits, conn, monkeypatch)
         now=Clock(),
     )  # fmt: skip
     assert [s.stars_total for s in result.snapshots] == [3]
+
+
+def test_measured_at_is_kept_to_the_second(limits, conn):
+    """返す測定時刻は DB に残す精度（秒）にそろえ、DB の値と一致する。"""
+    fetch = FakeFetch(answer(node("a/b", 1)))
+    result = measure_stars(
+        [cand("a/b")], make_client(limits, fetch), DAILY, conn, write=True, batch_size=100,
+        now=lambda: AT.replace(microsecond=123456),
+    )  # fmt: skip
+    assert result.snapshots[0].measured_at == AT
+    assert load_star_snapshot(conn, DAILY.key)["a/b"] == result.snapshots[0]
