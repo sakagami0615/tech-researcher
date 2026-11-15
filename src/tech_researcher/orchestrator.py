@@ -48,6 +48,7 @@ from tech_researcher.config import Config, ConfigError, StageLimits, load_config
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import JST, Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
+from tech_researcher.stages.collect import collect_failure
 from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
 from tech_researcher.stages.daily import RESULTS as VERIFY_RESULTS
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
@@ -101,7 +102,8 @@ class Busy(Exception):
 class Summary:
     """bin/tr-run が標準出力に出す定型の要約（structure.md 3.2）。値はすべてコードが作る。
 
-    result：report（レポート）・rejected（不合格）・error（実行エラー）・dry_run（ドライラン）。
+    result：report（レポート）・rejected（不合格）・error（実行エラー）・dry_run（ドライラン）・
+    observed（D-13 の観測。observe.py）。
     failed_sources は設定ファイルの表示名。Issue の番号と URL は ⑤ を実装する Issue で足す。
     """
 
@@ -259,10 +261,10 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
         return _usage_error(e, environ)
 
 
-def _usage_error(e: Exception, environ: Mapping[str, str]) -> int:
+def _usage_error(e: Exception, environ: Mapping[str, str], prog: str = "tr-run") -> int:
     # 誤って秘匿値を設定した変数の値などが、そのまま cron の出力に残らないようにする
     scanner = SecretScanner(known_secret_values(environ))
-    print(scanner.mask(f"tr-run: {e}"), file=sys.stderr)
+    print(scanner.mask(f"{prog}: {e}"), file=sys.stderr)
     return EXIT_USAGE
 
 
@@ -332,8 +334,11 @@ def _new_job(
     dry_run: bool,
     compose_env: Mapping[str, str],
     environ: Mapping[str, str],
+    *,
+    observation: bool = False,
 ) -> Job:
-    files = RunFiles(data, new_run_id(datetime.now(JST), dry_run=dry_run))
+    run_id = new_run_id(datetime.now(JST), dry_run=dry_run, observation=observation)
+    files = RunFiles(data, run_id)
     days = config.daily_period_days if cadence == "daily" else config.weekly_period_days
     target = _TARGETS[cadence](files.started_on, days)
     scanner = SecretScanner(known_secret_values(environ))
@@ -348,9 +353,10 @@ def _new_job(
     )
 
 
-def supervise(job: Job) -> int:
+def supervise(job: Job, run: Callable[[Job], int] | None = None) -> int:
     """ジョブを子プロセスで動かし、ジョブ全体の上限を超えたら止める（structure.md 6.4）。
 
+    run は子プロセスで動かすジョブの本体（既定は run_job。観測は observe.py の本体）。
     子プロセスは自分のプロセスグループを持ち、止めるときはグループごと止める（compose の CLI も）。
     コンテナは CLI を止めても動き続けるので、ラベルで消す。親が受けた SIGINT・SIGTERM・SIGHUP も
     子プロセスのグループに伝える。子プロセスが要約を出せずに終わったときは、親が代わりに出す。
@@ -364,7 +370,7 @@ def supervise(job: Job) -> int:
             os.setpgid(0, 0)
             # 止められたら SystemExit にし、run_files の後片付け（一次情報の本文を消す）を走らせる
             signal.signal(signal.SIGTERM, _exit_on_signal)
-            code = run_job(job)
+            code = (run or run_job)(job)
         except BaseException:
             pass  # 例外の中身（外部由来の文を含みうる）は出さない。親が実行エラーの要約を出す
         finally:
@@ -467,10 +473,8 @@ def _run_stages(job: Job) -> Summary:
     if collected is None:
         return job.summary("error", failed_stage="collect", error_category=category)
     fields = {"items": collected["items"], "failed_sources": collected["failed_sources"]}
-    if len(collected["failed_sources"]) == collected["sources"]:
-        # 1つも取得できなかった日は、0件のレポートにせず実行エラーにする（US-E6-03・US-E6-04）。
-        # 有効な情報源がない（設定の誤り）ときも同じに扱う
-        category = "no_sources" if collected["sources"] == 0 else "all_sources_failed"
+    category = collect_failure(collected["sources"], len(collected["failed_sources"]))
+    if category is not None:  # 1つも取得できなかった日（US-E6-03・US-E6-04）
         job.log.write("collect", "failure", error_category=category)
         return job.summary("error", failed_stage="collect", error_category=category, **fields)
     if job.cadence == "weekly":

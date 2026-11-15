@@ -145,6 +145,8 @@ class SourceResult:
     failed_parts は、取れなかった部分（レポート末尾の「取得できなかった情報源」に出す元。
     US-E6-03）。error が None なら情報源としては取れていて、一部だけが取れなかった。
     error があるとき（すべての部分が取れなかったとき）も内訳として入れる。
+    error_category は失敗の分類（source_fetches の error_category。data-model.md 3.4）で、
+    分けていない収集処理は None（保存するときに fetch_failed にする）。
     """
 
     source_id: str
@@ -152,3 +154,4 @@ class SourceResult:
     attempts: int
     error: str | None = None
     failed_parts: tuple[FailedPart, ...] = ()
+    error_category: str | None = None

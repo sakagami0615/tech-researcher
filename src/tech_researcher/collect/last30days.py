@@ -101,7 +101,7 @@ def collect_last30days(
             error = f"last30days.subqueries に {SOURCE_NAMES[sid]} を使う計画がない"
             results[sid] = SourceResult(sid, (), 0, error)
         elif sid == "github_search" and not github_token:
-            results[sid] = SourceResult(sid, (), 0, "収集用トークンがない")
+            results[sid] = SourceResult(sid, (), 0, "収集用トークンがない", error_category="auth")
     source_ids = [sid for sid in enabled if sid not in results]
     if source_ids:
         results.update(_collect(config, period, root, source_ids, github_token, run, now))

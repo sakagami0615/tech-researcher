@@ -3,6 +3,11 @@
 統括スクリプト（#16）が `docker compose run --rm -T worker <段階> …` で呼ぶ（D-04）。段階は
 `collect`（①）と `verify`（③、日次だけ）。実行 ID と
 実行のフォルダは統括スクリプトが用意し、段階は実行 ID の日付から対象と期間を決める。
+① は本番の DB を開き、本番の実行では runs の開始を書いてから、取得結果と収集項目を書く。
+ドライランは DB を読み取り専用で開き、何も書かない（D-22）。① で実行エラーと分かった本番の実行
+（すべての情報源の取得に失敗した日と、① の例外）は、runs を failed と終了時刻で閉じる。D-13 の観測の
+実行（実行 ID の先頭が obs-。日次の ① だけ）は、それ以外なら observed で閉じる。通常の日次・週次の
+② 以降の終わりは、その失敗の分岐と ⑤ を実装する Issue で書く。
 標準出力には、コードが作る要約（件数・情報源の ID・結果の種別）だけを JSON で出す。外部由来の文と
 例外の中身は出さず、ログ（秘匿情報をマスクする）にだけ残す（structure.md 3.2・7.3）。
 相対パスは作業ディレクトリ（ホストではリポジトリ、worker では /app）から解く。
@@ -15,15 +20,21 @@
 import argparse
 import json
 import os
+import sqlite3
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing, nullcontext, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 from tech_researcher.config import Config, ConfigError, load_config
+from tech_researcher.db.readonly import open_readonly
+from tech_researcher.db.runs import finish_run, start_run
+from tech_researcher.db.schema import open_db
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir
-from tech_researcher.stages.collect import run_collect
+from tech_researcher.stages.collect import collect_failure, run_collect
 from tech_researcher.stages.daily import run_verify, write_daily_input
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
@@ -78,10 +89,64 @@ def _run(
 ) -> dict:
     if args.stage == "verify":
         return run_verify(config, target, files.run_id, files.dir, log, scanner)
-    summary = run_collect(config, target, files.dir, log)
-    if args.cadence == "daily":  # 週次の ② の入力は、週次の Issue で足す
-        write_daily_input(config, target, files.dir)
+    conn = open_readonly(files.db) if files.dry_run else open_db(files.db)
+
+    def daily_input() -> None:
+        if args.cadence == "daily" and not files.observation:  # 週次の ② の入力は週次の Issue で
+            write_daily_input(config, target, files.dir)
+
+    with closing(conn) if conn is not None else nullcontext():
+        if files.dry_run:
+            summary = run_collect(config, target, files.dir, log, db=conn, write_db=False)
+            # 本番と同じく、実行エラーの日は ② に進まないので ② の入力を作らない
+            if collect_failure(summary["sources"], len(summary["failed_sources"])) is None:
+                daily_input()
+            return summary
+        assert conn is not None
+        start_run(conn, files.run_id, target, files.started_at)
+        return _collect(config, target, files, log, conn, daily_input)
+
+
+def _collect(
+    config: Config,
+    target: Target,
+    files: RunFiles,
+    log: RunLog,
+    conn: sqlite3.Connection,
+    then: Callable[[], None],
+) -> dict:
+    """本番の ①。① で実行エラーと分かったら、runs を failed（collect）で閉じる。
+
+    then は ① の続きの処理（日次の ② の入力を書く）で、その失敗も ① の例外として扱う。
+    1つも取得できなかった日（collect_failure）と、① の例外が実行エラーになる（統括スクリプトの
+    判定と同じ）。観測（obs-）は ① で終わるので、それ以外なら observed で閉じる。通常の日次・週次は
+    ② 以降に進むので、ここでは閉じない（② 以降の失敗と成功の終わりは、その分岐と ⑤ の Issue で
+    書く）。
+    """
+    try:
+        summary = run_collect(config, target, files.dir, log, db=conn, write_db=True)
+        category = collect_failure(summary["sources"], len(summary["failed_sources"]))
+        if category is None:  # 実行エラーの日は ② に進まないので、② の入力も作らない
+            then()
+    except Exception as e:
+        with suppress(Exception):  # 閉じられなくても、元の失敗を伝える（running のまま残る）
+            _finish(conn, files.run_id, type(e).__name__)
+        raise
+    if category is not None or files.observation:
+        _finish(conn, files.run_id, category)
     return summary
+
+
+def _finish(conn: sqlite3.Connection, run_id: str, category: str | None) -> None:
+    """① で終わる実行を閉じる。category があれば failed（collect）、なければ observed（観測）。"""
+    finish_run(
+        conn,
+        run_id,
+        "observed" if category is None else "failed",
+        datetime.now(UTC),
+        failed_stage=None if category is None else "collect",
+        error_category=category,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -105,6 +170,8 @@ def _prepare(
     args: argparse.Namespace, environ: Mapping[str, str]
 ) -> tuple[RunFiles, Config, Target]:
     files = RunFiles(data_dir(environ, Path.cwd()), args.run_id)
+    if files.observation and (args.stage, args.cadence) != ("collect", "daily"):
+        raise _UsageError("観測（obs-）の実行は日次の ① だけ")
     if not files.dir.is_dir():
         raise _UsageError(f"実行のフォルダがない（統括スクリプトが作る）: {files.dir}")
     config = load_config(CONFIG)

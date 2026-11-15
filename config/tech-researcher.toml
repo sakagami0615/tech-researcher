@@ -37,7 +37,7 @@ subqueries = [
 # new_repo_stars＝C、search_days＝D_search、search_min_stars＝C_search。値は PoC で調整する
 [sources.github_repos]
 enabled = true
-display_name = "GitHub"
+display_name = "GitHub（新着・急上昇）" # 取得できなかった情報源に出す名前。GitHub Search と分ける
 search_without_topic = true # トピックの付いていないリポジトリも拾う
 search_topics = [
   "llm", "ai-agent", "ai-agents", "mcp", "rag", "generative-ai", # 生成AI・LLM・AIエージェント

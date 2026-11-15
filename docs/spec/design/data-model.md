@@ -98,7 +98,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `star_growth` | Star の前日比の増分が A 以上で、上位 `N_report` 件 | 測定の時刻 | 対象日 6:00〜翌日 6:00 |
 
 - 公開が対象期間内の記事に HN の投稿もある場合は、`published` と `posted` の両方を持つ。投稿が期間内でも、公開が期間より前で急上昇の条件を満たさない記事は残さない（D-13）。この判定はコードが `events` を見て行う
-- 1つの収集項目が複数の出来事を持ちうるので配列にする。収集項目には、コードが「掲載の根拠とする出来事」を1つ選んで `inclusion_event` として持たせる。選ぶ優先順位は実装で決める（例：`published`・`released` → `new_repo` → `attention_spike` → `posted`）。D-13 の「載せた」には、掲載の根拠の順位によらず、急上昇・新規の出来事（`attention_spike`・`new_repo`）を `events` に持つ項目を数える
+- 1つの収集項目が複数の出来事を持ちうるので配列にする。収集項目には、コードが「掲載の根拠とする出来事」を1つ選んで `inclusion_event` として持たせる。選ぶのは、判定の窓（2.5）に入る出来事のうち、`published`・`released` → `new_repo` → `attention_spike` → `posted` の順で先のもの（同じ順位なら日時の早いもの。`src/tech_researcher/stages/collect_store.py`）。D-13 の「載せた」には、掲載の根拠の順位によらず、急上昇・新規の出来事（`attention_spike`・`new_repo`）を `events` に持つ項目を数える
 
 注目度（`attention[]` の1要素）：
 
@@ -216,6 +216,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `model` | TEXT | ② で使われたモデルの名前（Claude Code の出力の `modelUsage` から取る。複数あれば `,` でつなぐ）。② を呼ばなかった実行では空 |
 
 - `status` が `running` のまま残った行は、途中で止まった実行を表す。後片付けの処理は作らない
+- 実装での対応（`src/tech_researcher/cli.py`）：本番の実行（観測を含む）の開始の行は、① の worker が DB を開いて書く。`started_at` は実行 ID の開始時刻。① で実行エラーと分かった本番の実行（すべての情報源の取得に失敗した日・有効な情報源がない日（`all_sources_failed`・`no_sources`）と、① の例外（例外の型の名前））は、① の worker が `failed`（`failed_stage` は `collect`）と終了時刻で閉じる。観測（`obs-`）の実行は、それ以外なら ① の worker が `observed` で閉じる。上限で止められて worker が書けなかった実行は `running` のまま残る。通常の日次・週次の ② 以降の終わりは、日次の失敗の分岐（#41）・週次の統合（#47・#48）と ⑤ で書く（それまでは `running` のまま残る）。取得結果は、情報源の取得を終えるごとに書き、期間内に残った件数を ① の最後に書き直す（① が上限で止められても、それまでの取得の記録が残る）
 
 #### source_fetches
 
@@ -230,6 +231,11 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `fetched_at` | TEXT | 取得を終えた時刻 |
 
 - PK（`run_id`, `source_id`）。同じ実行の中の再試行は同じ行を更新する
+- 実装での対応（`src/tech_researcher/stages/collect_store.py`）
+  - 状態：失敗は `failed`、1件以上取れたら `ok`、0件なら `no_results`。取得しなかった情報源は `skipped`（週次の GitHub の新着・急上昇。Star 数は日次だけ測るため）。`error_category` は収集処理が付けた分類（last30days-skill・GitHub の分類など）で、付けていない収集処理（RSS・Qiita）の失敗は `fetch_failed`。想定外の例外は例外の型の名前
+  - `fetched_at` は、その情報源の取得を終えた時刻。HN と GitHub Search（last30days-skill）は1回の実行で集めるので同じ時刻
+  - GitHub の新着・急上昇（`source_id` は `github_repos`）は、候補集め（Search）と Star 数の測定（GraphQL）を1つの情報源として残す。`record_count` は Star 数を測った（同じ対象日の記録を使ったものを含む）リポジトリの数、`attempts` は Search と GraphQL の要求の回数の合計。1件でも測れれば `ok` とし、Search が回数の上限で止まった・一部の問い合わせが失敗したなどの部分的な失敗は、ログにだけ残す（測れた分で翌日の判定ができ、レポートの「取得できなかった情報源」に書くほどではないため）。測れたものがなく失敗があれば `failed`（分類は Search の失敗を先に取る）。候補がなければ `no_results`。`in_period_count` は、急上昇・新規の項目を足すまで（#37）0
+  - 取得しようとした情報源の数（`skipped` を除く）と、取得に失敗した数が同じなら、その実行は ① の実行エラー（`all_sources_failed`。有効な情報源がなければ `no_sources`）
 
 #### items
 
@@ -251,6 +257,11 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - UQ（`cadence`, `target`, `canonical_url`）。再試行・再実行は upsert で同じ行を更新する（3.7）
 - `hold_reason` を持たせるのは、D-13 の「注目が続いていることは、観測を DB に残して週次で扱う」のため。日次で AI に渡さない項目も、観測としては残す
 - 検索に使う列（対象・URL・掲載の根拠）だけを列にし、それ以外は JSON の列にする。要るときは SQLite の JSON 関数で引く
+- 実装での対応（`src/tech_researcher/stages/collect_store.py`）
+  - 書くのは期間で絞った後の収集項目。日次だけ書く。週次の items は、日次の items と合わせて作る週次の材料（3.8）を実装するときに書く
+  - 代表のタイトル・抜粋・公開日時：時刻まで分かる公開日時を持つ出典、なければ日付だけの公開日時を持つ出典、なければ最初の出典から取る（期間の判定と同じ順。2.5）。代表のタイトル・抜粋が空なら、ほかの出典の最初の空でない値を使う。`posted_at` は出典の中で最も早い投稿日時。一次情報の本文のハッシュ・文字数は、本文を持つ最初の出典から作る
+  - `kind`：`repo`（`github` を持つか、URL が `https://github.com/{owner}/{repo}` そのもの）→ `release`（出来事 `released` を持つか、GitHub のリリースのページ）→ `post`（GitHub の Issue・PR などの活動のページと、HN の投稿のページ）→ `article`（ほか）の順に当てる
+  - `hold_reason` は、急上昇・新規の掲載済みと前日の記事の除外（3.5）を足すまで空
 
 #### feed_snapshots
 
