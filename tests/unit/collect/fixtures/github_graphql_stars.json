@@ -1,0 +1,23 @@
+{
+  "data": {
+    "r0": {
+      "nameWithOwner": "anthropics/claude-code",
+      "stargazerCount": 41234,
+      "createdAt": "2025-02-22T17:41:21Z"
+    },
+    "r1": null,
+    "r2": {
+      "nameWithOwner": "openai/codex",
+      "stargazerCount": 35012,
+      "createdAt": "2025-04-13T22:44:51Z"
+    }
+  },
+  "errors": [
+    {
+      "type": "NOT_FOUND",
+      "path": ["r1"],
+      "locations": [{"line": 1, "column": 170}],
+      "message": "Could not resolve to a Repository with the name 'gone-owner/gone-repo'."
+    }
+  ]
+}

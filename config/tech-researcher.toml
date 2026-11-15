@@ -252,8 +252,8 @@ last30days_retries = 1
 github_rest_calls = 1500
 github_search_calls = 100
 github_search_per_minute = 25
-github_graphql_calls = 50
-github_graphql_batch = 100
+github_graphql_calls = 50   # Star 数の問い合わせの回数（再試行を含む）
+github_graphql_batch = 100  # 1回の問い合わせでまとめるリポジトリの数（1〜100）
 github_write_calls = 20
 qiita_calls = 30
 # ⑤ の GitHub への書き込みと Projects の登録は、HTTP の上限（応答30秒・再試行2回）を使う

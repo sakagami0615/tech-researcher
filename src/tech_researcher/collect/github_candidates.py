@@ -27,13 +27,12 @@ from tech_researcher.collect.github_api import GitHubClient, GitHubError
 from tech_researcher.collect.records import Record
 from tech_researcher.collect.urls import normalize_url
 from tech_researcher.config import GITHUB_REPO_NAME, GitHubRepos
-from tech_researcher.db.star_snapshots import recent_repos
+from tech_researcher.db.star_snapshots import ROUTES, recent_repos
 
 log = logging.getLogger(__name__)
 
 # 監視リストに入れる、過去に候補になったリポジトリの期間（日）。D-13 の例の値
 WATCH_DAYS = 30
-ROUTES = ("search", "mention", "watch")
 PER_PAGE = 100  # Search API の1ページの上限
 MAX_SEARCH_RESULTS = 1000  # Search API が1つの検索で返す上限
 # github.com の1つめのパスがリポジトリの持ち主でないもの（GitHub の機能のページ）。

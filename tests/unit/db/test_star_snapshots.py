@@ -1,10 +1,19 @@
 import json
-from datetime import date, timedelta
+import sqlite3
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
-from tech_researcher.db.schema import open_db
-from tech_researcher.db.star_snapshots import recent_repos
+from tech_researcher.db import star_snapshots
+from tech_researcher.db.readonly import open_readonly
+from tech_researcher.db.schema import open_db, transaction
+from tech_researcher.db.star_snapshots import (
+    StarSnapshot,
+    load_star_snapshot,
+    recent_repos,
+    record_star_snapshots,
+)
 
 T = date(2026, 11, 3)
 
@@ -84,3 +93,126 @@ def test_routes_json_must_be_an_array(conn, routes):
 def test_days_must_be_positive(conn):
     with pytest.raises(ValueError):
         recent_repos(conn, T, 0)
+
+
+AT = datetime(2026, 11, 3, 21, 0, 5, tzinfo=UTC)  # 11-04 6:00 JST の実行（対象日 11-03）
+CREATED = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+
+
+def snap(repo, stars, at=AT, routes=("search",)):
+    return StarSnapshot(repo, stars, CREATED, at, routes)
+
+
+def test_snapshots_are_recorded_and_loaded(conn):
+    assert record_star_snapshots(conn, T, [snap("a/b", 10, routes=("search", "watch"))]) == 1
+    row = conn.execute("SELECT * FROM star_snapshots").fetchone()
+    assert tuple(row) == (
+        "a/b",
+        "2026-11-03",
+        "2026-11-03T21:00:05Z",
+        10,
+        "2026-10-01T12:00:00Z",
+        '["search", "watch"]',
+    )
+    assert load_star_snapshot(conn, T) == {"a/b": snap("a/b", 10, routes=("search", "watch"))}
+    assert load_star_snapshot(conn, T)
+
+
+def test_remeasuring_the_same_target_keeps_the_first_measurement(conn):
+    record_star_snapshots(conn, T, [snap("a/b", 10)])
+    later = AT + timedelta(hours=3)
+    assert record_star_snapshots(conn, T, [snap("a/b", 99, later), snap("c/d", 5, later)]) == 1
+    loaded = load_star_snapshot(conn, T)
+    assert (loaded["a/b"].stars_total, loaded["a/b"].measured_at) == (10, AT)
+    assert loaded["c/d"].stars_total == 5
+
+
+def test_same_repo_and_measured_at_on_another_target_is_ignored(conn):
+    """（リポジトリ、測定時刻）でも一意にする（D-13）。"""
+    record_star_snapshots(conn, T, [snap("a/b", 10)])
+    assert record_star_snapshots(conn, T + timedelta(days=1), [snap("a/b", 11)]) == 0
+    assert load_star_snapshot(conn, T + timedelta(days=1)) == {}
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO star_snapshots VALUES ('a/b', '2026-11-04', '2026-11-03T21:00:05Z',"
+            " 1, '2026-10-01T12:00:00Z', '[]')"
+        )
+
+
+def test_previous_day_without_records(conn):
+    """前日の記録がない日（運用の初日など）は、前日の測定が空になる（3.5 の丸ごとない日）。"""
+    record_star_snapshots(conn, T, [snap("a/b", 10)])
+    yesterday = T - timedelta(days=1)
+    assert load_star_snapshot(conn, yesterday) == {}
+    assert not load_star_snapshot(conn, yesterday)
+
+
+def test_previous_day_without_a_repo(conn):
+    """前日に記録があっても、初めて見るリポジトリの前日の行はない。"""
+    yesterday = T - timedelta(days=1)
+    record_star_snapshots(conn, yesterday, [snap("a/b", 8, AT - timedelta(days=1))])
+    record_star_snapshots(conn, T, [snap("a/b", 10), snap("new/repo", 3)])
+    previous = load_star_snapshot(conn, yesterday)
+    assert load_star_snapshot(conn, yesterday)
+    assert "new/repo" not in previous
+    assert load_star_snapshot(conn, T)["a/b"].stars_total - previous["a/b"].stars_total == 2
+
+
+def test_broken_rows_are_not_loaded(conn):
+    insert(conn, "../x", T)
+    insert(conn, "a/b", T, routes=("trending",))
+    insert(conn, "c/d", T, n=1)
+    assert list(load_star_snapshot(conn, T)) == ["c/d"]
+
+
+def test_failed_write_leaves_nothing(conn):
+    class Broken:
+        def __iter__(self):
+            yield snap("a/b", 1)
+            raise RuntimeError("途中で失敗")
+
+    with pytest.raises(RuntimeError):
+        record_star_snapshots(conn, T, Broken())
+    assert not load_star_snapshot(conn, T)
+
+
+def test_cannot_be_called_inside_a_transaction(conn):
+    with pytest.raises(sqlite3.OperationalError), transaction(conn):
+        record_star_snapshots(conn, T, [snap("a/b", 1)])
+
+
+def test_readonly_db_cannot_be_written(tmp_path):
+    path = tmp_path / "tech-researcher.sqlite3"
+    open_db(path).close()
+    ro = open_readonly(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            record_star_snapshots(ro, T, [snap("a/b", 1)])
+    finally:
+        ro.close()
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: snap("A/B", 1),
+        lambda: snap("a/b", -1),
+        lambda: snap("a/b", 1, routes=()),
+        lambda: snap("a/b", 1, routes=("watch", "search")),
+        lambda: snap("a/b", 1, routes=("search", "search")),
+        lambda: snap("a/b", 1, routes=("trending",)),
+        lambda: StarSnapshot("a/b", 1, datetime(2026, 1, 1), AT, ("search",)),
+        lambda: StarSnapshot("a/b", 1, CREATED, datetime(2026, 1, 1), ("search",)),
+    ],
+)
+def test_invalid_snapshots_are_refused(make):
+    with pytest.raises(ValueError):
+        record_star_snapshots(None, T, [make()])
+
+
+def test_constraint_violations_other_than_uniqueness_are_not_ignored(conn, monkeypatch):
+    """CHECK の違反（routes_json が配列でない）は黙って捨てずに失敗にする。"""
+    monkeypatch.setattr(star_snapshots, "json", SimpleNamespace(dumps=lambda _: "{}"))
+    with pytest.raises(sqlite3.IntegrityError):
+        record_star_snapshots(conn, T, [snap("a/b", 1)])
+    assert load_star_snapshot(conn, T) == {}

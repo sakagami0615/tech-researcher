@@ -1,13 +1,14 @@
-"""GitHub の REST API の共通の取得処理（D-05・D-21、structure.md 6.3・6.5）。
+"""GitHub の REST API・GraphQL API の共通の取得処理（D-05・D-21、structure.md 6.3・6.5）。
 
-GitHub の情報源（リポジトリの候補集め、Releases・README など）から共通に使う。
+GitHub の情報源（リポジトリの候補集め、Star 数の測定、Releases・README など）から共通に使う。
 
 - トークン：収集用トークンを worker の環境変数 `GITHUB_TOKEN` から読み（D-05）、
   `Authorization: Bearer` で付ける。値はログ・例外のメッセージに出さない。要求の先は
   `https://api.github.com` に固定し、リダイレクトの先には送らない（http.fetch の headers）
 - 利用量：1回の実行の中で、REST は limits.github_rest_calls 回、Search は
   limits.github_search_calls 回まで（再試行も数える）。Search は1分 limits.github_search_per_minute
-  回の間隔をあけて出す。上限に達したら要求を出さずに失敗にする（structure.md 6.5）
+  回の間隔をあけて出す。GraphQL は limits.github_graphql_calls 回まで。上限に達したら要求を
+  出さずに失敗にする（structure.md 6.5）
 - 再試行：http.fetch に任せる（タイムアウト・接続の失敗・429・5xx。ほかの 4xx はしない）
 - エラーの分類：source_fetches の error_category（data-model.md 3.4）に使う短い語にする
 
@@ -29,6 +30,7 @@ from tech_researcher.config import Limits
 
 API_ROOT = "https://api.github.com"
 API_VERSION = "2022-11-28"
+GRAPHQL_PATH = "/graphql"
 TOKEN_ENV = "GITHUB_TOKEN"  # 収集用トークン（D-05）
 # たどるリダイレクトの状態コードと回数の上限
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
@@ -55,6 +57,7 @@ NETWORK = "network"
 BUDGET = "budget"  # この実行の利用量の上限に達した
 REDIRECT = "redirect"  # API の外へのリダイレクト、またはリダイレクトが多すぎる
 INVALID_RESPONSE = "invalid_response"
+GRAPHQL = "graphql_error"  # GraphQL の応答の errors（問い合わせ全体の誤り）
 
 
 class GitHubError(Exception):
@@ -85,7 +88,7 @@ def collect_token(environ: Mapping[str, str] = os.environ) -> str | None:
 
 
 class GitHubClient:
-    """GitHub の REST API の GET。1回の実行の中で使った回数を数える。
+    """GitHub の REST API の GET と GraphQL API の POST。1回の実行の中で使った回数を数える。
 
     token が None なら認証なしで要求する（GitHub の上限は小さくなる。structure.md 6.2）。
     fetch_url・clock・sleep はテストで差し替える。
@@ -114,6 +117,7 @@ class GitHubClient:
         self._sleep = sleep
         self.rest_calls = 0  # Search 以外の REST の要求の回数（再試行を含む）
         self.search_calls = 0  # Search の要求の回数（再試行を含む）
+        self.graphql_calls = 0  # GraphQL の要求の回数（再試行を含む）
         self._last_search: float | None = None
 
     @property
@@ -158,6 +162,42 @@ class GitHubClient:
         self.search_calls += used
         self._last_search = self._clock()
         return data
+
+    def graphql(self, query: str, variables: Mapping[str, Any]) -> Any:
+        """GraphQL API に POST で問い合わせ、応答の JSON を返す（errors の扱いは呼ぶ側）。
+
+        GraphQL は認証なしでは使えないので、トークンがなければ要求を出さずに AUTH の失敗にする。
+        POST だが、読み取りの問い合わせだけを送るので、http.fetch の再試行に任せてよい。
+        リダイレクトはたどらない（GraphQL の入口は1つで、転送される理由がないため）。
+        """
+        if not self.authenticated:
+            raise GitHubError(f"{GRAPHQL_PATH}：収集用トークンがない", AUTH, 0)
+        left = self._limits.github_graphql_calls - self.graphql_calls
+        if left < 1:
+            raise GitHubError(f"{GRAPHQL_PATH}：この実行の要求の上限に達した", BUDGET, 0)
+        body = json.dumps({"query": query, "variables": dict(variables)}).encode()
+        try:
+            response = self._fetch(
+                API_ROOT + GRAPHQL_PATH,
+                replace(
+                    self._limits, http_retry_waits_s=self._limits.http_retry_waits_s[: left - 1]
+                ),
+                headers={**self._headers, "Content-Type": "application/json"},
+                sleep=self._sleep,
+                follow_redirects=False,
+                data=body,
+            )
+        except FetchError as e:
+            self.graphql_calls += e.attempts
+            category = REDIRECT if e.status in _REDIRECTS else classify(e)
+            message = f"{GRAPHQL_PATH}：{category}（{e}）"
+            raise GitHubError(message, category, e.attempts, e.status) from e
+        self.graphql_calls += response.attempts
+        try:
+            return json.loads(response.body)
+        except (ValueError, RecursionError) as e:  # 入れ子が深すぎる JSON は RecursionError
+            message = f"{GRAPHQL_PATH}：応答が JSON でない"
+            raise GitHubError(message, INVALID_RESPONSE, response.attempts) from e
 
     def _request(
         self,

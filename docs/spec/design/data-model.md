@@ -271,11 +271,12 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `created_at` | TEXT | リポジトリの作成日時（新規の判定用） |
 | `routes_json` | TEXT | その測定の候補を見つけた経路の配列（`search`・`mention`・`watch`。D-13。JSON の配列であることを CHECK で確かめる）。監視リストの判定と、PoC での経路ごとの件数に使う |
 
-- PK（`repo`, `target`）、UQ（`repo`, `measured_at`）。D-13 の「（リポジトリ、測定時刻）で一意」を満たしたうえで、同じ対象日の測り直しは `INSERT OR IGNORE` で最初の測定を残す。再実行が遅い時刻に動いても、6:00 の測定どうしの差が崩れないため
+- PK（`repo`, `target`）、UQ（`repo`, `measured_at`）。D-13 の「（リポジトリ、測定時刻）で一意」を満たしたうえで、同じ対象日の測り直しは `INSERT ... ON CONFLICT DO NOTHING` で最初の測定を残す（一意制約の衝突だけを無視し、CHECK・NOT NULL の違反は失敗にする）。再実行が遅い時刻に動いても、6:00 の測定どうしの差が崩れないため
 - 増分は「T の行 − T−1 の行」。T−1 の行がないリポジトリは記録だけ行う（D-13）。T−1 の行が1件もない日は、ヘッダに定型文を出す（report-templates.md 1.6）
 - 週次は日次の増分を合計して判定する（D-13）ので、週次の実行は書かない
 - 監視リスト（過去に候補になったリポジトリ）は「直近30日に、`routes_json` に `search` か `mention` を持つ行があるリポジトリ」で引く。別のテーブルは作らない。監視リストの経路（`watch`）だけの行を数えると、監視リストのリポジトリを毎日測るたびに行ができ、一度候補になったリポジトリがいつまでも外れないため
 - 実装での対応（`src/tech_researcher/db/star_snapshots.py`・`collect/github_candidates.py`）：直近30日は対象日 T の前の30日（T−30〜T−1）とし、T の行は見ない。同じ対象の再実行・ドライランで、最初の実行が書いた行によって監視リストが変わらないようにするため。言及元は、言及したレコードがまとまる収集項目の URL とする（それがリポジトリ自身の URL なら、レコード自身の URL）
+- 実装での対応（`collect/github_stars.py`）：候補を `limits.github_graphql_batch` 件ずつ、1回の GraphQL の問い合わせに別名でまとめ、名前は変数で渡す。`repo` は GitHub が返す `nameWithOwner`（小文字）とし、名前を変えたリポジトリは新しい名前で残す（古い名前と新しい名前がどちらも候補なら1行にまとめ、経路を合わせる）。`measured_at` は問い合わせの応答を受けた時刻で、同じ問い合わせのリポジトリは同じ時刻になる。見つからないリポジトリ（GraphQL の `NOT_FOUND`）と、失敗で測れなかったリポジトリは行を残さない（翌日は前日の行がないので記録だけになる）。ある問い合わせの失敗では止めず、ほかの問い合わせの分は残す。認証・権限不足（HTTP 403。トークンが変わらない限り次の問い合わせも同じになる）・レート制限・この実行の上限の失敗では、残りの問い合わせを出さない。同じ対象日の再実行・ドライランでは、対象日の行がある候補は問い合わせずにその値を使い、行のない候補だけを測る（再実行が失敗しても、最初の実行で残した値で判定できる。古い名前だけが候補で、記録が新しい名前の行だけのときは、問い合わせ直し、それが失敗すればその候補は測れなかったものになる。名前の変更と再実行の失敗が重なるときだけなので受け入れる）
 
 #### reports
 
@@ -356,7 +357,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | source_fetches | `run_id`, `source_id` | 更新 |
 | items | `cadence`, `target`, `canonical_url` | upsert。同じ対象の再実行でも行は増えない。日次で AI に渡すのは、その実行で更新した行（`last_run_id` が今回）だけ |
 | feed_snapshots | `source_id`, `target`, `canonical_url` | 同じ（情報源、対象日）の行がすでにあれば書かない（最初に成功した取得を残す） |
-| star_snapshots | `repo`, `target` | `INSERT OR IGNORE`（最初の測定を残す） |
+| star_snapshots | `repo`, `target` | `INSERT ... ON CONFLICT DO NOTHING`（最初の測定を残す） |
 | reports・report_entries | `run_id`（と `entry_no`） | 同じ実行の中の ③ の再試行は置き換え。別の実行は別の行（生成履歴） |
 | issues（レポート） | 部分一意（`cadence`, `target`） | report-templates.md 4.3 の手順。DB に記録がなければ、ラベルと識別子で GitHub を探し、見つかれば DB を補う |
 | issues（不合格・実行エラー） | `run_id`, `kind` | 同じ実行の中の ⑤ の再試行は、行に番号があれば作らない |
@@ -390,6 +391,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
   - 実装での対応（runs・source_fetches・items）：items の（`cadence`, `target`, `canonical_url`）は一意制約の索引で足りるので、別に items の `canonical_url`（3.5 の対象をまたぐ照合）と runs の（`cadence`, `target`）（3.5 の前日の実行の取得記録）に索引を付ける
 - 月曜の日次・週次の重なりの制御。WAL と `busy_timeout` で足りるか、⑤ の Projects 登録を両方が同時に行わないよう実行の単位のロックが要るか（同じ Issue を Projects に2回追加したときの GitHub の応答は未確認）
 - star_snapshots のキーを `owner/repo` にするか GraphQL のノード ID にするか（初期案は `owner/repo`）
+  - 実装での対応：`owner/repo`（GitHub が返す `nameWithOwner` の小文字）。3.5 の「名前の変更をまたいで同じものとはみなさない」に合わせ、増分も名前で比べる
 - 不合格・実行エラー Issue を作る直前に、「作ろうとした」ことを issues に仮の状態で書くか
 - ドライランで DB を読み取り専用（`mode=ro`）で開くとき、WAL の `-shm` ファイルの扱いで開けないことがないか（実装の前に確かめる。開けない場合は `immutable` の指定などを検討する）
   - 確かめた結果（SQLite 3.53.1（開発機）と 3.46.1（worker のイメージ））：`mode=ro` で開ける。本番の実行が開いている間（WAL にだけある行がある）も、コミット済みの内容を読み、DB と `-wal` を書き換えない。`-wal`・`-shm` がなければ SQLite が空のものを作る（DB の中身は変わらず、次に本番が開いたときにそのまま使い、閉じるときに消える）。そのため DB のフォルダに書き込める必要があり、本番と同じ利用者（worker の `TR_UID`）で動かす。`immutable` は、ドライランの間に本番が書くと読み違えるので使わない
