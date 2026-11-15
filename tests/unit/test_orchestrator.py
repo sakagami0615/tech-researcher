@@ -409,6 +409,18 @@ def test_unresolvable_secrets_dir_is_rejected_without_path(host, capfd, monkeypa
     assert host.calls() == []
 
 
+def test_rejects_worker_env_compose_would_misread_before_start(host, capfd):
+    # compose は書式の誤りを値ごとエラー文に出すので、起動の前に行の番号だけを出して止める
+    (host.secrets / "worker.env").write_text(f'GITHUB_TOKEN=x\nTR_ISSUE_TOKEN="{WORKER_SECRET}\n')
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert "worker.env の 2 行目" in err
+    assert WORKER_SECRET not in err
+    assert host.calls() == []
+    assert not (host.data / "locks").exists()
+
+
 def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):
     other = os.geteuid() + 1
     monkeypatch.setattr(envfiles.os, "geteuid", lambda: other)

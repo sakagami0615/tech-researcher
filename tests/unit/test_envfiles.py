@@ -12,35 +12,55 @@ def test_secret_values_follow_name_rule(tmp_path):
     path = tmp_path / "worker.env"
     path.write_text(
         "# コメント\n"
-        "GITHUB_TOKEN=fake-collect\n"
-        "export TR_ISSUE_TOKEN = 'fake-issue'\n"
-        'TR_PROJECTS_PAT="fake-pat" # コメント\n'
-        "TR_YAML_TOKEN: 'fake-yaml'\n"  # compose は `名前: 値` も受け付ける
+        "  # 字下げしたコメント\n"
+        "\n"
+        "GITHUB_TOKEN=fake-collect\r\n"  # CRLF も読む
+        "TR_PROJECTS_PAT=fake-pat#not-comment\n"
         "TR_ISSUE_REPO=example/repo\n"  # 投稿先は秘匿値ではない（D-20）
-        "TR_EMPTY_TOKEN=\n"
-        "no equals sign\n"
-        # compose が値ごとエラー文に出す行。引用符が閉じないので、続く行も伏せる側に倒す
-        'TR_BROKEN_KEY="fake-unterminated\n'
-        "fake-after-broken\n",
+        "TR_EMPTY_TOKEN=\n",
         encoding="utf-8",
     )
-    values = set(secret_values(path))
-    expected = {"fake-collect", "fake-issue", "fake-pat", "fake-yaml"}
-    assert expected | {"fake-unterminated", "fake-after-broken"} <= values
-    assert "example/repo" not in values
-    assert not any("example" in v for v in values)
+    assert secret_values(path) == ["fake-collect", "fake-pat#not-comment", ""]
 
 
-def test_secret_values_handle_crlf_and_bad_bytes(tmp_path):
+@pytest.mark.parametrize(
+    ("line", "number"),
+    [
+        (
+            'TR_ISSUE_TOKEN="fake-quoted"',
+            2,
+        ),  # 引用符（閉じていないと compose が値ごとエラー文に出す）
+        ("TR_ISSUE_TOKEN='fake-quoted'", 2),
+        ("TR_ISSUE_TOKEN=${MISSING:?fake-in-message}", 2),  # compose が展開し、エラー文に出す
+        ("TR_ISSUE_TOKEN=fake\\escaped", 2),
+        ("TR_ISSUE_TOKEN=fake with space", 2),
+        ("TR_ISSUE_TOKEN = fake-spaced", 2),
+        ("export TR_ISSUE_TOKEN=fake-exported", 2),
+        ("TR_ISSUE_TOKEN: fake-yaml", 2),
+        ("fake-pasted/without+name=", 2),  # 名前のない行（compose は行ごとエラー文に出す）
+    ],
+)
+def test_rejects_lines_compose_would_misread(tmp_path, line, number):
     path = tmp_path / "worker.env"
-    path.write_bytes(b"GITHUB_TOKEN=fake-crlf\r\nX=\xff\r\n")
-    assert "fake-crlf" in secret_values(path)
+    path.write_text(f"GITHUB_TOKEN=fake-collect\n{line}\n", encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        secret_values(path)
+    message = str(e.value)
+    assert f"{number} 行目" in message
+    assert "fake" not in message and str(tmp_path) not in message
 
 
 def test_secret_values_error_has_no_path(tmp_path):
     with pytest.raises(ValueError) as e:
         secret_values(tmp_path)  # フォルダは読めない
     assert str(tmp_path) not in str(e.value)
+
+
+def test_rejects_non_utf8(tmp_path):
+    path = tmp_path / "worker.env"
+    path.write_bytes(b"GITHUB_TOKEN=\xff\n")
+    with pytest.raises(ValueError):
+        secret_values(path)
 
 
 def _secrets(tmp_path):
@@ -85,48 +105,3 @@ def test_remove_snapshot_only_removes_snapshot_folders(tmp_path):
     secrets = _secrets(tmp_path)
     remove_snapshot(secrets)
     assert (secrets / "worker.env").exists()
-
-
-def test_secret_values_include_multiline_quoted_value(tmp_path):
-    path = tmp_path / "worker.env"
-    path.write_text(
-        "TR_MULTI_KEY='fake-first\n  fake-second\nfake-third'\nTR_ISSUE_REPO=example/repo\n",
-        encoding="utf-8",
-    )
-    values = set(secret_values(path))
-    assert {"fake-first", "fake-second", "fake-third"} <= values
-    assert "example/repo" not in values  # 引用符が閉じた後の行は名前の規則に戻る
-
-
-def test_escaped_double_quote_does_not_close_value(tmp_path):
-    path = tmp_path / "worker.env"
-    path.write_text(
-        'TR_MULTI_KEY="fake-first\\"\nfake-second \\" x\nfake-third"\nTR_ISSUE_REPO=example/repo\n',
-        encoding="utf-8",
-    )
-    values = set(secret_values(path))
-    assert {'fake-second \\" x', "fake-third"} <= values
-    assert "example/repo" not in values
-
-
-def test_short_or_symbol_only_lines_are_not_secret_values(tmp_path):
-    # 二重引用符の JSON。`\"` で閉じたとみなさず、最後の行まで続きとして読む
-    path = tmp_path / "worker.env"
-    path.write_text(
-        'TR_SA_KEY="{\n  \\"type\\": \\"fake-service\\",\n  \\"x\\": 1\n}"\n'
-        "TR_ISSUE_REPO=example/repo\n",
-        encoding="utf-8",
-    )
-    values = set(secret_values(path))
-    assert any("fake-service" in v for v in values)
-    assert any('\\"x\\": 1' in v for v in values)
-    assert not {"{", "}", '"{', '}"', "1"} & values
-    assert "example/repo" not in values
-
-
-def test_escaped_single_quote_does_not_close_value(tmp_path):
-    path = tmp_path / "worker.env"
-    path.write_text("TR_KEY='fake-abc\\'\nfake-second'\nTR_ISSUE_REPO=example/repo\n")
-    values = set(secret_values(path))
-    assert "fake-second" in values
-    assert "example/repo" not in values

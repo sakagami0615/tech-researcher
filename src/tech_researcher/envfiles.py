@@ -3,15 +3,17 @@
 ホスト（統括スクリプト）で動く。
 
 worker.env の中身は、compose が env_file として worker のコンテナにだけ渡す（compose.yaml）。
-統括スクリプトは中身を環境変数として読み込まず、compose にも渡さない。ここで行うのは次の2つだけ。
+統括スクリプトは中身を環境変数として読み込まず、compose にも渡さない。ここで行うのは次のことだけ。
 
 - 起動の前に、置き場所と権限を確かめる（誤りなら ValueError。統括スクリプトは終了コード 2 にする）。
   メッセージにはパスも値も入れない
 - 1回の実行の間、compose に読ませる写し（`${TR_SECRETS_DIR}/.run-<実行ID>/worker.env`）を作り、
   終わったら消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値が
   ずれないようにするため
-- ログに書く前のマスクに使う秘匿値を、その写しから読む。compose は env_file の書式の誤りを、
-  その行の値ごとエラー文に出す（実機で確認）ので、そのエラー文を伏せるため
+- worker.env の書式を確かめ、ログに書く前のマスクに使う秘匿値を読む。書式は README の案内の
+  とおりの簡単な形（`名前=値` を1行に1つ。値に空白・引用符・`$`・`\` を含めない）に限る。
+  compose は書式の誤りをその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開する
+  ので、そうなる書き方を起動の前に止める
 """
 
 import os
@@ -25,10 +27,10 @@ from tech_researcher.validate.secret_scan import is_secret_name
 
 SECRETS_DIR_ENV = "TR_SECRETS_DIR"
 WORKER_ENV = "worker.env"
-MIN_SECRET_CHARS = 4  # これより短い値は伏せない（下の secret_values）
 SNAPSHOT_PREFIX = ".run-"  # 1回の実行の間だけ置く写しのフォルダ
-# `名前=値`・`名前: 値`（前に export が付いてもよい）。名前の文字は広めに取る（伏せる側に倒す）
-_LINE = re.compile(r"\s*(?:export\s+)?(?P<name>[^\s=:#]+)\s*[=:](?P<value>.*)")
+# worker.env の1行。compose が解釈を変えたり（引用符・`$`・`\`・前後の空白）、エラー文に値を
+# 出したりする文字を値に含めない
+_LINE = re.compile(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>[^\s'\"$\\]*)")
 
 
 def secrets_dir(
@@ -125,42 +127,26 @@ def remove_snapshot(run_dir: Path) -> None:
 
 
 def secret_values(path: Path) -> list[str]:
-    """worker.env の秘匿値（名前の規則は secret_scan と同じ）。ログのマスクにだけ使う。
+    """worker.env の書式を確かめ、秘匿値（名前の規則は secret_scan と同じ）を返す。
 
-    compose の書式を厳密にはまねず、伏せる側に倒す。`名前=値`（compose が受け付ける `名前: 値`
-    も）の行ごとに、値そのものと、前後の引用符を外したものと、行末のコメント（` #` 以降）を
-    外したものを返す。書式の誤った行（閉じていない引用符など）も読み、引用符が閉じるまでの
-    続きの行（複数行の値）も返す。compose がその値をエラー文に出すため。
-    読めなければ ValueError（例外の文にはパスが入るので使わない）。
+    書式は `名前=値` を1行に1つ。空行と `#` で始まる行（字下げしてもよい）は読み飛ばす。
+    違う行があれば ValueError（行の番号だけを出し、パスも値も出さない）。読めなくても ValueError。
     """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない") from None
+        text = path.read_text(encoding="utf-8")
+    except OSError, UnicodeDecodeError:
+        raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない（UTF-8 にする）") from None
     values: list[str] = []
-    quote = ""  # 秘匿値の引用符が閉じていない間は、続きの行も値として伏せる（複数行の値）
-    for line in text.splitlines():
-        if quote:  # 続きの行。閉じ忘れかもしれないので、下で `名前=値` としても読む
-            values += [line, line.strip(), line.strip().strip("\"'")]
-            if _closes(line, quote):
-                quote = ""
-        m = _LINE.match(line)
-        if not m or not is_secret_name(m["name"]):
+    for number, line in enumerate(text.split("\n"), start=1):
+        line = line.removesuffix("\r")
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
-        value = m["value"].strip()
-        values += [value, value.strip("\"'"), value.split(" #")[0].strip().strip("\"'")]
-        if value[:1] in ("'", '"') and not _closes(value[1:], value[0]):
-            quote = value[0]
-    # 複数行の値（JSON など）の `{`・`}`・`1` のような短い行や記号だけの行は返さない。秘匿の本体では
-    # なく、伏せるとログが読めなくなる（ログの行の区切りまで伏せられる）ため
-    return [v for v in values if len(v) >= MIN_SECRET_CHARS and any(c.isalnum() for c in v)]
-
-
-# 前の `\` の数が偶数の引用符だけを、閉じる引用符とみなす。compose は二重引用符の `\"` も、
-# 単一引用符の `\'` も閉じる引用符とみなさない（実機で確認）
-_CLOSE = {q: re.compile(r"(?:^|[^\\])(?:\\\\)*" + q) for q in ("'", '"')}
-
-
-def _closes(text: str, quote: str) -> bool:
-    """text の中で引用符が閉じるか。"""
-    return bool(_CLOSE[quote].search(text))
+        m = _LINE.fullmatch(line)
+        if m is None:
+            raise ValueError(
+                f"{SECRETS_DIR_ENV} の {WORKER_ENV} の {number} 行目は `名前=値` にする"
+                "（値を引用符で囲まず、空白・引用符・$・\\ を含めない）"
+            )
+        if is_secret_name(m["name"]):
+            values.append(m["value"])
+    return values

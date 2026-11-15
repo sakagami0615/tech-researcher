@@ -301,7 +301,9 @@ def check_environment(environ: Mapping[str, str], repo: Path) -> tuple[Path, dic
         raise UsageError(f"TR_DATA_DIR のフォルダがない（先に作る）: {data}")
     env = {name: environ[name] for name in COMPOSE_ENV if environ.get(name)}
     env["TR_DATA_DIR"] = str(data)
-    env[SECRETS_DIR_ENV] = str(secrets_dir(environ, repo, data))
+    secrets = secrets_dir(environ, repo, data)
+    secret_values(secrets / WORKER_ENV)  # 書式もロックの前に確かめる（実行では写しを読み直す）
+    env[SECRETS_DIR_ENV] = str(secrets)
     env["DOCKER_CONFIG"] = str(docker_config(environ))
     for name, current in UID_ENV.items():
         # 未設定なら bin/tr-run を動かしている人の ID（統括スクリプトが作るフォルダの持ち主と同じ）

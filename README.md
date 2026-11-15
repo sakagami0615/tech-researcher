@@ -56,7 +56,7 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 worker が使う認証情報は、リポジトリの外の `${TR_SECRETS_DIR}/worker.env` に書きます。compose が worker のコンテナにだけ環境変数として渡します（agent には渡しません。フォルダもマウントしません）。変数名は `deploy/env/worker.env.example` にあります。作り方は上の「worker コンテナ」の手順のとおりです。
 
 - いまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
-- `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env` は 600（または 400）で、どちらも `bin/tr-run` を動かす人（root 以外）が持ち主です。`worker.env` はシンボリックリンクにしません。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります
+- `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env` は 600（または 400）で、どちらも `bin/tr-run` を動かす人（root 以外）が持ち主です。`worker.env` はシンボリックリンクにしません。書き方は `名前=値` を1行に1つで、値は引用符で囲まず、空白・引用符・`$`・`\` を含めません（空行と `#` のコメント行は可）。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります（書き方の誤りは行の番号だけを出します）
 - 統括スクリプトは worker.env を環境変数として読み込みません。実行の始めに同じフォルダの `.run-<実行ID>/` に写しを作って compose に読ませ、実行が終わったら消します（実行の途中で worker.env を書き換えても、その実行には効きません）。`bin/tr-run` が強制終了されると `${TR_SECRETS_DIR}/.run-*` が残ることがあります。実行していないときに消してください（トークンを差し替えたときも）。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
 
 ## 実行（bin/tr-run）
