@@ -368,7 +368,9 @@ def _new_job(
     except ValueError as e:
         raise UsageError(str(e)) from None
     try:
-        worker_secrets = secret_values(copy / WORKER_ENV)
+        worker_secrets = secret_values(
+            copy / WORKER_ENV, f"{SECRETS_DIR_ENV} の {WORKER_ENV} の写し"
+        )
     except ValueError as e:
         remove_snapshot(copy)
         raise UsageError(str(e)) from None

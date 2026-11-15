@@ -122,9 +122,11 @@ def snapshot(secrets: Path, run_id: str) -> Path:
     except OSError:  # 同じ名前のフォルダ（ほかの実行の写しかもしれない）は消さない
         raise ValueError(message) from None
     try:
-        data = _read_private(secrets / WORKER_ENV)
+        run_dir.chmod(0o700)  # umask によらず 700 にする
+        data = _read_private(secrets / WORKER_ENV, f"{SECRETS_DIR_ENV} の {WORKER_ENV}")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         with os.fdopen(os.open(run_dir / WORKER_ENV, flags, 0o600), "wb") as f:
+            os.fchmod(f.fileno(), 0o600)  # umask によらず 600 にする
             f.write(data)
     except ValueError:  # 確かめ直して違った（理由をそのまま伝える）
         remove_snapshot(run_dir)
@@ -135,14 +137,14 @@ def snapshot(secrets: Path, run_id: str) -> Path:
     return run_dir
 
 
-def _read_private(path: Path) -> bytes:
+def _read_private(path: Path, label: str) -> bytes:
     """worker.env を読む。確かめた後に差し替わっても、リンクはたどらず、FIFO などで待たない。
 
     開いたものの種類・持ち主・権限を確かめ直してから読む。違えば ValueError、開けなければ OSError。
     """
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as f:
-        _check_stat(os.fstat(f.fileno()), f"{SECRETS_DIR_ENV} の {WORKER_ENV}", _FILE, os.geteuid())
+        _check_stat(os.fstat(f.fileno()), label, _FILE, os.geteuid())
         return f.read()
 
 
@@ -152,20 +154,20 @@ def remove_snapshot(run_dir: Path) -> None:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def secret_values(path: Path) -> list[str]:
+def secret_values(path: Path, label: str = f"{SECRETS_DIR_ENV} の {WORKER_ENV}") -> list[str]:
     """worker.env の書式を確かめ、秘匿値（名前の規則は secret_scan と同じ）を返す。
 
     書式は `名前=値` を1行に1つ。空行と、空白・タブで字下げしてもよい `#` の行は読み飛ばす。
     違う行があれば ValueError（行の番号だけを出し、パスも値も出さない）。読めなくても ValueError。
     """
     try:
-        text = _read_private(path).decode("utf-8")
-    except OSError, UnicodeDecodeError:
-        raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない（UTF-8 にする）") from None
+        text = _read_private(path, label).decode("utf-8")
+    except OSError:
+        raise ValueError(f"{label} を読めない（置き場所と権限を見直す）") from None
+    except UnicodeDecodeError:
+        raise ValueError(f"{label} を読めない（UTF-8 にする）") from None
     if text.startswith("\ufeff"):
-        raise ValueError(
-            f"{SECRETS_DIR_ENV} の {WORKER_ENV} の先頭の BOM を外す（UTF-8 の BOM なしで保存する）"
-        )
+        raise ValueError(f"{label} の先頭の BOM を外す（UTF-8 の BOM なしで保存する）")
     values: list[str] = []
     for number, line in enumerate(text.split("\n"), start=1):
         line = line.removesuffix("\r")
@@ -174,7 +176,7 @@ def secret_values(path: Path) -> list[str]:
         m = _LINE.fullmatch(line)
         if m is None:
             raise ValueError(
-                f"{SECRETS_DIR_ENV} の {WORKER_ENV} の {number} 行目は `名前=値` にする"
+                f"{label} の {number} 行目は `名前=値` にする"
                 "（値を引用符で囲まず、空白・引用符・$・\\ を含めない）"
             )
         if is_secret_name(m["name"]):

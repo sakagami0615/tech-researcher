@@ -72,7 +72,7 @@ def test_secret_values_error_has_no_path(tmp_path):
 def test_rejects_non_utf8(tmp_path):
     path = tmp_path / "worker.env"
     path.write_bytes(b"GITHUB_TOKEN=\xff\n")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="UTF-8 にする"):
         secret_values(path)
 
 
@@ -145,3 +145,14 @@ def test_rejects_bom_with_clear_message(tmp_path):
     with pytest.raises(ValueError) as e:
         secret_values(path)
     assert "BOM" in str(e.value)
+
+
+def test_snapshot_is_600_whatever_umask(tmp_path):
+    secrets = _secrets(tmp_path)
+    previous = os.umask(0o377)
+    try:
+        copy = snapshot(secrets, "run1")
+    finally:
+        os.umask(previous)
+    assert (copy / "worker.env").stat().st_mode & 0o777 == 0o600
+    assert secret_values(copy / "worker.env") == ["fake-collect"]
