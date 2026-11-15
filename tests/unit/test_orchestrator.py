@@ -421,6 +421,14 @@ def test_all_sources_failed_is_error_without_ai(host, capfd, monkeypatch):
     assert [c["argv"][-4] for c in host.calls()] == ["collect"]  # ② ③ を呼ばない
 
 
+def test_no_enabled_source_is_error_not_empty_report(host, capfd):
+    host.behave("ok", lock="daily-dry-run", sources=0)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("collect", "no_sources")
+    assert [c["argv"][-4] for c in host.calls()] == ["collect"]
+
+
 def test_missing_agent_input_is_analyze_failure(host, capfd):
     host.behave("ok", lock="daily-dry-run", input=False)
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1

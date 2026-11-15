@@ -467,12 +467,12 @@ def _run_stages(job: Job) -> Summary:
     if collected is None:
         return job.summary("error", failed_stage="collect", error_category=category)
     fields = {"items": collected["items"], "failed_sources": collected["failed_sources"]}
-    if collected["sources"] and len(collected["failed_sources"]) == collected["sources"]:
-        # すべての情報源が取得できないときは、0件のレポートにせず実行エラーにする（US-E6-03）
-        job.log.write("collect", "failure", error_category="all_sources_failed")
-        return job.summary(
-            "error", failed_stage="collect", error_category="all_sources_failed", **fields
-        )
+    if len(collected["failed_sources"]) == collected["sources"]:
+        # 1つも取得できなかった日は、0件のレポートにせず実行エラーにする（US-E6-03・US-E6-04）。
+        # 有効な情報源がない（設定の誤り）ときも同じに扱う
+        category = "no_sources" if collected["sources"] == 0 else "all_sources_failed"
+        job.log.write("collect", "failure", error_category=category)
+        return job.summary("error", failed_stage="collect", error_category=category, **fields)
     if job.cadence == "weekly":
         # 週次の ② 〜 ⑤ はまだない。本番はレポートを作れないので実行エラーにする
         if job.files.dry_run:
