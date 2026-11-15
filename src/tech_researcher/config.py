@@ -355,8 +355,8 @@ def _github_releases(sources: _Table | None) -> GitHubReleases | None:
         return None
     result = GitHubReleases(t.value("enabled", bool), t.text("display_name"), t.strings("repos"))
     t.done()
-    if not result.repos:
-        raise ConfigError(f"{t.path_of('repos')}: 1つ以上書く")
+    if result.enabled and not result.repos:
+        raise ConfigError(f"{t.path_of('repos')}: 有効にするなら1つ以上書く")
     repos = tuple(repo.lower() for repo in result.repos)
     _check_names(t.path_of("repos"), repos, GITHUB_REPO_NAME)
     return replace(result, repos=repos)

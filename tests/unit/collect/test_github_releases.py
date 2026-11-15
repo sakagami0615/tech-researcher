@@ -151,11 +151,36 @@ def test_published_at_without_timezone_fails_the_repo(limits):
     assert result.error is not None  # 追跡先がこれだけなので、情報源は失敗
 
 
-def test_long_tag_is_not_a_meta_term(limits):
-    """長いタグで D4 の一致の判定を外せないよう、meta_terms に入れない。"""
-    body = json.dumps([release_json(tag_name="v" * 101)]).encode()
+@pytest.mark.parametrize("tag", ["v" * 51, "あ" * 10, "v1 2"])
+def test_unusual_tag_is_not_a_meta_term(limits, tag):
+    """長い・版の表記らしくないタグで D4 の一致の判定を外せないよう、meta_terms に入れない。"""
+    body = json.dumps([release_json(tag_name=tag)]).encode()
     (record,) = collect(limits, FakeFetch({releases_url("example/tool"): body})).records
     assert record.meta_terms == ("Example/Tool",)
+
+
+def test_out_of_range_date_fails_only_that_repo(limits):
+    repos = ("example/tool", "a/one")
+    bad = json.dumps([release_json(published_at="0001-01-01T00:00:00+14:00")]).encode()
+    fetch = FakeFetch({releases_url("example/tool"): bad, releases_url("a/one"): FIXTURE})
+    result = collect(limits, fetch, replace(RELEASES, repos=repos))
+    assert result.failed_parts == (FailedPart("example/tool", "invalid_response"),)
+    assert result.records
+
+
+@pytest.mark.parametrize("status, category", [(401, "auth"), (429, "rate_limited")])
+def test_requests_stop_after_auth_or_rate_limit(limits, status, category):
+    """トークンが無効・レート制限なら、残りのリポジトリには要求を出さない。"""
+    repos = ("a/one", "b/two", "c/three")
+    fetch = FakeFetch({releases_url("a/one"): FetchError(f"HTTP {status}", 1, status)})
+    result = collect(limits, fetch, replace(RELEASES, repos=repos))
+    assert fetch.urls() == [releases_url("a/one")]
+    assert result.failed_parts == tuple(FailedPart(r, category) for r in repos)
+    assert result.error is not None
+    readme_fetch = FakeFetch({readme_url("a/one"): FetchError(f"HTTP {status}", 1, status)})
+    readmes = fetch_readmes(["a/one", "b/two"], client(limits, readme_fetch))
+    assert readme_fetch.urls() == [readme_url("a/one")]
+    assert readmes.errors == {"a/one": category, "b/two": category}
 
 
 def test_name_of_wrong_type_fails_the_repo(limits):
@@ -377,6 +402,7 @@ def test_readmes_are_fetched_for_given_repos(limits):
                 }
             ).encode(),
             readme_url("example/deep"): b"[" * 100_000,
+            readme_url("example/nul"): readme_body("h\x00i"),
         }
     )
     names = [
@@ -391,10 +417,11 @@ def test_readmes_are_fetched_for_given_repos(limits):
         "example/junk64",
         "example/utf16",
         "example/deep",
+        "example/nul",
         "Example/Tool",
     ]
     result = fetch_readmes(names, client(limits, fetch))
-    assert fetch.urls() == [readme_url(n) for n in names[:11]]  # 大文字・小文字の違いは1回だけ
+    assert fetch.urls() == [readme_url(n) for n in names[:12]]  # 大文字・小文字の違いは1回だけ
     assert set(result.readmes) == {"example/tool", "example/latin1"}
     assert result.readmes["example/tool"] == Readme(
         "example/tool", text, ("https://docs.example.com/tool",)
@@ -409,8 +436,9 @@ def test_readmes_are_fetched_for_given_repos(limits):
         "example/junk64": "invalid_response",  # base64 以外の文字は読まない
         "example/utf16": "invalid_response",
         "example/deep": "invalid_response",  # 深すぎる入れ子の JSON
+        "example/nul": "invalid_response",  # NUL を含む（BOM のない UTF-16 など）
     }
-    assert result.attempts == 1 + 1 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
+    assert result.attempts == 1 + 1 + 3 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
     assert result.invalid_names == 0
 
 

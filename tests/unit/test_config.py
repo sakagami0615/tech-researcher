@@ -335,6 +335,12 @@ def test_invalid_qiita_tags_are_rejected(base, tags, message):
         parse_config(data)
 
 
+def test_disabled_github_releases_may_have_no_repos(base):
+    data = full(base)
+    data["sources"]["github_releases"].update(enabled=False, repos=[])
+    assert parse_config(data).github_releases.repos == ()
+
+
 def test_github_releases_repos_are_read(base):
     data = full(base)
     data["sources"]["github_releases"]["repos"] = [
@@ -349,7 +355,7 @@ def test_github_releases_repos_are_read(base):
 @pytest.mark.parametrize(
     "repos, message",
     [
-        ([], "1つ以上"),
+        ([], "有効にするなら1つ以上"),
         ([""], "空でない"),
         (["openai"], "形が違う"),
         (["openai/codex/releases"], "形が違う"),

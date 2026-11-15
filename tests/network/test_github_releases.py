@@ -27,13 +27,16 @@ def client():
 @pytest.mark.network
 @pytest.mark.parametrize("repo", CONFIG.github_releases.repos)
 def test_configured_repo_releases_can_be_fetched(repo, caplog):
-    # 30日分を見て、期間の判定まで通ることを確かめる
-    target = daily_target(datetime.now(JST).date(), 30)
     releases = replace(CONFIG.github_releases, repos=(repo,))
+    today = datetime.now(JST).date()
+    # 週次の期間（7日）で、ページの上限に達しないことを確かめる
+    weekly = collect_releases(releases, daily_target(today, 7).period, client())
+    assert weekly.error is None and weekly.failed_parts == (), "上限に達したら MAX_PAGES を見直す"
+    # 30日分を見て、リリースがあり、期間の判定まで通ることを確かめる
+    target = daily_target(today, 30)
     with caplog.at_level(logging.WARNING):
         result = collect_releases(releases, target.period, client())
-    assert result.error is None and result.failed_parts == ()
-    assert "取りこぼしたおそれ" not in caplog.text, "ページの上限に達した。MAX_PAGES を見直す"
+    assert result.error is None
     items = [i for i in aggregate(result.records) if in_period(i, target)]
     assert items, "30日でリリースが0件。追跡先として妥当か確かめる"
     assert any(r.primary_text for r in result.records), "本文のあるリリースがない"

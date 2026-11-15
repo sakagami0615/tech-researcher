@@ -33,12 +33,17 @@ PER_PAGE = 30
 MAX_PAGES = 5  # 1リポジトリあたりのページの上限。設定の誤りなどで要求を増やしすぎないように
 
 # 応答の形が違うときの例外。GitHubError の INVALID_RESPONSE にまとめる（応答を読む所だけを囲む）
-_SHAPE_ERRORS = (KeyError, TypeError, ValueError, RecursionError)
-# meta_terms（D-07 の D4 で一致の判定から外す語句）に入れるタグ名の長さの上限。
-# 長い語句で検査を外せないようにする
-MAX_META_TERM = 100
+# OverflowError は範囲外の日時（0001-01-01T00:00+14:00 など）を UTC にしたとき
+_SHAPE_ERRORS = (KeyError, TypeError, ValueError, RecursionError, OverflowError)
+# meta_terms（D-07 の D4 で一致の判定から外す語句）に入れるタグ名の形。版の表記らしい ASCII で
+# 50 字までに限る。長い語句や日本語のタグで、長い引用の検査を外せないようにする
+_META_TAG = re.compile(r"[A-Za-z0-9._+\-/@]{1,50}")
 # ページの上限に達し、期間内のリリースを取りこぼしたおそれがあるリポジトリの理由の分類
 TRUNCATED = "truncated"
+# この分類の失敗の後は、残りのリポジトリに要求を出さず、同じ分類で取れなかったものにする
+# （トークンが無効・レート制限・利用量の上限は、続けても取れず、待ちと回数を使うだけのため。
+# github_candidates の候補集めと同じ）
+_STOP_CATEGORIES = frozenset({github_api.AUTH, github_api.RATE_LIMITED, github_api.BUDGET})
 
 
 def collect_releases(
@@ -59,12 +64,18 @@ def collect_releases(
     records: dict[str, Record] = {}
     failed: list[FailedPart] = []
     fetched = 0  # 取れたリポジトリの数（上限に達したものを含む）
+    stopped: str | None = None  # 残りの要求をやめた分類
     for full_name in releases.repos:
+        if stopped is not None:
+            failed.append(FailedPart(full_name, stopped))
+            continue
         try:
             repo_records, complete = _repo_releases(full_name, period, client, fetched_at)
         except GitHubError as e:
             log.warning("%s：%s が取れない（%s）", SOURCE_ID, full_name, e.category)
             failed.append(FailedPart(full_name, e.category))
+            if e.category in _STOP_CATEGORIES:
+                stopped = e.category
             continue
         fetched += 1
         if not complete:
@@ -140,7 +151,7 @@ def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | No
         primary_text_origin="github_release" if body else None,
         published_at=published_at,
         links=markdown_links(body),
-        meta_terms=(_display_repo(full_name, url), *([tag] if len(tag) <= MAX_META_TERM else [])),
+        meta_terms=(_display_repo(full_name, url), *([tag] if _META_TAG.fullmatch(tag) else [])),
     )
 
 
@@ -200,6 +211,7 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
     errors: dict[str, str] = {}
     seen: set[str] = set()
     invalid = 0
+    stopped: str | None = None  # 残りの要求をやめた分類（collect_releases と同じ）
     for name in full_names:
         # 小文字にする前に ASCII に限る（ケルビン記号 K が k になるなど、別の名前に化けるため）
         if not isinstance(name, str) or not name.isascii():
@@ -212,15 +224,22 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
         if full_name in seen:
             continue
         seen.add(full_name)
+        if stopped is not None:
+            errors[full_name] = stopped
+            continue
         try:
             data = client.get(f"/repos/{full_name}/readme")
         except GitHubError as e:
             if e.category != github_api.NOT_FOUND:
+                log.warning("%s：%s の README が取れない（%s）", SOURCE_ID, full_name, e.category)
                 errors[full_name] = e.category
+            if e.category in _STOP_CATEGORIES:
+                stopped = e.category
             continue
         try:
             text = _readme_text(full_name, data)
         except _SHAPE_ERRORS:
+            log.warning("%s：%s の README を読めない", SOURCE_ID, full_name)
             errors[full_name] = github_api.INVALID_RESPONSE
             continue
         if text is not None and text.strip():
@@ -243,8 +262,8 @@ def _readme_text(full_name: str, data) -> str | None:
         raw = base64.b64decode(re.sub(r"[\r\n]", "", data["content"]), validate=True)
     except binascii.Error as e:
         raise ValueError("content を base64 として読めない") from e
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        raise ValueError("UTF-16・UTF-32 の README は読まない")
+    if b"\x00" in raw:  # UTF-16・UTF-32（BOM の有無によらない）とバイナリは NUL を含む
+        raise ValueError("UTF-16・UTF-32・バイナリの README は読まない")
     return raw.decode("utf-8-sig", errors="replace")  # 先頭の BOM は除く
 
 
