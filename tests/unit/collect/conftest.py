@@ -25,8 +25,14 @@ def limits():
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.paths.append(self.path)
+        self.server.headers.append(dict(self.headers))
         if self.path == "/slow":
             self.server.release.wait(5)  # 応答を返さない
+            return
+        if self.path == "/to-ok":
+            self.send_response(302)
+            self.send_header("Location", "/ok")
+            self.end_headers()
             return
         if self.path == "/redirect":
             self.send_response(302)
@@ -43,10 +49,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def server():
-    """手元の HTTP サーバー。受けたパスは server.paths に残る。"""
+    """手元の HTTP サーバー。受けたパスは server.paths、要求ヘッダは server.headers に残る。"""
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     srv.release = threading.Event()
     srv.paths = []
+    srv.headers = []
     srv.base = f"http://127.0.0.1:{srv.server_address[1]}"
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
