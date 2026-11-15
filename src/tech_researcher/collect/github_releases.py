@@ -325,8 +325,10 @@ def with_readme(record: Record, readme: Readme) -> Record:
 
 # Markdown の画像（![alt](url "title")）と <img>・<source>（<picture> の中）のタグ。
 # バッジなどの画像は候補リンクにしない。外部の本文に使うので、文字の種類で探索を次の括弧・改行・
-# < で止め、時間を本文の長さに比例させる（[^\]]* だと、閉じない ![ の繰り返しで二次的に遅くなる）
-_IMAGES = re.compile(r"!\[[^\[\]\n]*\]\([^()\n]*\)|<(?:img|source)\b[^<>]*>", re.IGNORECASE)
+# < で止め、時間を本文の長さに比例させる（URL の括弧は1段まで）（[^\]]* だと、閉じない ![ の繰り返しで二次的に遅くなる）
+_IMAGES = re.compile(
+    r"!\[[^\[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)|<(?:img|source)\b[^<>]*>", re.IGNORECASE
+)
 # 参照形式の画像（![alt][label]・![alt][]・![label]）。その定義の行（[label]: url）を除く
 _REF_IMAGE = re.compile(r"!\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?(?!\()")
 _REF_DEF = re.compile(r"^ {0,3}\[([^\[\]\n]+)\]:[^\n]*", re.MULTILINE)

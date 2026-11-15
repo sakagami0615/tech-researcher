@@ -643,6 +643,11 @@ def test_non_boolean_draft_flag_fails_the_repo(limits):
     assert result.failed_parts == (FailedPart("example/tool", "invalid_response"),)
 
 
+def test_image_with_parentheses_in_url_is_not_a_link():
+    text = "![図](https://img.example.com/a_(1).png) [docs](https://docs.example.com/x)"
+    assert markdown_links(text) == ("https://docs.example.com/x",)
+
+
 def test_readme_deadline_stops_the_rest(limits):
     fetch = FakeFetch(
         {readme_url("a/one"): readme_body("x"), readme_url("b/two"): readme_body("y")}
