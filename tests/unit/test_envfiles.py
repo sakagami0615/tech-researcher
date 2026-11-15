@@ -3,6 +3,8 @@
 置き場所と権限の確認は、統括スクリプトの起動の検査（test_orchestrator.py）で確かめる。
 """
 
+import os
+
 import pytest
 
 from tech_researcher.envfiles import remove_snapshot, secret_values, snapshot
@@ -70,6 +72,7 @@ def _secrets(tmp_path):
     secrets = tmp_path / "secrets"
     secrets.mkdir(mode=0o700)
     (secrets / "worker.env").write_text("GITHUB_TOKEN=fake-collect\n")
+    (secrets / "worker.env").chmod(0o600)
     return secrets
 
 
@@ -108,3 +111,29 @@ def test_remove_snapshot_only_removes_snapshot_folders(tmp_path):
     secrets = _secrets(tmp_path)
     remove_snapshot(secrets)
     assert (secrets / "worker.env").exists()
+
+
+def test_snapshot_rejects_fifo_without_blocking(tmp_path):
+    # 確かめた後に FIFO に差し替わっても、待たずに止める
+    secrets = _secrets(tmp_path)
+    (secrets / "worker.env").unlink()
+    os.mkfifo(secrets / "worker.env", 0o600)
+    with pytest.raises(ValueError):
+        snapshot(secrets, "run1")
+    assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
+
+
+def test_snapshot_rejects_loose_permissions_found_after_check(tmp_path):
+    secrets = _secrets(tmp_path)
+    (secrets / "worker.env").chmod(0o644)
+    with pytest.raises(ValueError):
+        snapshot(secrets, "run1")
+    assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
+
+
+def test_rejects_bom_with_clear_message(tmp_path):
+    path = tmp_path / "worker.env"
+    path.write_text("\ufeffGITHUB_TOKEN=fake-collect\n", encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        secret_values(path)
+    assert "BOM" in str(e.value)

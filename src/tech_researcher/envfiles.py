@@ -85,6 +85,16 @@ def _check_private(
         raise ValueError(f"{label} がない（先に作る）") from None
     except OSError:  # 親のフォルダをたどれないなど。例外の文にはパスが入るので使わない
         raise ValueError(f"{label} を確かめられない（親のフォルダの権限を見直す）") from None
+    _check_stat(st, label, kind, owner)
+
+
+def _check_stat(
+    st: os.stat_result,
+    label: str,
+    kind: tuple[Callable[[int], bool], str, tuple[int, ...]],
+    owner: int,
+) -> None:
+    is_kind, kind_name, modes = kind
     if not is_kind(st.st_mode):
         raise ValueError(f"{label} は{kind_name}にする")
     if st.st_uid == 0 or st.st_uid != owner:
@@ -102,7 +112,8 @@ def _check_private(
 def snapshot(secrets: Path, run_id: str) -> Path:
     """worker.env の写しを作り、そのフォルダ（compose に TR_SECRETS_DIR として渡す）を返す。
 
-    写しのフォルダは 700、ファイルは 600。読み書きでシンボリックリンクはたどらない。
+    写しのフォルダは 700、ファイルは 600。読み書きでシンボリックリンクはたどらない。元のファイルは
+    待たずに開き（FIFO などに差し替わっていても止まらない）、開いたものを確かめ直してから読む。
     作れなければ ValueError（例外の文にはパスが入るので使わない）。
     """
     run_dir = secrets / f"{SNAPSHOT_PREFIX}{run_id}"
@@ -112,13 +123,14 @@ def snapshot(secrets: Path, run_id: str) -> Path:
     except OSError:  # 同じ名前のフォルダ（ほかの実行の写しかもしれない）は消さない
         raise ValueError(message) from None
     try:
-        src = os.open(secrets / WORKER_ENV, os.O_RDONLY | os.O_NOFOLLOW)
+        src = os.open(secrets / WORKER_ENV, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(src, "rb") as f:
+            _check_stat(os.fstat(f.fileno()), message, _FILE, os.geteuid())
             data = f.read()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         with os.fdopen(os.open(run_dir / WORKER_ENV, flags, 0o600), "wb") as f:
             f.write(data)
-    except OSError:
+    except OSError, ValueError:
         remove_snapshot(run_dir)
         raise ValueError(message) from None
     return run_dir
@@ -133,13 +145,17 @@ def remove_snapshot(run_dir: Path) -> None:
 def secret_values(path: Path) -> list[str]:
     """worker.env の書式を確かめ、秘匿値（名前の規則は secret_scan と同じ）を返す。
 
-    書式は `名前=値` を1行に1つ。空行と `#` で始まる行（字下げしてもよい）は読み飛ばす。
+    書式は `名前=値` を1行に1つ。空行と、空白・タブで字下げしてもよい `#` の行は読み飛ばす。
     違う行があれば ValueError（行の番号だけを出し、パスも値も出さない）。読めなくても ValueError。
     """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError, UnicodeDecodeError:
         raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない（UTF-8 にする）") from None
+    if text.startswith("\ufeff"):
+        raise ValueError(
+            f"{SECRETS_DIR_ENV} の {WORKER_ENV} の先頭の BOM を外す（UTF-8 の BOM なしで保存する）"
+        )
     values: list[str] = []
     for number, line in enumerate(text.split("\n"), start=1):
         line = line.removesuffix("\r")
