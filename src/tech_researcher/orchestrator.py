@@ -4,7 +4,8 @@
 流れ：
 
 1. 引数（`daily`・`weekly` と `--dry-run` だけ）と環境を確かめる。TR_DATA_DIR はリポジトリの外の
-   既存のフォルダ、TR_UID・TR_GID は 0（root）以外
+   既存のフォルダ、TR_UID・TR_GID は 0（root）以外、TR_SECRETS_DIR は worker.env を置いた
+   リポジトリの外の非公開のフォルダ（envfiles.py）
 2. 種類ごとのロック（flock）を取る。日次・週次で別にし、ドライランは本番と別にする
    （ドライランが本番の実行を止めないように。US-E8-04）。取れなければ何もせずに終わる
 3. 実行 ID と対象日を決め、ジョブを子プロセスで動かす。ジョブ全体の上限を超えたら、子プロセスの
@@ -15,6 +16,7 @@
 
 compose には許可した環境変数だけを渡し、リポジトリの .env も読ませない（3.7）。ホストのシェルに
 ANTHROPIC_API_KEY や COMPOSE_FILE などがあっても、compose の変数の展開と設定に使わせない。
+worker.env の中身は compose が worker にだけ渡す。統括スクリプトは秘匿値をマスクのためにだけ読む。
 
 日次は ① 収集（worker）→ ② 評価・要約（agent/invoke.py）→ ③ 検証・検査（worker）とつなぐ。
 ② の AI の呼び出し（agent コンテナ。#18）と ⑤ 投稿はまだないので、それまでの本番の日次は ② で
@@ -45,6 +47,15 @@ from tech_researcher.agent import invoke
 from tech_researcher.agent.daily import InputTooLarge, encode_input
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
+from tech_researcher.envfiles import (
+    SECRETS_DIR_ENV,
+    SNAPSHOT_LABEL,
+    WORKER_ENV,
+    remove_snapshot,
+    secret_values,
+    secrets_dir,
+    snapshot,
+)
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import JST, Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
@@ -64,7 +75,8 @@ SUMMARY = "summary.json"  # ドライランの出力のフォルダに残す要�
 # DOCKER_HOST は Docker のデーモンの指定（rootless など）のため。DOCKER_CONFIG は統括スクリプトが
 # 専用のフォルダを指定する（下）。TR_* は compose.yaml の変数の展開に使う。ほかの変数（認証情報、
 # COMPOSE_* などの compose の設定）は渡さない。認証情報は compose が env_file から各コンテナにだけ
-# 渡す（D-05）。DOCKER_CONTEXT は渡さない（コンテキストは利用者の Docker の設定にあり、専用の
+# 渡す（D-05）。env_file の場所（TR_SECRETS_DIR）は、確かめたパスを統括スクリプトが渡す。
+# DOCKER_CONTEXT は渡さない（コンテキストは利用者の Docker の設定にあり、専用の
 # フォルダからは見えないため。デーモンは DOCKER_HOST で指定する）
 COMPOSE_ENV = ("PATH", "HOME", "DOCKER_HOST")
 UID_ENV = {"TR_UID": lambda: os.getuid(), "TR_GID": lambda: os.getgid()}
@@ -133,6 +145,10 @@ class Compose:
         self._repo = repo
         self._env = dict(env)
         self._label = f"{RUN_ID_LABEL}={run_id}"
+
+    @property
+    def env(self) -> Mapping[str, str]:
+        return self._env
 
     def run(self, service: str, args: Sequence[str], timeout_s: float) -> StageResult:
         """段階を1つ起動して終わりを待つ。timeout_s を超えたら止め、そのコンテナを消す。"""
@@ -257,7 +273,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     except Busy:
         print(f"tr-run: 同じ種類の実行（{name}）が動いている", file=sys.stderr)
         return EXIT_BUSY
-    except OSError as e:  # ロックのファイル・fork など
+    except (OSError, UsageError) as e:  # ロックのファイル・fork・worker.env の写しなど
         return _usage_error(e, environ)
 
 
@@ -277,12 +293,18 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def check_environment(environ: Mapping[str, str], repo: Path) -> tuple[Path, dict[str, str]]:
-    """データ用フォルダと、compose に渡す環境変数（許可リスト）を返す。"""
+    """データ用フォルダと、compose に渡す環境変数（許可リスト）を返す。
+
+    worker.env の場所・権限と書式もここで確かめる（中身を環境変数として読み込まない。D-05）。
+    """
     data = data_dir(environ, repo).resolve()  # リポジトリの外であることも確かめる（D-22）
     if not data.is_dir():
         raise UsageError(f"TR_DATA_DIR のフォルダがない（先に作る）: {data}")
     env = {name: environ[name] for name in COMPOSE_ENV if environ.get(name)}
     env["TR_DATA_DIR"] = str(data)
+    secrets = secrets_dir(environ, repo, data)
+    secret_values(secrets / WORKER_ENV)  # 書式もロックの前に確かめる（実行では写しを読み直す）
+    env[SECRETS_DIR_ENV] = str(secrets)
     env["DOCKER_CONFIG"] = str(docker_config(environ))
     for name, current in UID_ENV.items():
         # 未設定なら bin/tr-run を動かしている人の ID（統括スクリプトが作るフォルダの持ち主と同じ）
@@ -341,7 +363,18 @@ def _new_job(
     files = RunFiles(data, run_id)
     days = config.daily_period_days if cadence == "daily" else config.weekly_period_days
     target = _TARGETS[cadence](files.started_on, days)
-    scanner = SecretScanner(known_secret_values(environ))
+    # compose にはこの実行の間だけの写しを読ませ、そのエラー文（段階の stderr）に出る値も伏せる
+    try:
+        copy = snapshot(Path(compose_env[SECRETS_DIR_ENV]), run_id)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    try:
+        worker_secrets = secret_values(copy / WORKER_ENV, SNAPSHOT_LABEL)
+    except ValueError as e:
+        remove_snapshot(copy)
+        raise UsageError(str(e)) from None
+    compose_env = {**compose_env, SECRETS_DIR_ENV: str(copy)}
+    scanner = SecretScanner(known_secret_values(environ) + worker_secrets)
     return Job(
         repo=repo,
         config=config,
@@ -354,6 +387,14 @@ def _new_job(
 
 
 def supervise(job: Job, run: Callable[[Job], int] | None = None) -> int:
+    """ジョブを動かし、終わったら（止めたときも）worker.env の写しを消す（envfiles.py）。"""
+    try:
+        return _supervise(job, run)
+    finally:
+        remove_snapshot(Path(job.compose.env[SECRETS_DIR_ENV]))
+
+
+def _supervise(job: Job, run: Callable[[Job], int] | None) -> int:
     """ジョブを子プロセスで動かし、ジョブ全体の上限を超えたら止める（structure.md 6.4）。
 
     run は子プロセスで動かすジョブの本体（既定は run_job。観測は observe.py の本体）。

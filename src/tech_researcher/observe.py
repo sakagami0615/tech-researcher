@@ -67,7 +67,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     except Busy:
         print(f"{PROG}: 日次か観測（{LOCK}）が動いている", file=sys.stderr)
         return EXIT_BUSY
-    except OSError as e:
+    except (OSError, UsageError) as e:
         return _usage_error(e, environ, PROG)
 
 

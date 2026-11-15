@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher import orchestrator
+from tech_researcher import envfiles, orchestrator
 from tech_researcher.agent import invoke
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import parse_config
@@ -28,6 +28,8 @@ from tech_researcher.config import parse_config
 ROOT = Path(__file__).parents[2]
 LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").split("[limits]")[1]
 TOKEN = "ghp" + "_" + "y" * 36  # テスト用のダミー。実行時に組み立てる
+# worker.env の偽の秘匿値。トークンの形ではないので、既知の値としてだけ伏せられる
+WORKER_SECRET = "fake-issue-credential-0123"
 PRODUCT_CALL_AGENT = invoke.call_agent
 
 FAKE_DOCKER = f"""#!{sys.executable}
@@ -79,10 +81,12 @@ class Host:
         self.repo = tmp_path / "repo"
         self.data = tmp_path / "data"
         self.fake = tmp_path / "fakebin"
+        self.secrets = tmp_path / "secrets"
         self.environ = {
             "PATH": f"{self.fake}:{os.environ['PATH']}",
             "HOME": str(tmp_path),
             "TR_DATA_DIR": str(self.data),
+            "TR_SECRETS_DIR": str(self.secrets),
         }
 
     def behave(self, mode: str, lock: str = "daily", **extra) -> None:
@@ -123,6 +127,10 @@ def host(tmp_path, monkeypatch) -> Host:
     monkeypatch.chdir(h.repo)
     h.data.mkdir()
     h.fake.mkdir()
+    h.secrets.mkdir(mode=0o700)
+    worker_env = h.secrets / "worker.env"
+    worker_env.write_text(f"GITHUB_TOKEN=fake-collect-token\nTR_ISSUE_TOKEN={WORKER_SECRET}\n")
+    worker_env.chmod(0o600)
     docker = h.fake / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
@@ -259,7 +267,7 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "GITHUB_TOKEN": TOKEN,
         "COMPOSE_FILE": "/tmp/evil.yaml",
         "COMPOSE_PROJECT_NAME": "evil",
-        "TR_SECRETS_DIR": "/srv/secrets",
+        "TR_SECRETS_DIR": str(host.secrets) + "/",  # 確かめて解決したパスの下の写しを渡す
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
         "DOCKER_CONTEXT": "desktop-linux",  # 専用の設定のフォルダからは見えないので渡さない
         "DOCKER_CONFIG": "/home/someone/.docker",  # 利用者の設定（proxies など）は使わない
@@ -281,6 +289,8 @@ def test_compose_gets_only_allowed_environment(host, capfd):
         "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
         "DOCKER_CONFIG": str(Path(host.environ["HOME"]) / ".config" / "tech-researcher" / "docker"),
         "TR_DATA_DIR": str(host.data),
+        # この実行の間だけの worker.env の写しの場所だけ。中身は compose が読む
+        "TR_SECRETS_DIR": str(host.secrets / f".run-{run_id}"),
         "TR_UID": "1001",
         "TR_GID": "1002",
     }
@@ -313,6 +323,223 @@ def test_data_dir_is_passed_resolved(host, capfd, tmp_path):
     )
     summary_of(capfd)
     assert host.calls()[0]["env"]["TR_DATA_DIR"] == str(host.data)
+
+
+# --- worker.env（TR_SECRETS_DIR。D-05・structure.md 3.7） ---
+
+
+def _no_dir(h):
+    h.secrets.chmod(0o700)
+    for f in h.secrets.iterdir():
+        f.unlink()
+    h.secrets.rmdir()
+
+
+def _loop(h):
+    loop = h.secrets.parent / "loop"
+    loop.symlink_to(loop)
+    h.environ["TR_SECRETS_DIR"] = str(loop / "secrets")
+
+
+def _link_file(h):
+    real = h.secrets / "real.env"
+    (h.secrets / "worker.env").rename(real)
+    (h.secrets / "worker.env").symlink_to(real)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda h: h.environ.pop("TR_SECRETS_DIR"), "TR_SECRETS_DIR が設定されていない"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR="secrets"), "絶対パス"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.repo / "s")), "リポジトリの外"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.data / "s")), "TR_DATA_DIR の外"),
+        (lambda h: h.environ.update(TR_SECRETS_DIR=str(h.data)), "TR_DATA_DIR の外"),
+        (_no_dir, "フォルダ がない"),
+        (_loop, "確かめられない"),  # リンクのループもパスを出さずに止める
+        (lambda h: (h.secrets / "worker.env").unlink(), "worker.env がない"),
+        (lambda h: h.secrets.chmod(0o750), "フォルダ の権限は 700"),
+        (lambda h: h.secrets.chmod(0o701), "フォルダ の権限は 700"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o640), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o604), "worker.env の権限は 600・400"),
+        # 持ち主が読めなければ compose も読めない
+        (lambda h: (h.secrets / "worker.env").chmod(0o000), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o200), "worker.env の権限は 600・400"),
+        (lambda h: h.secrets.chmod(0o600), "フォルダ の権限は 700"),
+        (lambda h: h.secrets.chmod(0o500), "フォルダ の権限は 700"),  # 写しを作れない
+        # GNU の chmod 700 は setgid を残すので、いまの権限と直し方の例を出す
+        (lambda h: h.secrets.chmod(0o2700), "いまは 2700。"),
+        (lambda h: h.secrets.chmod(0o2700), "例：chmod 00700"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o640), "例：chmod 00600"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o700), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o500), "worker.env の権限は 600・400"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o4600), "worker.env の権限は 600・400"),
+        (_link_file, "シンボリックリンクにしない"),
+    ],
+)
+def test_rejects_bad_secrets_dir(host, capfd, change, message):
+    change(host)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert message in err
+    assert WORKER_SECRET not in err
+    assert str(host.secrets) not in err  # パスも出さない
+    if host.environ.get("TR_SECRETS_DIR"):
+        assert host.environ["TR_SECRETS_DIR"] not in err
+    assert host.calls() == []
+    assert not (host.data / "locks").exists()  # 起動の前に止まる
+    if host.secrets.exists():
+        host.secrets.chmod(0o700)  # tmp_path を片付けられるように
+
+
+def test_unresolvable_secrets_dir_is_rejected_without_path(host, capfd, monkeypatch):
+    real = envfiles.Path.resolve
+
+    def fail(self, strict=False):
+        if self == host.secrets:  # TR_SECRETS_DIR だけをたどれなくする
+            raise OSError(40, "Too many levels of symbolic links", str(self))
+        return real(self, strict)
+
+    monkeypatch.setattr(envfiles.Path, "resolve", fail)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    err = capfd.readouterr().err
+    assert "パスをたどれない" in err
+    assert str(host.secrets) not in err
+    assert host.calls() == []
+
+
+def test_rejects_worker_env_compose_would_misread_before_start(host, capfd):
+    # compose は書式の誤りを値ごとエラー文に出すので、起動の前に行の番号だけを出して止める
+    (host.secrets / "worker.env").write_text(f'GITHUB_TOKEN=x\nTR_ISSUE_TOKEN="{WORKER_SECRET}\n')
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert "worker.env の 2 行目" in err
+    assert WORKER_SECRET not in err
+    assert host.calls() == []
+    assert not (host.data / "locks").exists()
+
+
+def test_worker_env_swapped_for_fifo_after_check_does_not_block(host, capfd, monkeypatch):
+    # 場所と権限を確かめた直後に FIFO に差し替わっても、書式の確認で待たずに止める
+    real = orchestrator.secrets_dir
+
+    def check_then_swap(environ, repo, data):
+        path = real(environ, repo, data)
+        (path / "worker.env").unlink()
+        os.mkfifo(path / "worker.env", 0o600)
+        return path
+
+    monkeypatch.setattr(orchestrator, "secrets_dir", check_then_swap)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    assert "通常のファイル" in capfd.readouterr().err
+    assert host.calls() == []
+
+
+def test_bad_snapshot_points_to_original_and_is_removed(host, capfd, monkeypatch):
+    # 確認の後に元のファイルが書き換わり、写しの書式が違ったとき：直す先は元のファイルだと伝える
+    real = orchestrator.snapshot
+
+    def snapshot_then_break(secrets, run_id):
+        copy = real(secrets, run_id)
+        (copy / "worker.env").write_text("BAD LINE\n")
+        return copy
+
+    monkeypatch.setattr(orchestrator, "snapshot", snapshot_then_break)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    err = capfd.readouterr().err
+    assert "実行の始めに写した内容。書式の誤りは元のファイルを直す" in err
+    assert "1 行目" in err
+    assert host.calls() == []
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]
+
+
+def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):
+    other = os.geteuid() + 1
+    monkeypatch.setattr(envfiles.os, "geteuid", lambda: other)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    assert "持ち主は bin/tr-run を動かす人" in capfd.readouterr().err
+    assert host.calls() == []
+
+
+def test_read_only_worker_env_is_accepted(host, capfd):
+    (host.secrets / "worker.env").chmod(0o400)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+    summary_of(capfd)
+
+
+def test_worker_env_values_are_masked_in_stage_errors(host, capfd):
+    # compose は env_file の書式の誤りを、その行の値ごとエラー文に出す（実機で確認）
+    host.behave("fail", lock="daily-dry-run", secret=f'unterminated quoted value "{WORKER_SECRET}')
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    out, err = capfd.readouterr()
+    summary = json.loads(out)
+    log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
+    assert WORKER_SECRET not in out + err + log_text
+    assert "[MASKED:known]" in log_text
+
+
+def test_compose_reads_snapshot_of_worker_env_during_run(host, capfd, monkeypatch, tmp_path):
+    # 実行の途中で worker.env を書き換えても、compose が読む値はマスクに使う値と同じ（写し）
+    record = tmp_path / "snapshot.json"
+
+    def run(self, service, args, timeout_s):  # ジョブの子プロセスで動く
+        (host.secrets / "worker.env").write_text("TR_ISSUE_TOKEN=fake-rewritten-credential\n")
+        copy = Path(self.env["TR_SECRETS_DIR"])
+        text = (copy / "worker.env").read_text()
+        modes = [copy.stat().st_mode & 0o777, (copy / "worker.env").stat().st_mode & 0o777]
+        record.write_text(json.dumps({"copy": str(copy), "modes": modes}))
+        return orchestrator.StageResult(1, "", f"failed to read: {text}")
+
+    monkeypatch.setattr(orchestrator.Compose, "run", run)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = json.loads(capfd.readouterr().out)
+    log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
+    assert WORKER_SECRET not in log_text
+    assert "fake-rewritten" not in log_text  # 写しには書き換える前の値しかない
+    assert "[MASKED:known]" in log_text
+    seen = json.loads(record.read_text())
+    assert Path(seen["copy"]) == host.secrets / f".run-{summary['run_id']}"
+    assert seen["modes"] == [0o700, 0o600]
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 終わったら写しを消す
+
+
+def test_snapshot_failure_stops_before_start(host, capfd, monkeypatch):
+    def fail(path):
+        raise ValueError("TR_SECRETS_DIR の worker.env を読めない")
+
+    monkeypatch.setattr(orchestrator, "secret_values", fail)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 2
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert "worker.env を読めない" in err
+    assert host.calls() == []
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 写しを残さない
+
+
+def test_snapshot_is_removed_after_stopped_run(host, capfd):
+    host.behave("sleep", lock="daily-dry-run")
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary_of(capfd)
+    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]
+
+
+def test_compose_passes_worker_env_only_to_worker():
+    # worker.env は worker の env_file だけ。フォルダはどのサービスにもマウントしない
+    text = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    uses = [line.strip() for line in lines if "TR_SECRETS_DIR" in line]
+    assert len(uses) == 1
+    assert uses[0].startswith("- path: ${TR_SECRETS_DIR:?")
+    assert uses[0].endswith("}/worker.env")
+    top = [i for i, line in enumerate(lines) if line and not line[0].isspace()]
+    start = next(i for i in top if lines[i] == "services:")
+    end = next((i for i in top if i > start), len(lines))
+    section = lines[start + 1 : end]
+    services = [line.strip() for line in section if line.startswith("  ") and line[2] != " "]
+    assert services == ["worker:"]  # ほかのサービス（#18 の agent）を足したら、ここも見直す
+    assert sum("env_file:" in line for line in lines) == 1
 
 
 # --- 要約 ---

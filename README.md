@@ -32,7 +32,11 @@ bin/setup-third-party.sh
 ```sh
 export TR_DATA_DIR=/srv/tech-researcher   # データ用フォルダ。リポジトリの外の絶対パスで、先に作っておく
 export TR_UID=$(id -u) TR_GID=$(id -g)    # データ用フォルダの持ち主（省略時は 1000）。0（root）にしない
-docker compose build worker
+export TR_SECRETS_DIR=$HOME/.config/tech-researcher/secrets   # worker.env を置くフォルダ（下の「認証情報」）
+install -d -m 00700 "$TR_SECRETS_DIR"   # 00 で setgid も外す（親のフォルダから引き継がない）
+install -m 600 deploy/env/worker.env.example "$TR_SECRETS_DIR/worker.env"
+"${EDITOR:-vi}" "$TR_SECRETS_DIR/worker.env"   # 値を入れる。引用符で囲まず、1行に1つ（値に `$` を含めない）
+docker compose build worker   # compose.yaml の読み込みに worker.env が要るので、上で先に作る
 ```
 
 - `config/` は読み取り専用で、`${TR_DATA_DIR}` はコンテナの `/data` にマウントします。ほかの場所（ルートのファイルシステム）は読み取り専用で、書けるのは `/data` と `/tmp` だけです
@@ -47,9 +51,17 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 
 標準出力には件数と失敗した情報源の ID だけが出ます。日次は ② の入力 `agent-input.json` も書きます。エラーのときに出るログのパスは、コンテナの中のパス（`/data/…`）です。収集結果は `$TR_DATA_DIR/dry-run/$run_id/collected.json`、ログは同じフォルダの `log.jsonl` にあります。
 
+### 認証情報（worker.env）
+
+worker が使う認証情報は、リポジトリの外の `${TR_SECRETS_DIR}/worker.env` に書きます。compose が worker のコンテナにだけ環境変数として渡します（agent には渡しません。フォルダもマウントしません）。変数名は `deploy/env/worker.env.example` にあります。作り方は上の「worker コンテナ」の手順のとおりです。
+
+- いまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
+- `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env` は 600（または 400）で、どちらも `bin/tr-run` を動かす人（root 以外）が持ち主です。`worker.env` はシンボリックリンクにしません。書き方は `名前=値` を1行に1つで、値は引用符で囲まず、空白・引用符・`$`・`\` を含めません（空行と `#` のコメント行は可）。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります（書き方の誤りは行の番号だけを出します）
+- 統括スクリプトは worker.env を環境変数として読み込みません。実行の始めに同じフォルダの `.run-<実行ID>/` に写しを作って compose に読ませ、実行が終わったら消します（実行の途中で worker.env を書き換えても、その実行には効きません）。`bin/tr-run` が強制終了されると `${TR_SECRETS_DIR}/.run-*` が残ることがあります。実行していないときに消してください（トークンを差し替えたときも）。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
+
 ## 実行（bin/tr-run）
 
-cron と手動実行は、同じ入口 `bin/tr-run` を使います。ホストに uv と Docker（Compose）が要ります。上の `TR_DATA_DIR` を設定してから実行します。`TR_UID`・`TR_GID` を省略すると、`bin/tr-run` を動かしている人の ID を使います（root では動かしません）。
+cron と手動実行は、同じ入口 `bin/tr-run` を使います。ホストに uv と Docker（Compose 2.24 以上。compose.yaml の `env_file` の `required` を使うため）が要ります。上の `TR_DATA_DIR`・`TR_SECRETS_DIR` を設定してから実行します。`TR_UID`・`TR_GID` を省略すると、`bin/tr-run` を動かしている人の ID を使います（root では動かしません）。
 
 ```sh
 bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
@@ -58,7 +70,7 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 - 引数は `daily`・`weekly` と `--dry-run` だけです。対象日（週）は実行した時点から決まり、過去の期間は指定できません
 - 同じ種類の実行が動いていれば、何もせずに終了コード 3 で終わります（ロックは `$TR_DATA_DIR/locks/` の `daily`・`weekly` と、それぞれのドライラン用で別）
 - ジョブ全体と段階ごとの上限時間は、設定ファイルの `[limits.daily]`・`[limits.weekly]` です。超えたら止め、その実行のコンテナを消します
-- compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません
+- compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません。`TR_SECRETS_DIR` は worker.env の場所を compose に教えるだけで、コンテナには入りません
 - `DOCKER_CONFIG` は `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`（権限 700）です。`~/.docker/config.json` の `proxies` などはコンテナに入りません。このため Docker のコンテキスト（`DOCKER_CONTEXT`・`docker context use`）は使えず、デーモンは `DOCKER_HOST` で指定します。compose のプラグインは、`~/.docker/cli-plugins` ではなく、システムの場所（`/usr/libexec/docker/cli-plugins` など）に入れておきます
 - 標準出力には、実行 ID・種類・対象日・結果の種別・件数・取得できなかった情報源の名前・ドライランの出力先だけを JSON 1行で出します。ドライランでは同じものを出力のフォルダの `summary.json` に残します
 - 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。ただし ② の AI の呼び出し（agent コンテナ）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
@@ -75,12 +87,12 @@ bin/tr-observe   # 引数はありません
 
 - 日次と同じロック（`$TR_DATA_DIR/locks/daily.lock`）を使います。日次（`bin/tr-run daily`）が動いていれば、何もせずに終了コード 3 で終わります
 - 実行 ID の先頭は `obs-` です。runs には `observed`（すべての情報源の取得に失敗した日と、① が失敗したときは `failed`）と終了時刻を残し、取得結果（失敗も）は source_fetches に、収集項目は items に、Star 数は star_snapshots に、人気型フィードの取得記録は feed_snapshots に残します。② 以降は動かさず、Issue は作りません
-- 環境変数（`TR_DATA_DIR`・`TR_UID`・`TR_GID`）、上限時間、標準出力の要約（`result` は `observed`）は `bin/tr-run` と同じです。worker は収集用トークンを環境変数 `GITHUB_TOKEN` から読みます。トークンがないと、GitHub Search（last30days-skill と候補集め）と Star 数の測定は失敗（`auth` など）として source_fetches に残り、ほかの情報源の観測は続けます。worker.env（`${TR_SECRETS_DIR}`）を compose から worker に渡す配線はまだないので、トークンを使った観測は、その配線を足してから始めます
+- 環境変数（`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID`）、上限時間、標準出力の要約（`result` は `observed`）は `bin/tr-run` と同じです。worker は収集用トークンを、worker.env から渡る環境変数 `GITHUB_TOKEN` から読みます。トークンがないと、GitHub Search（last30days-skill と候補集め）と Star 数の測定は失敗（`auth` など）として source_fetches に残り、ほかの情報源の観測は続けます
 
 crontab の例（cron の `PATH` に uv と docker が入るようにします。ホストの時刻帯が JST のとき。JST でなければ、cron の実装に合わせて `CRON_TZ=Asia/Tokyo` を書くか、時刻を UTC に直します。リポジトリとデータ用フォルダのパスは運用サーバーに合わせます）：
 
 ```
-0 6 * * * cd /srv/tech-researcher-repo && TR_DATA_DIR=/srv/tech-researcher bin/tr-observe >> /srv/tech-researcher/logs/cron.log 2>&1
+0 6 * * * cd /srv/tech-researcher-repo && TR_DATA_DIR=/srv/tech-researcher TR_SECRETS_DIR=/home/operator/.config/tech-researcher/secrets bin/tr-observe >> /srv/tech-researcher/logs/cron.log 2>&1
 ```
 
 観測中の確認（DB は `$TR_DATA_DIR/db/tech-researcher.sqlite3`）：
