@@ -246,7 +246,7 @@ class GitHubClient:
             raise GitHubError(f"{path}：リダイレクトが多すぎる", REDIRECT, used)
         try:
             return json.loads(response.body), used
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:  # 深すぎる入れ子も読めない応答とする
             raise GitHubError(f"{path}：応答が JSON でない", INVALID_RESPONSE, used) from e
 
 

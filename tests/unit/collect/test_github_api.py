@@ -189,6 +189,13 @@ def test_invalid_json_is_an_error(limits):
     assert api.rest_calls == 1
 
 
+def test_too_deeply_nested_json_is_an_error(limits):
+    api = client(limits, FakeFetch(Response("https://api.github.com/a", 200, b"[" * 100_000, 1)))
+    with pytest.raises(GitHubError) as e:
+        api.get("/a")
+    assert e.value.category == github_api.INVALID_RESPONSE
+
+
 def redirect(location, status=301):
     return FetchError(f"HTTP {status}", 1, status, {"Location": location})
 

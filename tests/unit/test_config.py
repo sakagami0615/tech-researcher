@@ -99,6 +99,8 @@ def test_repository_config_loads():
     assert repos.enabled and repos.search_without_topic and "llm" in repos.search_topics
     assert repos.watch_repos == ()
     assert (repos.search_days, repos.search_min_stars) == (14, 200)  # 観測までの仮の値
+    assert config.github_releases.enabled
+    assert {"anthropics/claude-code", "openai/codex"} <= set(config.github_releases.repos)
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
     assert config.limits.daily.job == 60
@@ -329,6 +331,46 @@ def test_qiita_tags_are_read(base):
 def test_invalid_qiita_tags_are_rejected(base, tags, message):
     data = full(base)
     data["sources"]["qiita"]["tags"] = tags
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
+def test_disabled_github_releases_may_have_no_repos(base):
+    data = full(base)
+    data["sources"]["github_releases"].update(enabled=False, repos=[])
+    assert parse_config(data).github_releases.repos == ()
+
+
+def test_github_releases_repos_are_read(base):
+    data = full(base)
+    data["sources"]["github_releases"]["repos"] = [
+        "openai/codex",
+        "microsoft/TypeScript",
+        "a/b.c_d",
+    ]
+    repos = parse_config(data).github_releases.repos
+    assert repos == ("openai/codex", "microsoft/typescript", "a/b.c_d")
+
+
+@pytest.mark.parametrize(
+    "repos, message",
+    [
+        ([], "有効にするなら1つ以上"),
+        ([""], "空でない"),
+        (["openai"], "形が違う"),
+        (["openai/codex/releases"], "形が違う"),
+        (["https://github.com/openai/codex"], "形が違う"),
+        (["openai/.."], "形が違う"),
+        (["openai/."], "形が違う"),
+        (["-a/b"], "形が違う"),
+        (["a/b?x=1"], "形が違う"),
+        (["a/b c"], "形が違う"),
+        (["openai/codex", "OpenAI/Codex"], "重複している openai/codex"),
+    ],
+)
+def test_invalid_github_releases_repos_are_rejected(base, repos, message):
+    data = full(base)
+    data["sources"]["github_releases"]["repos"] = repos
     with pytest.raises(ConfigError, match=message):
         parse_config(data)
 
