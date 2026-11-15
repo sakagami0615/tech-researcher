@@ -13,13 +13,12 @@ from datetime import UTC, datetime
 from tech_researcher.logging import CADENCES
 from tech_researcher.logging import STAGES as LOG_STAGES
 from tech_researcher.periods import Target
-from tech_researcher.runfiles import DRY_RUN_PREFIX
+from tech_researcher.runfiles import DRY_RUN_PREFIX, OBSERVATION_PREFIX
 
 # running は開始時に書く。observed は D-13 の観測（① だけの実行。実行 ID の先頭は obs-）
 FINISHED_STATUSES = frozenset({"succeeded", "rejected", "failed", "observed"})
 STAGES = LOG_STAGES - {"job"}  # failed_stage にする段階（D-04 の ① 〜 ⑤）
 FETCH_STATUSES = frozenset({"ok", "no_results", "failed", "skipped"})
-OBSERVATION_PREFIX = "obs-"
 
 
 def utc_text(moment: datetime) -> str:

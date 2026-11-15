@@ -7,6 +7,8 @@ from tech_researcher.collect.qiita import SOURCE_ID as QIITA_SOURCE_ID
 from tech_researcher.collect.rss import feed_source_id
 from tech_researcher.config import Config
 
+GITHUB_REPOS_SOURCE_ID = "github_repos"  # 新着・急上昇のリポジトリ（候補集めと Star の測定）
+
 
 def source_names(config: Config) -> dict[str, str]:
     """情報源 ID → 設定ファイルの表示名。"""
@@ -15,6 +17,7 @@ def source_names(config: Config) -> dict[str, str]:
         ("hackernews", config.hackernews),
         ("github_search", config.github_search),
         (QIITA_SOURCE_ID, config.qiita),
+        (GITHUB_REPOS_SOURCE_ID, config.github_repos),
     ):
         if source is not None:
             names[source_id] = source.display_name

@@ -13,15 +13,17 @@ import shutil
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 
 from tech_researcher.periods import JST
 
 DATA_DIR_ENV = "TR_DATA_DIR"
 DRY_RUN_PREFIX = "dry-"
-# `YYYYMMDD-HHMMSS-xxxx`（JST の開始時刻と4桁の16進数。data-model.md 3.2）。ドライランは先頭に dry-
-_RUN_ID = re.compile(r"(dry-)?(\d{4})(\d{2})(\d{2})-\d{6}-[0-9a-f]{4}")
+OBSERVATION_PREFIX = "obs-"  # D-13 の観測（① だけの本番の実行。data-model.md 3.4 の runs）
+# `YYYYMMDD-HHMMSS-xxxx`（JST の開始時刻と4桁の16進数。data-model.md 3.2）。ドライランは先頭に
+# dry-、観測は obs-
+_RUN_ID = re.compile(r"(dry-|obs-)?(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{4}")
 _LOCK = ".lock"
 
 
@@ -39,12 +41,21 @@ def data_dir(environ: Mapping[str, str], repo_root: Path) -> Path:
 
 
 def new_run_id(
-    now: datetime, *, dry_run: bool, token: Callable[[], str] = lambda: secrets.token_hex(2)
+    now: datetime,
+    *,
+    dry_run: bool,
+    observation: bool = False,
+    token: Callable[[], str] = lambda: secrets.token_hex(2),
 ) -> str:
-    """実行 ID。now は開始時刻（タイムゾーン付き）で、JST に直して使う。"""
+    """実行 ID。now は開始時刻（タイムゾーン付き）で、JST に直して使う。
+
+    observation は D-13 の観測の実行（先頭が obs-。本番の実行として DB に書く）。
+    """
     if now.tzinfo is None:
         raise ValueError("タイムゾーンのない日時から実行 ID は作れない")
-    prefix = DRY_RUN_PREFIX if dry_run else ""
+    if dry_run and observation:
+        raise ValueError("観測はドライランにしない")
+    prefix = DRY_RUN_PREFIX if dry_run else OBSERVATION_PREFIX if observation else ""
     run_id = f"{prefix}{now.astimezone(JST):%Y%m%d-%H%M%S}-{token()}"
     _check_run_id(run_id)
     return run_id
@@ -67,6 +78,18 @@ class RunFiles:
     @property
     def dry_run(self) -> bool:
         return self.run_id.startswith(DRY_RUN_PREFIX)
+
+    @property
+    def observation(self) -> bool:
+        return self.run_id.startswith(OBSERVATION_PREFIX)
+
+    @property
+    def started_at(self) -> datetime:
+        """実行を始めた時刻（JST、秒まで）。runs の started_at にする。"""
+        match = _RUN_ID.fullmatch(self.run_id)
+        assert match is not None
+        hour, minute, second = map(int, match.group(5, 6, 7))
+        return datetime.combine(self.started_on, time(hour, minute, second), JST)
 
     @property
     def started_on(self) -> date:
@@ -167,6 +190,7 @@ def _check_run_id(run_id: str) -> date:
     try:
         if match is None:
             raise ValueError
+        time(*map(int, match.group(5, 6, 7)))  # 25時なども形の誤りにする
         return date(*map(int, match.group(2, 3, 4)))
     except ValueError:
         raise ValueError(f"実行 ID の形でない: {run_id!r}") from None

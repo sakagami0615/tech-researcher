@@ -58,17 +58,34 @@ def test_new_run_id():
         new_run_id(NOW, dry_run=False, token=lambda: "../x")
 
 
+def test_observation_run_id_is_a_production_run(tmp_path):
+    """D-13 の観測は obs- を付けた本番の実行（work/ に置いて消し、ログは日付のフォルダ）。"""
+    run_id = new_run_id(NOW, dry_run=False, observation=True, token=lambda: "a1b2")
+    assert run_id == "obs-20261024-060005-a1b2"
+    files = RunFiles(tmp_path, run_id)
+    assert files.observation and not files.dry_run
+    assert files.dir == tmp_path / "work" / run_id
+    assert files.log == tmp_path / "logs" / "2026" / "10" / f"{run_id}.jsonl"
+    assert files.started_on == date(2026, 10, 24)
+    assert files.started_at == NOW.replace(microsecond=0)
+    assert not RunFiles(tmp_path, PROD).observation
+    with pytest.raises(ValueError, match="ドライラン"):
+        new_run_id(NOW, dry_run=True, observation=True)
+
+
 @pytest.mark.parametrize(
     "run_id",
     [
         "",
         "20261024-060000",
-        "obs-20261024-060000-abcd",
+        "obs-dry-20261024-060000-abcd",
         "20261024-060000-ABCD",
         "../x",
         "dry-",
         "20261324-060000-abcd",  # 13月
         "20260230-060000-abcd",  # 2月30日
+        "20261024-250000-abcd",  # 25時
+        "obs-20261024-066000-abcd",  # 60分
     ],
 )
 def test_rejects_malformed_run_id(tmp_path, run_id):

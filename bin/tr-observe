@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# D-13 の観測の入口（一時的。日次の運用を始めるときに、cron の行とともに消す。#48）。
+#   bin/tr-observe
+# 毎朝 6:00（JST）に cron から呼び、① 収集だけを動かす。日次と同じロックを使う。
+# 引数は受け付けない。中身は src/tech_researcher/observe.py（統括スクリプトと同じ仕組みを使う）。
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
+exec uv run --frozen --no-dev --quiet python -I -m tech_researcher.observe "$@"

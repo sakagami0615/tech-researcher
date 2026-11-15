@@ -62,7 +62,38 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 - `DOCKER_CONFIG` は `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`（権限 700）です。`~/.docker/config.json` の `proxies` などはコンテナに入りません。このため Docker のコンテキスト（`DOCKER_CONTEXT`・`docker context use`）は使えず、デーモンは `DOCKER_HOST` で指定します。compose のプラグインは、`~/.docker/cli-plugins` ではなく、システムの場所（`/usr/libexec/docker/cli-plugins` など）に入れておきます
 - 標準出力には、実行 ID・種類・対象日・結果の種別・件数・取得できなかった情報源の名前・ドライランの出力先だけを JSON 1行で出します。ドライランでは同じものを出力のフォルダの `summary.json` に残します
 - 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。ただし ② の AI の呼び出し（agent コンテナ）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
+- ① は、本番では DB（`$TR_DATA_DIR/db/tech-researcher.sqlite3`）を開き、runs の開始・取得結果（source_fetches）・収集項目（items。日次だけ）・Star 数と人気型フィードの記録（日次だけ）を書きます。runs の終わりは ⑤ で書くので、それまで本番の runs は `running` のまま残ります。ドライランは DB を読み取り専用で開き、何も書きません（DB がなければ前日の記録がないものとして動きます）
 - 週次は ① 収集だけです。ドライランは ① の後に終わり、本番は ① の後に実行エラー（`not_implemented`）で終わります
+
+## 観測（一時的。D-13）
+
+日次の運用を始めるまで、レポートを出さずに ① 収集だけを毎朝 6:00（JST）に動かし、Star 数と人気型フィードの取得記録をためます（D-13 の「PoC での調整のしかた」）。`bin/tr-run` は使わず、`bin/tr-observe` を運用サーバーの cron から呼びます。日次の運用を始めるとき（#48）に、cron の行と `bin/tr-observe`・`src/tech_researcher/observe.py` を消します。
+
+```sh
+bin/tr-observe   # 引数はありません
+```
+
+- 日次と同じロック（`$TR_DATA_DIR/locks/daily.lock`）を使います。日次（`bin/tr-run daily`）が動いていれば、何もせずに終了コード 3 で終わります
+- 実行 ID の先頭は `obs-` です。runs には `observed`（すべての情報源の取得に失敗した日と、① が失敗したときは `failed`）と終了時刻を残し、取得結果（失敗も）は source_fetches に、収集項目は items に、Star 数は star_snapshots に、人気型フィードの取得記録は feed_snapshots に残します。② 以降は動かさず、Issue は作りません
+- 環境変数（`TR_DATA_DIR`・`TR_UID`・`TR_GID`）、上限時間、標準出力の要約（`result` は `observed`）は `bin/tr-run` と同じです。収集用トークンは worker.env の `GITHUB_TOKEN` から worker にだけ渡ります。トークンがないと GitHub Search と Star 数の測定は `auth` の失敗になり、ほかの情報源の観測は続けます
+
+crontab の例（cron の `PATH` に uv と docker が入るようにします。ホストの時刻帯が JST のとき。JST でなければ、cron の実装に合わせて `CRON_TZ=Asia/Tokyo` を書くか、時刻を UTC に直します。リポジトリとデータ用フォルダのパスは運用サーバーに合わせます）：
+
+```
+0 6 * * * cd /srv/tech-researcher-repo && TR_DATA_DIR=/srv/tech-researcher bin/tr-observe >> /srv/tech-researcher/logs/cron.log 2>&1
+```
+
+観測中の確認（DB は `$TR_DATA_DIR/db/tech-researcher.sqlite3`）：
+
+```sh
+sqlite3 -readonly "$TR_DATA_DIR/db/tech-researcher.sqlite3" \
+  "SELECT run_id, status, error_category, finished_at FROM runs WHERE run_id LIKE 'obs-%' ORDER BY run_id DESC LIMIT 7;"
+sqlite3 -readonly "$TR_DATA_DIR/db/tech-researcher.sqlite3" \
+  "SELECT source_id, status, error_category, attempts, record_count FROM source_fetches WHERE run_id = (SELECT max(run_id) FROM runs WHERE run_id LIKE 'obs-%');"
+```
+
+- `status` が `running` のまま残った観測は、上限時間で止められたなど、途中で終わった実行です。ログ（`$TR_DATA_DIR/logs/YYYY/MM/<実行ID>.jsonl`）で原因を確かめます
+- 同じ対象日にもう一度動かしても、Star 数と人気型フィードの記録は最初のものを残し、items は同じ行を更新します
 
 ## テストと検査
 

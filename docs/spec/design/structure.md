@@ -58,11 +58,13 @@
 │       └── agent.env.example
 ├── bin/
 │   ├── setup-third-party.sh          # D-01 のセットアップ（submodule の取得と sparse-checkout、指示ファイルがないことの確認）
-│   └── tr-run                        # 実行の唯一の入口（cron と外側のスキルの両方が呼ぶ）
+│   ├── tr-run                        # 実行の唯一の入口（cron と外側のスキルの両方が呼ぶ）
+│   └── tr-observe                    # D-13 の観測の一時的な入口（日次の運用を始めるときに消す）
 ├── src/
 │   └── tech_researcher/
 │       ├── cli.py                    # 各段階の入口（worker で動く）
 │       ├── orchestrator.py           # 統括スクリプトとその入口（ホストで動く。bin/tr-run が呼び、docker compose run を呼ぶ）
+│       ├── observe.py                # D-13 の観測の一時的な入口（ホストで動く。bin/tr-observe が呼ぶ。① だけ）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
 │       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）

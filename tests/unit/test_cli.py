@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 from functools import partial
 from pathlib import Path
 
@@ -7,7 +8,8 @@ import pytest
 from tech_researcher import cli
 from tech_researcher.collect.http import Response
 from tech_researcher.collect.rss import collect_feed
-from tech_researcher.stages.collect import run_collect
+from tech_researcher.db.schema import open_db
+from tech_researcher.stages.collect import Collectors, run_collect
 
 ROOT = Path(__file__).parents[2]
 FEED = (ROOT / "tests" / "unit" / "collect" / "fixtures" / "feed.xml").read_bytes()
@@ -29,7 +31,9 @@ def env(tmp_path, monkeypatch):
         return Response(url, 200, FEED, 1)
 
     collect = partial(collect_feed, fetch_url=fetch)
-    monkeypatch.setattr(cli, "run_collect", partial(run_collect, collect=collect))
+    monkeypatch.setattr(
+        cli, "run_collect", partial(run_collect, collectors=Collectors(feed=collect))
+    )
     repo = tmp_path / "repo"
     (repo / "config").mkdir(parents=True)
     (repo / "config" / "tech-researcher.toml").write_text(
@@ -94,6 +98,28 @@ def test_setup_errors_exit_2(env, capsys, args, environ, message):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert message in captured.err
+
+
+@pytest.mark.parametrize(
+    "args", [["collect", "weekly"], ["verify", "daily"]], ids=["weekly", "verify"]
+)
+def test_observation_is_daily_collect_only(env, capsys, args):
+    """観測（obs-）は日次の ① だけ（D-13）。"""
+    run_id = "obs-20261024-060000-abcd"
+    (Path(env["TR_DATA_DIR"]) / "work" / run_id).mkdir(parents=True)
+    assert cli.main([*args, "--run-id", run_id], env) == 2
+    assert "観測" in capsys.readouterr().err
+    assert not (Path(env["TR_DATA_DIR"]) / "db").exists()
+
+
+def test_dry_run_opens_existing_db_read_only(env, capsys):
+    """ドライランは本番の DB を読み取り専用で開き、何も書かない（D-22）。"""
+    path = Path(env["TR_DATA_DIR"]) / "db" / "tech-researcher.sqlite3"
+    open_db(path).close()
+    assert cli.main(["collect", "daily", "--run-id", DRY], env) == 0
+    with closing(open_db(path)) as conn:
+        assert conn.execute("SELECT count(*) FROM runs").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM items").fetchone() == (0,)
 
 
 def test_invalid_config_exits_2(env, capsys):

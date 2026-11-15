@@ -20,15 +20,16 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher import cli, orchestrator
+from tech_researcher import cli, observe, orchestrator
 from tech_researcher.agent import invoke
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.rss import collect_feed
+from tech_researcher.db.feed_snapshots import fetch_recorded
 from tech_researcher.db.schema import open_db
 from tech_researcher.orchestrator import StageResult
 from tech_researcher.periods import JST
 from tech_researcher.runfiles import db_path, new_run_id
-from tech_researcher.stages.collect import run_collect
+from tech_researcher.stages.collect import Collectors, run_collect
 
 ROOT = Path(__file__).parents[2]
 FEED = (ROOT / "tests" / "fixtures" / "minimal-feed.xml").read_bytes()
@@ -126,6 +127,17 @@ class Host:
         code = orchestrator.main(["daily", *argv], self.environ)
         return code, *self._summary()
 
+    def observe(self) -> tuple[int, dict]:
+        code = observe.main([], self.environ)
+        return code, self._summary()[0]
+
+    def runs(self) -> list[tuple]:
+        with contextlib.closing(open_db(db_path(self.data))) as conn:
+            return conn.execute(
+                "SELECT run_id, cadence, target, status, failed_stage, error_category,"
+                " finished_at IS NOT NULL FROM runs"
+            ).fetchall()
+
     def _summary(self) -> tuple[dict, str]:
         out = self.capfd.readouterr().out
         lines = out.splitlines()
@@ -143,12 +155,13 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
     h.record.mkdir()
     monkeypatch.chdir(h.repo)
     monkeypatch.setattr(
-        orchestrator, "new_run_id", lambda now, dry_run: new_run_id(STARTED, dry_run=dry_run)
+        orchestrator, "new_run_id", lambda now, **kwargs: new_run_id(STARTED, **kwargs)
     )
     monkeypatch.setattr(orchestrator.Compose, "run", lambda c, *a: h.fake_compose_run(c, *a))
     monkeypatch.setattr(invoke, "call_agent", h.fake_call_agent)
     collect = partial(collect_feed, fetch_url=lambda url, limits: h.fake_fetch(url, limits))
-    monkeypatch.setattr(cli, "run_collect", partial(run_collect, collect=collect))
+    collectors = Collectors(feed=collect)
+    monkeypatch.setattr(cli, "run_collect", partial(run_collect, collectors=collectors))
     return h
 
 
@@ -269,7 +282,7 @@ def test_ai_choosing_nothing_is_a_report_saying_so(host):
     assert "**該当なし**：" in issue and "（収集 2 件）" in issue
 
 
-def test_production_does_not_post_or_touch_db(host):
+def test_production_saves_collect_but_does_not_post(host):
     code, summary, _ = host.run()
 
     assert code == 1
@@ -281,8 +294,17 @@ def test_production_does_not_post_or_touch_db(host):
     )
     assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify"]
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]  # 実行中のファイルは消した
-    assert not (host.data / "db").exists()
     assert not (host.data / "dry-run").exists()
+    # ① は runs の開始・取得結果・収集項目を書く。終わりは ⑤ で書くので running のまま
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert conn.execute("SELECT run_id, status, finished_at FROM runs").fetchall() == [
+            (summary["run_id"], "running", None)
+        ]
+        assert conn.execute("SELECT source_id, status FROM source_fetches").fetchall() == [
+            ("rss:example", "ok")
+        ]
+        (count,) = conn.execute("SELECT count(*) FROM items").fetchone()
+        assert count == summary["items"] > 0
     log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
     assert ("verify", "end") in stages_of(log)
     assert ("post", "failure") in stages_of(log)
@@ -408,17 +430,16 @@ def test_all_sources_failed_is_error_not_empty_report(host):
     assert not (Path(summary["output_dir"]) / "issue.md").exists()
 
 
-@pytest.mark.parametrize("dry_run", [True, False])
-def test_existing_db_is_not_changed(host, dry_run):
-    """本番の DB があっても、一巡は DB を読み書きしない（D-22。保存は後の Issue で足す）。"""
-    open_db(db_path(host.data)).close()
-    before = {p.name: p.read_bytes() for p in db_path(host.data).parent.iterdir()}
+def test_dry_run_does_not_change_existing_db(host):
+    """ドライランは本番の DB を読み取り専用で開き、何も書かない（D-22）。"""
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        before = list(conn.iterdump())
 
-    code, _, _ = host.run(*(["--dry-run"] if dry_run else []))
+    code, _, _ = host.run("--dry-run")
 
-    assert code == (0 if dry_run else 1)
-    after = {p.name: p.read_bytes() for p in db_path(host.data).parent.iterdir()}
-    assert after == before
+    assert code == 0
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert list(conn.iterdump()) == before
 
 
 def test_verify_checks_worker_data_not_the_copy_given_to_ai(host):
@@ -449,3 +470,91 @@ def test_secret_in_ai_ids_is_masked_in_results(host):
     for name in ("validation.json", "log.jsonl", "issue.md"):
         assert TOKEN not in (out_dir / name).read_text(encoding="utf-8"), name
     assert "[MASKED:known]" in (out_dir / "validation.json").read_text(encoding="utf-8")
+
+
+# D-13 の観測（observe.py）。bin/tr-run を使わず、日次と同じロックで ① だけを動かす
+
+
+def test_observation_collects_only_and_closes_run_as_observed(host):
+    code, summary = host.observe()
+
+    assert code == 0
+    run_id = summary["run_id"]
+    assert run_id.startswith("obs-20261024-060000-")
+    assert (summary["result"], summary["items"], summary["failed_sources"]) == ("observed", 2, [])
+    assert summary["output_dir"] is None
+    assert [c["args"] for c in host.calls("compose")] == [["collect", "daily", "--run-id", run_id]]
+    assert host.calls("agent") == []  # ② 以降は動かさない
+    assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]  # 実行中のファイルは消した
+    assert host.runs() == [(run_id, "daily", "2026-10-23", "observed", None, None, 1)]
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert conn.execute("SELECT source_id, status FROM source_fetches").fetchall() == [
+            ("rss:example", "ok")
+        ]
+        assert conn.execute("SELECT count(*) FROM items").fetchone() == (2,)
+    log = host.data / "logs" / "2026" / "10" / f"{run_id}.jsonl"
+    assert stages_of(log) == [
+        ("job", "start"),
+        ("collect", "start"),
+        ("collect", "source_result"),
+        ("collect", "end"),
+        ("job", "end"),
+    ]
+
+
+def test_observation_with_all_sources_failed_is_recorded_as_failed(host):
+    """取得の失敗も履歴に残し、1つも取得できなかった日は failed で閉じる。"""
+    host.feed = None
+    code, summary = host.observe()
+
+    assert code == 1
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "collect",
+        "all_sources_failed",
+    )
+    assert summary["failed_sources"] == ["Example"]
+    [run] = host.runs()
+    assert run[3:] == ("failed", "collect", "all_sources_failed", 1)
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert conn.execute(
+            "SELECT source_id, status, error_category, attempts FROM source_fetches"
+        ).fetchall() == [("rss:example", "failed", "fetch_failed", 3)]
+
+
+def test_observation_failure_in_collect_closes_run_as_failed(host, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError(f"外部の文 {TOKEN}")
+
+    monkeypatch.setattr(cli, "run_collect", broken)
+    code, summary = host.observe()
+
+    assert code == 1
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "collect",
+        "exit_1",
+    )
+    [run] = host.runs()
+    assert run[3:] == ("failed", "collect", "RuntimeError", 1)
+
+
+def test_observation_uses_the_daily_lock(host):
+    """観測と日次を同時に動かさない（同じロック）。"""
+    with orchestrator.lock(host.data / "locks" / "daily.lock"):
+        assert observe.main([], host.environ) == orchestrator.EXIT_BUSY
+    assert host.calls("compose") == []
+    assert "日次か観測" in host.capfd.readouterr().err
+
+
+def test_observation_takes_no_arguments(host):
+    with pytest.raises(SystemExit) as e:
+        observe.main(["--dry-run"], host.environ)
+    assert e.value.code == 2
+
+
+def test_observation_counts_as_previous_day_record_for_feeds(host):
+    """観測の取得も、翌日の人気型フィードの初登場の判定で前日の記録に数える（M 3.4）。"""
+    assert host.observe()[0] == 0
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert fetch_recorded(conn, "rss:example", datetime(2026, 10, 23).date())
