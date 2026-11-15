@@ -79,9 +79,14 @@ def _check_private(
         raise ValueError(f"{label} は{kind_name}にする")
     if st.st_uid == 0 or st.st_uid != owner:
         raise ValueError(f"{label} の持ち主は bin/tr-run を動かす人にする（root にしない）")
-    if stat.S_IMODE(st.st_mode) not in modes:
+    current = stat.S_IMODE(st.st_mode)
+    if current not in modes:
+        # 権限は秘匿情報ではないので、いまの値も出す（GNU の chmod 700 はフォルダの setgid を残す）
         allowed = "・".join(f"{m:o}" for m in modes)
-        raise ValueError(f"{label} の権限は {allowed} にする（グループとほかの人の権限を外す）")
+        raise ValueError(
+            f"{label} の権限は {allowed} にする（いまは {current:o}。グループとほかの人の権限や"
+            f" setuid・setgid を外す。例：chmod 0{modes[0]:04o}）"
+        )
 
 
 def snapshot(secrets: Path, run_id: str) -> Path:
