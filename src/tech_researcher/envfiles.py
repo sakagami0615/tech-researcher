@@ -30,6 +30,10 @@ WORKER_ENV = "worker.env"
 SNAPSHOT_PREFIX = ".run-"  # 1回の実行の間だけ置く写しのフォルダ
 # worker.env の1行。compose が解釈を変えたり（引用符・`$`・`\`・前後の空白）、エラー文に値を
 # 出したりする文字を値に含めない
+# 読み飛ばす行（空行と、空白・タブで字下げしてもよい `#` のコメント行）。字下げの文字を絞るのは、
+# Python の strip が取り除く制御文字（\x1c など）を compose は名前の一部として扱い、行ごとエラー文に
+# 出すため
+_SKIP = re.compile(r"[ \t]*(?:#.*)?")
 _LINE = re.compile(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>[^\s'\"$\\]*)")
 
 
@@ -139,7 +143,7 @@ def secret_values(path: Path) -> list[str]:
     values: list[str] = []
     for number, line in enumerate(text.split("\n"), start=1):
         line = line.removesuffix("\r")
-        if not line.strip() or line.lstrip().startswith("#"):
+        if _SKIP.fullmatch(line):
             continue
         m = _LINE.fullmatch(line)
         if m is None:

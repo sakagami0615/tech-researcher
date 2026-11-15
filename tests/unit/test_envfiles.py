@@ -13,6 +13,8 @@ def test_secret_values_follow_name_rule(tmp_path):
     path.write_text(
         "# コメント\n"
         "  # 字下げしたコメント\n"
+        "\t# タブで字下げしたコメント\n"
+        " \t \n"
         "\n"
         "GITHUB_TOKEN=fake-collect\r\n"  # CRLF も読む
         "TR_PROJECTS_PAT=fake-pat#not-comment\n"
@@ -38,6 +40,7 @@ def test_secret_values_follow_name_rule(tmp_path):
         ("export TR_ISSUE_TOKEN=fake-exported", 2),
         ("TR_ISSUE_TOKEN: fake-yaml", 2),
         ("fake-pasted/without+name=", 2),  # 名前のない行（compose は行ごとエラー文に出す）
+        ("\x1c# fake-control-indent", 2),  # compose は \x1c を字下げとみなさない
     ],
 )
 def test_rejects_lines_compose_would_misread(tmp_path, line, number):
