@@ -45,8 +45,10 @@ _FIELDS = "nameWithOwner stargazerCount createdAt"
 _ERROR_TYPE = re.compile(r"[A-Z_]{1,40}")
 # Star 数の上限。GitHub の GraphQL の Int は32ビットなので、それを超える値は応答の崩れとみなす
 _MAX_STARS = 2**31 - 1
-# これらの失敗では、次の問い合わせも同じく失敗するのでやめる
-_STOP_CATEGORIES = frozenset({github_api.AUTH, github_api.RATE_LIMITED, github_api.BUDGET})
+# これらの失敗では、次の問い合わせも同じく失敗するのでやめる（FORBIDDEN はトークンの権限不足など）
+_STOP_CATEGORIES = frozenset(
+    {github_api.AUTH, github_api.FORBIDDEN, github_api.RATE_LIMITED, github_api.BUDGET}
+)
 
 
 @dataclass(frozen=True)
@@ -152,7 +154,7 @@ def fetch_stars(
             first_error = first_error or e
             unmeasured += [c.repo for c in batch]
             continue
-        at = now()
+        at = now().replace(microsecond=0)  # DB に残す精度（秒）にそろえる
         missing += [batch[i].repo for i in lost]
         unmeasured += [batch[i].repo for i in failed]
         for i, (repo, stars, created_at) in found.items():

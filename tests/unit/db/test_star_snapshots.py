@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -211,7 +212,7 @@ def test_invalid_snapshots_are_refused(make):
 
 def test_constraint_violations_other_than_uniqueness_are_not_ignored(conn, monkeypatch):
     """CHECK の違反（routes_json が配列でない）は黙って捨てずに失敗にする。"""
-    monkeypatch.setattr(star_snapshots.json, "dumps", lambda _: "{}")
+    monkeypatch.setattr(star_snapshots, "json", SimpleNamespace(dumps=lambda _: "{}"))
     with pytest.raises(sqlite3.IntegrityError):
         record_star_snapshots(conn, T, [snap("a/b", 1)])
     assert load_star_snapshot(conn, T) == {}

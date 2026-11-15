@@ -266,6 +266,7 @@ def test_failed_batch_keeps_the_others(limits, conn):
     ("outcome", "category"),
     [
         (FetchError("HTTP 401", 1, 401), github_api.AUTH),
+        (FetchError("HTTP 403", 1, 403), github_api.FORBIDDEN),
         (FetchError("HTTP 403", 1, 403, {"x-ratelimit-remaining": "0"}), github_api.RATE_LIMITED),
         ({"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
          github_api.RATE_LIMITED),
@@ -474,6 +475,7 @@ def test_invalid_candidates_are_not_queried(limits):
     assert [r["variables"] for r in fetch.requests] == [{"o0": "a", "n0": "b"}]
     assert [s.repo for s in result.snapshots] == ["a/b"]
     assert result.unmeasured == ('x") { evil }', "c/d")
+    assert result.error is None  # 候補の形の誤りは呼ぶ側の不具合で、取得の失敗には数えない
 
 
 def test_row_written_first_by_another_run_is_returned(limits, conn, monkeypatch):
