@@ -459,7 +459,10 @@ ${TR_DATA_DIR}/
 │   └── <実行ID>/                        # 本番の実行中のファイル。実行が終わったら消す
 │       ├── collected.json              # ① の収集結果（一次情報の本文を含む。③ の照合に使う）
 │       ├── agent-input.json            # ② ④ の入力
-│       └── agent-output.json           # ② ④ の出力
+│       ├── agent-output.json           # ② ④ の出力
+│       ├── validation.json             # ③ の結果（合否、除外した項目と理由）
+│       ├── secret-scan.json            # 秘匿情報の検査の結果（検出したかどうかと、箇所の種類だけ）
+│       └── issue.md                    # ③ が作った Issue のタイトル・ラベル・本文（⑤ に渡す）
 └── dry-run/
     └── <実行ID>/
         ├── summary.json                # bin/tr-run が出す要約と同じもの

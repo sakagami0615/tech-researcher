@@ -3,7 +3,7 @@
 docker を偽のプロセス（PATH の先頭に置いた `docker`）に差し替え、ロックは flock で確かめる。
 偽の docker は、受け取った引数と環境変数とロックの状態を calls.jsonl に書き、behavior.json の
 指示（ok・fail・bad・sleep）どおりに振る舞う。偽の docker には許可した環境変数しか届かないので、
-指示はファイルで渡す。① は ok のとき、日次の ② の入力（項目なし）も書く。③ は verify の指示
+指示はファイルで渡す。① は ok のとき、日次の ② の入力（1項目）も書く。③ は verify の指示
 （既定は report）どおりの結果を返す。
 ② の AI は、項目なしの出力を返す偽の実装に差し替える。段階を本物でつなぐ一巡は test_daily_flow.py。
 """
@@ -59,7 +59,8 @@ elif command == "compose":
         if cadence == "daily" and behavior.get("input", True):
             kind = "dry-run" if run_id.startswith("dry-") else "work"
             run_dir = Path(os.environ["TR_DATA_DIR"]) / kind / run_id
-            (run_dir / "agent-input.json").write_text(json.dumps({{"task": "daily", "items": []}}))
+            data = {{"task": "daily", "items": [{{"id": "d1"}}]}}
+            (run_dir / "agent-input.json").write_text(json.dumps(data))
         sources = behavior.get("sources", 3)
         print(json.dumps({{"items": 3, "sources": sources, "failed_sources": behavior["failed"]}}))
     elif mode == "fail":

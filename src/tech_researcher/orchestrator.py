@@ -510,11 +510,15 @@ def call_agent(job: Job, body: bytes) -> dict:
 def _analyze(job: Job) -> str | None:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
 
-    入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。
+    入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。収集結果が0件の
+    日も AI を呼ばず、項目のない出力をコードが作る（③ が「該当なし」の本文にする。
+    report-templates.md 1.5）。
     """
     job.log.write("analyze", "start")
     try:
         data = json.loads((job.files.dir / AGENT_INPUT).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ValueError("② の入力に items の配列がない")
         body = encode_input(data, job.limits.agent_input_bytes)
     except InputTooLarge as e:
         job.log.write("analyze", "failure", error_category="input_too_large", detail=str(e))
@@ -522,6 +526,10 @@ def _analyze(job: Job) -> str | None:
     except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
         job.log.write("analyze", "failure", error_category="bad_input", exc=e)
         return "bad_input"
+    if not data["items"]:
+        _write_output(job, {"items": []})
+        job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
+        return None
     try:
         output = call_agent(job, body)
     except NotImplementedError:
@@ -533,12 +541,16 @@ def _analyze(job: Job) -> str | None:
     if not isinstance(output, dict):
         job.log.write("analyze", "failure", error_category="bad_output")
         return "bad_output"
-    # AI の出力（外部由来の文を含みうる）はファイルにだけ置く。中身の検査は ③ で行う
+    _write_output(job, output)
+    job.log.write("analyze", "end")
+    return None
+
+
+def _write_output(job: Job, output: dict) -> None:
+    """② の出力（外部由来の文を含みうる）はファイルにだけ置く。中身の検査は ③ で行う。"""
     partial = job.files.dir / f"{AGENT_OUTPUT}.partial"
     partial.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
     partial.replace(job.files.dir / AGENT_OUTPUT)
-    job.log.write("analyze", "end")
-    return None
 
 
 def _worker(

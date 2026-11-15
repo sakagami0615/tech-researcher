@@ -233,14 +233,22 @@ def test_dry_run_goes_round_and_keeps_results(host):
 
 
 def test_zero_items_is_a_report_saying_so(host):
-    """正常に0件だった日も、該当なしと書いたレポートになる（US-E2-06）。"""
+    """正常に0件だった日も、該当なしと書いたレポートになる（US-E2-06）。
+
+    AI は呼ばず、コードが項目のない ② の出力を作り、③ はほかの日と同じように検証する（R 1.5）。
+    """
     host.feed = EMPTY_FEED
     code, summary, _ = host.run("--dry-run")
 
     assert code == 0
     assert (summary["result"], summary["items"]) == ("dry_run", 0)
-    assert host.calls("agent")[0]["items"] == []
-    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert host.calls("agent") == []
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify"]
+    out_dir = Path(summary["output_dir"])
+    assert json.loads((out_dir / "agent-output.json").read_text()) == {"items": []}
+    assert json.loads((out_dir / "validation.json").read_text())["result"] == "report"
+    assert ("analyze", "end") in stages_of(out_dir / "log.jsonl")
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
     assert "> **掲載**：0 件" in issue
     assert "**該当なし**：" in issue and "（収集 0 件）" in issue
     assert "## 目次" not in issue
