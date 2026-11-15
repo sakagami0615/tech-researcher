@@ -231,7 +231,7 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
   - `TR_SECRETS_DIR` が設定されていて、絶対パスで、解決したパスがリポジトリの外かつ `TR_DATA_DIR` の外（worker にマウントするため）
   - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env` は通常のファイル（シンボリックリンクにしない）
   - どちらも持ち主が `bin/tr-run` を動かす人で、root ではない。compose は、`bin/tr-run` を動かす人の権限で env_file を読むため
-  - どちらもグループとほかの人の権限がない（フォルダは 700、`worker.env` は 600。読み取りだけの 400 も可）
+  - どちらもグループとほかの人の権限がなく、持ち主が読める（フォルダは 700、`worker.env` は 600。読み取りだけの 400 も可）
 - 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、worker.env の秘匿値（7.3 の名前の規則）を読む。compose は env_file の書式の誤り（閉じていない引用符など）を、その行の値ごとエラー文に出し（実機で確認）、そのエラー文が段階の失敗としてログに入るため。読んだ値は環境変数にも compose にも渡さない。書式は厳密に解釈せず、`名前=値` の行ごとに、値・引用符を外した値・行末のコメントを外した値を伏せる側に倒す
 - worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
 - 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env は agent コンテナ（#18）を足すときに同じ形で足す

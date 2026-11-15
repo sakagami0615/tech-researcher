@@ -3,6 +3,8 @@
 置き場所と権限の確認は、統括スクリプトの起動の検査（test_orchestrator.py）で確かめる。
 """
 
+import pytest
+
 from tech_researcher.envfiles import secret_values
 
 
@@ -29,3 +31,9 @@ def test_secret_values_handle_crlf_and_bad_bytes(tmp_path):
     path = tmp_path / "worker.env"
     path.write_bytes(b"GITHUB_TOKEN=fake-crlf\r\nX=\xff\r\n")
     assert "fake-crlf" in secret_values(path)
+
+
+def test_secret_values_error_has_no_path(tmp_path):
+    with pytest.raises(ValueError) as e:
+        secret_values(tmp_path)  # フォルダは読めない
+    assert str(tmp_path) not in str(e.value)

@@ -261,7 +261,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     except Busy:
         print(f"tr-run: 同じ種類の実行（{name}）が動いている", file=sys.stderr)
         return EXIT_BUSY
-    except OSError as e:  # ロックのファイル・fork など
+    except (OSError, ValueError) as e:  # ロックのファイル・fork・worker.env の読み出しなど
         return _usage_error(e, environ)
 
 

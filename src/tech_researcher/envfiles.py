@@ -52,24 +52,26 @@ def secrets_dir(
     return path
 
 
-# 種類の判定、種類の説明、求める権限
-_DIR = (stat.S_ISDIR, "フォルダ", "700")
-_FILE = (stat.S_ISREG, "通常のファイル（シンボリックリンクにしない）", "600")
+# 種類の判定、種類の説明、求める権限、持ち主に要る権限（compose が読めるように）
+_DIR = (stat.S_ISDIR, "フォルダ", "700", stat.S_IRUSR | stat.S_IXUSR)
+_FILE = (stat.S_ISREG, "通常のファイル（シンボリックリンクにしない）", "600", stat.S_IRUSR)
 
 
 def _check_private(
-    path: Path, label: str, kind: tuple[Callable[[int], bool], str, str], owner: int
+    path: Path, label: str, kind: tuple[Callable[[int], bool], str, str, int], owner: int
 ) -> None:
-    is_kind, kind_name, mode = kind
+    is_kind, kind_name, mode, needed = kind
     try:
         st = path.lstat()  # シンボリックリンクはたどらない（別の場所のファイルを渡さない）
     except FileNotFoundError:
         raise ValueError(f"{label} がない（先に作る）") from None
+    except OSError:  # 親のフォルダをたどれないなど。例外の文にはパスが入るので使わない
+        raise ValueError(f"{label} を確かめられない（親のフォルダの権限を見直す）") from None
     if not is_kind(st.st_mode):
         raise ValueError(f"{label} は{kind_name}にする")
     if st.st_uid == 0 or st.st_uid != owner:
         raise ValueError(f"{label} の持ち主は bin/tr-run を動かす人にする（root にしない）")
-    if st.st_mode & 0o077:
+    if st.st_mode & 0o077 or st.st_mode & needed != needed:
         raise ValueError(f"{label} の権限は {mode} にする（グループとほかの人の権限を外す）")
 
 
@@ -79,9 +81,14 @@ def secret_values(path: Path) -> list[str]:
     compose の書式を厳密にはまねず、伏せる側に倒す。`名前=値` の行ごとに、値そのものと、
     前後の引用符を外したものと、行末のコメント（` #` 以降）を外したものを返す。書式の誤った行
     （閉じていない引用符など）も読む。compose がその値をエラー文に出すため。
+    読めなければ ValueError（例外の文にはパスが入るので使わない）。
     """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise ValueError(f"{SECRETS_DIR_ENV} の {WORKER_ENV} を読めない") from None
     values: list[str] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in text.splitlines():
         name, sep, value = line.partition("=")
         name = name.strip().removeprefix(_EXPORT).strip()
         if not sep or not is_secret_name(name):

@@ -354,6 +354,10 @@ def _link_file(h):
         (lambda h: h.secrets.chmod(0o701), "フォルダ の権限は 700"),
         (lambda h: (h.secrets / "worker.env").chmod(0o640), "worker.env の権限は 600"),
         (lambda h: (h.secrets / "worker.env").chmod(0o604), "worker.env の権限は 600"),
+        # 持ち主が読めなければ compose も読めない
+        (lambda h: (h.secrets / "worker.env").chmod(0o000), "worker.env の権限は 600"),
+        (lambda h: (h.secrets / "worker.env").chmod(0o200), "worker.env の権限は 600"),
+        (lambda h: h.secrets.chmod(0o600), "フォルダ の権限は 700"),
         (_link_file, "シンボリックリンクにしない"),
     ],
 )
@@ -364,8 +368,11 @@ def test_rejects_bad_secrets_dir(host, capfd, change, message):
     assert out == ""
     assert message in err
     assert WORKER_SECRET not in err
+    assert str(host.secrets) not in err  # パスも出さない
     assert host.calls() == []
     assert not (host.data / "locks").exists()  # 起動の前に止まる
+    if host.secrets.exists():
+        host.secrets.chmod(0o700)  # tmp_path を片付けられるように
 
 
 def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):
@@ -401,7 +408,11 @@ def test_compose_passes_worker_env_only_to_worker():
     assert len(uses) == 1
     assert uses[0].startswith("- path: ${TR_SECRETS_DIR:?")
     assert uses[0].endswith("}/worker.env")
-    services = [line.strip() for line in lines if line.startswith("  ") and line[2] != " "]
+    top = [i for i, line in enumerate(lines) if line and not line[0].isspace()]
+    start = next(i for i in top if lines[i] == "services:")
+    end = next((i for i in top if i > start), len(lines))
+    section = lines[start + 1 : end]
+    services = [line.strip() for line in section if line.startswith("  ") and line[2] != " "]
     assert services == ["worker:"]  # ほかのサービス（#18 の agent）を足したら、ここも見直す
     assert sum("env_file:" in line for line in lines) == 1
 

@@ -43,7 +43,7 @@ worker が使う認証情報は、リポジトリの外の `${TR_SECRETS_DIR}/wo
 ```sh
 install -d -m 700 "$TR_SECRETS_DIR"
 install -m 600 deploy/env/worker.env.example "$TR_SECRETS_DIR/worker.env"
-"${EDITOR:-vi}" "$TR_SECRETS_DIR/worker.env"   # 値を入れる。引用符で囲まず、1行に1つ
+"${EDITOR:-vi}" "$TR_SECRETS_DIR/worker.env"   # 値を入れる。引用符で囲まず、1行に1つ（値に `$` を含めない）
 ```
 
 - いまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
@@ -64,7 +64,7 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 
 ## 実行（bin/tr-run）
 
-cron と手動実行は、同じ入口 `bin/tr-run` を使います。ホストに uv と Docker（Compose）が要ります。上の `TR_DATA_DIR`・`TR_SECRETS_DIR` を設定してから実行します。`TR_UID`・`TR_GID` を省略すると、`bin/tr-run` を動かしている人の ID を使います（root では動かしません）。
+cron と手動実行は、同じ入口 `bin/tr-run` を使います。ホストに uv と Docker（Compose 2.24 以上。compose.yaml の `env_file` の `required` を使うため）が要ります。上の `TR_DATA_DIR`・`TR_SECRETS_DIR` を設定してから実行します。`TR_UID`・`TR_GID` を省略すると、`bin/tr-run` を動かしている人の ID を使います（root では動かしません）。
 
 ```sh
 bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
