@@ -648,6 +648,14 @@ def test_image_with_parentheses_in_url_is_not_a_link():
     assert markdown_links(text) == ("https://docs.example.com/x",)
 
 
+def test_query_with_legacy_entity_names_is_kept_whole():
+    text = "https://example.com/s?q=a&region=us&param=1&notify=2 [x](https://ex.com/?a=1&amp;b=2)"
+    assert markdown_links(text) == (
+        "https://example.com/s?q=a&region=us&param=1&notify=2",
+        "https://ex.com/?a=1&b=2",
+    )
+
+
 def test_readme_deadline_stops_the_rest(limits):
     fetch = FakeFetch(
         {readme_url("a/one"): readme_body("x"), readme_url("b/two"): readme_body("y")}

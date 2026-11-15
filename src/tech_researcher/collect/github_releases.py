@@ -347,20 +347,25 @@ MAX_LINKS = 100
 MAX_URL_LENGTH = 2048
 # 10 進の数値文字参照で、有効な符号位置（7桁まで）より長いもの。html.unescape は桁数の上限なく
 # int() にかけ、4300 桁を超えると ValueError になるので、先に置き換える
-_LONG_DECIMAL_REF = re.compile(r"&#0*[0-9]{8,};?")
+_LONG_DECIMAL_REF = re.compile(r"&#0*[1-9][0-9]{7,};?")
+# `;` で終わる文字参照だけを戻す。html.unescape は `;` なしの古い名前（&reg・&not など）も戻し、
+# URL のクエリ（&region=・&param=）を壊して別の先を指す候補にしてしまうため
+_CHAR_REF = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);")
 
 
 def markdown_links(text: str | None) -> tuple[str, ...]:
     """Markdown の本文の絶対 URL を順に、正規化した先の重なりを除いて先頭の MAX_LINKS 件まで
     集める。相対リンクと、正規化できない URL・MAX_URL_LENGTH より長い URL は集めない。
 
-    本文に混ざる HTML の文字参照（&amp; など）は先に戻す。括弧を含む URL は括弧の前で切れる
+    本文に混ざる HTML の文字参照（&amp; など。`;` で終わるものだけ）は先に戻す。
+    括弧を含む URL は括弧の前で切れる
     （Wikipedia の一部の記事など。候補リンクとしては受け入れる）。
     正規化と http(s) の絞り込みはまとめるときに行う（aggregate）。
     """
     if not text:
         return ()
-    text = html.unescape(_LONG_DECIMAL_REF.sub("\ufffd", _drop_comments(text)))
+    text = _LONG_DECIMAL_REF.sub("\ufffd", _drop_comments(text))
+    text = _CHAR_REF.sub(_unescape_ref, text)
     images = {(label or alt).casefold() for alt, label in _REF_IMAGE.findall(text)}
     text = _REF_DEF.sub(lambda m: " " if m.group(1).casefold() in images else m.group(), text)
     text = _IMAGES.sub(" ", text)
@@ -373,6 +378,13 @@ def markdown_links(text: str | None) -> tuple[str, ...]:
             if len(links) >= MAX_LINKS:
                 break
     return tuple(links.values())
+
+
+def _unescape_ref(match: re.Match[str]) -> str:
+    try:
+        return html.unescape(match.group())
+    except ValueError:  # 0 が並んで桁数が上限（4300）を超える数値文字参照など
+        return "\ufffd"
 
 
 def _drop_comments(text: str) -> str:
