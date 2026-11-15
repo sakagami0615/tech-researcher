@@ -88,7 +88,7 @@ def collect_token(environ: Mapping[str, str] = os.environ) -> str | None:
 
 
 class GitHubClient:
-    """GitHub の REST API の GET。1回の実行の中で使った回数を数える。
+    """GitHub の REST API の GET と GraphQL API の POST。1回の実行の中で使った回数を数える。
 
     token が None なら認証なしで要求する（GitHub の上限は小さくなる。structure.md 6.2）。
     fetch_url・clock・sleep はテストで差し替える。
@@ -195,7 +195,7 @@ class GitHubClient:
         self.graphql_calls += response.attempts
         try:
             return json.loads(response.body)
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:  # 入れ子が深すぎる JSON は RecursionError
             message = f"{GRAPHQL_PATH}：応答が JSON でない"
             raise GitHubError(message, INVALID_RESPONSE, response.attempts) from e
 

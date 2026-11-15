@@ -122,11 +122,3 @@ def load_star_snapshot(conn: sqlite3.Connection, target: date) -> dict[str, Star
         except TypeError, ValueError:
             continue
     return found
-
-
-def has_star_snapshot(conn: sqlite3.Connection, target: date) -> bool:
-    """対象日 target の測定が1件でもあるか。ない日は「前日の Star の記録が丸ごとない」（3.5）。"""
-    row = conn.execute(
-        "SELECT 1 FROM star_snapshots WHERE target = ? LIMIT 1", (target.isoformat(),)
-    ).fetchone()
-    return row is not None

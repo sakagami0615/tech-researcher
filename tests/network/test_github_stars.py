@@ -29,13 +29,19 @@ def test_star_counts_are_fetched_in_one_query():
         Candidate("anthropics/claude-code", ("watch",)),
         Candidate("openai/codex", ("watch",)),
         Candidate("tech-researcher-missing/no-such-repo", ("watch",)),
+        # 名前を変えたリポジトリ（zeit → vercel）。新しい名前で返ることを確かめる
+        Candidate("zeit/next.js", ("watch",)),
     ]
     result = measure_stars(
         candidates, client, target, None, write=False,
         batch_size=CONFIG.limits.github_graphql_batch,
     )  # fmt: skip
     assert result.error is None, result.error_category
-    assert {s.repo for s in result.snapshots} == {"anthropics/claude-code", "openai/codex"}
+    assert {s.repo for s in result.snapshots} == {
+        "anthropics/claude-code",
+        "openai/codex",
+        "vercel/next.js",
+    }
     assert all(s.stars_total > 0 for s in result.snapshots)
     assert result.missing == ("tech-researcher-missing/no-such-repo",)
     assert client.graphql_calls == 1

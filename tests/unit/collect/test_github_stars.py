@@ -26,7 +26,6 @@ from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.schema import open_db
 from tech_researcher.db.star_snapshots import (
     StarSnapshot,
-    has_star_snapshot,
     load_star_snapshot,
     record_star_snapshots,
 )
@@ -163,7 +162,7 @@ def test_same_target_remeasured_keeps_and_returns_the_first(limits, conn):
         [cand("a/b")], make_client(limits, first), DAILY, conn, write=True, batch_size=100,
         now=Clock(),
     )  # fmt: skip
-    again = FakeFetch(answer(node("a/b", 99), node("c/d", 5)))
+    again = FakeFetch(answer(node("c/d", 5)))
     result = measure_stars(
         [cand("a/b", ("watch",)), cand("c/d")], make_client(limits, again), DAILY, conn,
         write=True, batch_size=100, now=Clock(AT + timedelta(hours=2)),
@@ -178,14 +177,14 @@ def test_same_target_remeasured_keeps_and_returns_the_first(limits, conn):
 def test_first_day_without_previous_records_is_recorded(limits, conn):
     """前日の記録がない日（運用の初日）も記録する。翌日はその記録と比べられる。"""
     yesterday = DAILY.key - timedelta(days=1)
-    assert not has_star_snapshot(conn, yesterday)
+    assert not load_star_snapshot(conn, yesterday)
     fetch = FakeFetch(answer(node("a/b", 10)))
     result = measure_stars(
         [cand("a/b")], make_client(limits, fetch), DAILY, conn, write=True, batch_size=100,
         now=Clock(),
     )  # fmt: skip
     assert [s.repo for s in result.snapshots] == ["a/b"]
-    assert has_star_snapshot(conn, DAILY.key)
+    assert load_star_snapshot(conn, DAILY.key)
     assert load_star_snapshot(conn, yesterday) == {}
 
 
@@ -197,7 +196,7 @@ def test_dry_run_does_not_write_but_uses_the_recorded_values(limits, tmp_path):
     rw.close()
     ro = open_readonly(path)
     try:
-        fetch = FakeFetch(answer(node("a/b", 99), node("c/d", 5)))
+        fetch = FakeFetch(answer(node("c/d", 5)))
         result = measure_stars(
             [cand("a/b"), cand("c/d")], make_client(limits, fetch), DAILY, ro, write=False,
             batch_size=100, now=Clock(AT + timedelta(hours=2)),
@@ -243,7 +242,7 @@ def test_without_token_nothing_is_requested(limits, conn, token):
     assert result.error_category == github_api.AUTH
     assert result.unmeasured == ("a/b", "c/d")
     assert fetch.requests == []
-    assert not has_star_snapshot(conn, DAILY.key)
+    assert not load_star_snapshot(conn, DAILY.key)
 
 
 def test_failed_batch_keeps_the_others(limits, conn):
@@ -366,3 +365,86 @@ def test_error_type_in_message_is_limited_to_a_safe_form():
 def test_fetch_stars_refuses_zero_batch(limits):
     with pytest.raises(ValueError):
         fetch_stars(make_client(limits, FakeFetch()), [cand("a/b")], batch_size=0)
+
+
+def test_recorded_candidates_are_not_queried_again(limits, conn):
+    record_star_snapshots(
+        conn,
+        DAILY.key,
+        [StarSnapshot("a/b", 10, datetime(2026, 10, 1, tzinfo=UTC), AT, ("search",))],
+    )
+    fetch = FakeFetch(answer(node("c/d", 5)))
+    result = measure_stars(
+        [cand("a/b", ("mention",), ("https://x.example/1",)), cand("c/d")],
+        make_client(limits, fetch), DAILY, conn, write=True, batch_size=100,
+        now=Clock(AT + timedelta(hours=2)),
+    )  # fmt: skip
+    assert [r["variables"] for r in fetch.requests] == [{"o0": "c", "n0": "d"}]
+    assert [(s.repo, s.stars_total) for s in result.snapshots] == [("a/b", 10), ("c/d", 5)]
+    assert result.mentioned_by == {"a/b": ("https://x.example/1",)}
+
+
+def test_rerun_that_fails_still_returns_the_recorded_values(limits, conn):
+    """再実行がレート制限で止まっても、最初の実行で記録した値は返る（判定が変わらない）。"""
+    first = FakeFetch(answer(node("a/a", 1)), FetchError("再試行を使い切った：HTTP 502", 3, 502))
+    measure_stars(
+        [cand("a/a"), cand("b/b")], make_client(limits, first), DAILY, conn, write=True,
+        batch_size=1, now=Clock(),
+    )  # fmt: skip
+    again = FakeFetch({"errors": [{"type": "RATE_LIMITED", "message": "limit"}]})
+    result = measure_stars(
+        [cand("a/a"), cand("b/b")], make_client(limits, again), DAILY, conn, write=True,
+        batch_size=1, now=Clock(AT + timedelta(hours=1)),
+    )  # fmt: skip
+    assert len(again.requests) == 1  # 記録のない b/b だけを問い合わせた
+    assert [(s.repo, s.stars_total) for s in result.snapshots] == [("a/a", 1)]
+    assert (result.unmeasured, result.error_category) == (("b/b",), github_api.RATE_LIMITED)
+
+
+def test_renamed_repo_already_recorded_returns_the_first_measurement(limits, conn):
+    record_star_snapshots(
+        conn,
+        DAILY.key,
+        [StarSnapshot("new/name", 3, datetime(2026, 10, 1, tzinfo=UTC), AT, ("watch",))],
+    )
+    fetch = FakeFetch(answer(node("new/name", 9)))
+    result = measure_stars(
+        [cand("old/name", ("mention",))], make_client(limits, fetch), DAILY, conn, write=True,
+        batch_size=100, now=Clock(AT + timedelta(hours=1)),
+    )  # fmt: skip
+    assert [(s.repo, s.stars_total) for s in result.snapshots] == [("new/name", 3)]
+    assert load_star_snapshot(conn, DAILY.key)["new/name"].stars_total == 3
+
+
+def test_all_candidates_recorded_sends_nothing_even_without_client(conn):
+    record_star_snapshots(
+        conn, DAILY.key, [StarSnapshot("a/b", 3, datetime(2026, 10, 1, tzinfo=UTC), AT, ("watch",))]
+    )
+    result = measure_stars([cand("a/b")], None, DAILY, conn, write=True, batch_size=100)
+    assert ([s.stars_total for s in result.snapshots], result.error) == ([3], None)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"type": "NOT_FOUND", "path": [["r0"]]},
+        {"type": "NOT_FOUND", "path": [{"a": 1}]},
+        {"type": "NOT_FOUND", "path": [0]},
+    ],
+)
+def test_error_paths_of_other_shapes_fail_the_batch(error):
+    with pytest.raises(github_api.GitHubError) as e:
+        parse_batch({"data": {"r0": None}, "errors": [error]}, 1)
+    assert e.value.category == github_api.GRAPHQL
+
+
+def test_rate_limited_error_on_an_alias_fails_the_batch():
+    data = {"data": {"r0": None}, "errors": [{"type": "RATE_LIMITED", "path": ["r0"]}]}
+    with pytest.raises(github_api.GitHubError) as e:
+        parse_batch(data, 1)
+    assert e.value.category == github_api.RATE_LIMITED
+
+
+def test_star_count_beyond_graphql_int_is_unmeasured():
+    found, _, failed = parse_batch(answer(node("a/b", 2**31)), 1)
+    assert (found, failed) == ({}, [0])

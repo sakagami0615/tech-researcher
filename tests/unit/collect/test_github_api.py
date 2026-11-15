@@ -414,3 +414,11 @@ def test_graphql_invalid_json_is_an_error(limits):
         api.graphql("{ x }", {})
     assert e.value.category == github_api.INVALID_RESPONSE
     assert api.graphql_calls == 1
+
+
+def test_graphql_deeply_nested_json_is_an_invalid_response(limits):
+    body = b"[" * 100_000 + b"]" * 100_000
+    api = client(limits, FakeFetch(Response("https://api.github.com/graphql", 200, body, 1)))
+    with pytest.raises(GitHubError) as e:
+        api.graphql("{ x }", {})
+    assert e.value.category == github_api.INVALID_RESPONSE

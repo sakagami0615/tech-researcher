@@ -8,7 +8,6 @@ from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.schema import open_db, transaction
 from tech_researcher.db.star_snapshots import (
     StarSnapshot,
-    has_star_snapshot,
     load_star_snapshot,
     recent_repos,
     record_star_snapshots,
@@ -114,7 +113,7 @@ def test_snapshots_are_recorded_and_loaded(conn):
         '["search", "watch"]',
     )
     assert load_star_snapshot(conn, T) == {"a/b": snap("a/b", 10, routes=("search", "watch"))}
-    assert has_star_snapshot(conn, T)
+    assert load_star_snapshot(conn, T)
 
 
 def test_remeasuring_the_same_target_keeps_the_first_measurement(conn):
@@ -139,11 +138,11 @@ def test_same_repo_and_measured_at_on_another_target_is_ignored(conn):
 
 
 def test_previous_day_without_records(conn):
-    """前日の記録がない日（運用の初日など）は、前日の測定が空で、丸ごとないと分かる（3.5）。"""
+    """前日の記録がない日（運用の初日など）は、前日の測定が空になる（3.5 の丸ごとない日）。"""
     record_star_snapshots(conn, T, [snap("a/b", 10)])
     yesterday = T - timedelta(days=1)
     assert load_star_snapshot(conn, yesterday) == {}
-    assert not has_star_snapshot(conn, yesterday)
+    assert not load_star_snapshot(conn, yesterday)
 
 
 def test_previous_day_without_a_repo(conn):
@@ -152,7 +151,7 @@ def test_previous_day_without_a_repo(conn):
     record_star_snapshots(conn, yesterday, [snap("a/b", 8, AT - timedelta(days=1))])
     record_star_snapshots(conn, T, [snap("a/b", 10), snap("new/repo", 3)])
     previous = load_star_snapshot(conn, yesterday)
-    assert has_star_snapshot(conn, yesterday)
+    assert load_star_snapshot(conn, yesterday)
     assert "new/repo" not in previous
     assert load_star_snapshot(conn, T)["a/b"].stars_total - previous["a/b"].stars_total == 2
 
@@ -172,7 +171,7 @@ def test_failed_write_leaves_nothing(conn):
 
     with pytest.raises(RuntimeError):
         record_star_snapshots(conn, T, Broken())
-    assert not has_star_snapshot(conn, T)
+    assert not load_star_snapshot(conn, T)
 
 
 def test_cannot_be_called_inside_a_transaction(conn):

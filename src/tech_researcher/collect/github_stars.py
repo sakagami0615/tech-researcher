@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 _FIELDS = "nameWithOwner stargazerCount createdAt"
 # GraphQL の誤りの種類（type）として、メッセージに入れてよい形
 _ERROR_TYPE = re.compile(r"[A-Z_]{1,40}")
+# Star 数の上限。GitHub の GraphQL の Int は32ビットなので、それを超える値は応答の崩れとみなす
+_MAX_STARS = 2**31 - 1
 # これらの失敗では、次の問い合わせも同じく失敗するのでやめる
 _STOP_CATEGORIES = frozenset({github_api.AUTH, github_api.RATE_LIMITED, github_api.BUDGET})
 
@@ -79,29 +81,36 @@ def measure_stars(
     """候補の Star 数を測り、日次なら star_snapshots に書く。
 
     週次では何もしない。write が False（ドライラン）か conn が None なら書かない。
-    conn があれば、対象日の記録にあるリポジトリはその値を返す（最初の測定を残す。3.7）。
-    client が None か認証なしなら要求を出さず、全候補を unmeasured にして AUTH の失敗とする。
-    batch_size は limits.github_graphql_batch。now は測定時刻にする時計（テストで差し替える）。
+    conn があり、対象日の記録に同じ名前の行がある候補（同じ対象の再実行・ドライラン）は、
+    問い合わせずにその値を返す（最初の測定を残す。3.7）。測った結果の名前が記録にあるとき
+    （名前の変更）も、記録の値を返す。
+    client が None か認証なしなら要求を出さず、測っていない候補を unmeasured にして AUTH の
+    失敗とする。batch_size は limits.github_graphql_batch。now は測定時刻にする時計。
     """
     if target.cadence != "daily":
         return StarResult(())
     candidates = list(candidates)
-    if not candidates:
-        return StarResult(())
-    if client is None:
+    stored = load_star_snapshot(conn, target.key) if conn is not None and candidates else {}
+    pending = [c for c in candidates if c.repo not in stored]
+    if not pending:
+        result = StarResult(())
+    elif client is None:
         error = GitHubError("収集用トークンがない", github_api.AUTH, 0)
-        return StarResult((), unmeasured=tuple(c.repo for c in candidates), **_error(error))
-    result = fetch_stars(client, candidates, batch_size=batch_size, now=now)
-    if conn is None:
-        return result
-    if write:
+        result = StarResult((), unmeasured=tuple(c.repo for c in pending), **_error(error))
+    else:
+        result = fetch_stars(client, pending, batch_size=batch_size, now=now)
+    if conn is not None and write and result.snapshots:
         written = record_star_snapshots(conn, target.key, result.snapshots)
         log.info("Star 数：%d 件を記録した（測定 %d 件）", written, len(result.snapshots))
-    stored = load_star_snapshot(conn, target.key)
-    snapshots = tuple(stored.get(s.repo, s) for s in result.snapshots)
+    snapshots = {s.repo: stored.get(s.repo, s) for s in result.snapshots}
+    mentioned = {r: dict.fromkeys(m) for r, m in result.mentioned_by.items()}
+    for c in candidates:
+        if c.repo in stored:
+            snapshots[c.repo] = stored[c.repo]
+            mentioned.setdefault(c.repo, {}).update(dict.fromkeys(c.mentioned_by))
     return StarResult(
-        snapshots,
-        result.mentioned_by,
+        tuple(snapshots[r] for r in sorted(snapshots)),
+        {r: tuple(mentioned[r]) for r in sorted(mentioned) if mentioned[r]},
         result.missing,
         result.unmeasured,
         result.calls,
@@ -196,8 +205,9 @@ def parse_batch(
     """問い合わせの応答を（番号 → (名前, Star 数, 作成日時)、見つからない番号、失敗の番号）にする。
 
     番号はまとめた候補の中の順（別名 `r{番号}`）。1件の誤り（errors の path がその別名）は、
-    種類が NOT_FOUND なら見つからない、ほかは失敗とする。どの別名にも当たらない誤りや、
-    応答の形の崩れは、問い合わせ全体の失敗（GitHubError）とする。
+    種類が NOT_FOUND なら見つからない、ほかは失敗とする。どの別名にも当たらない誤り、
+    RATE_LIMITED の誤り（別名に当たっても）、応答の形の崩れは、問い合わせ全体の失敗
+    （GitHubError）とする。
     """
     if not isinstance(data, dict):
         raise _invalid("応答がオブジェクトでない")
@@ -210,9 +220,11 @@ def parse_batch(
         kind = error.get("type") if isinstance(error, dict) else None
         kind = kind if isinstance(kind, str) and _ERROR_TYPE.fullmatch(kind) else "UNKNOWN"
         path = error.get("path") if isinstance(error, dict) else None
-        if isinstance(path, list) and path and path[0] in aliases:
-            error_types.setdefault(aliases[path[0]], kind)
-            continue
+        if kind != "RATE_LIMITED" and isinstance(path, list) and path:
+            alias = path[0]
+            if isinstance(alias, str) and alias in aliases:
+                error_types.setdefault(aliases[alias], kind)
+                continue
         category = github_api.RATE_LIMITED if kind == "RATE_LIMITED" else github_api.GRAPHQL
         raise GitHubError(f"GraphQL の誤り：{kind}", category, 0)
     nodes = data.get("data")
@@ -246,7 +258,7 @@ def _parse_node(node: object) -> tuple[str, int, datetime] | None:
     )
     if not isinstance(name, str) or not GITHUB_REPO_NAME.fullmatch(name.lower()):
         return None
-    if not isinstance(stars, int) or isinstance(stars, bool) or stars < 0:
+    if not isinstance(stars, int) or isinstance(stars, bool) or not 0 <= stars <= _MAX_STARS:
         return None
     if not isinstance(created, str):
         return None
