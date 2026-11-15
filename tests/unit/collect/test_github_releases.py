@@ -600,7 +600,7 @@ def test_long_urls_and_numeric_references_are_handled():
 def test_deadline_stops_the_rest(limits):
     repos = ("a/one", "b/two", "c/three")
     fetch = FakeFetch({releases_url(r): b"[]" for r in repos})
-    times = iter([0.0, 5.0, 11.0])
+    times = iter([0.0, 0.0, 5.0, 5.0, 11.0])  # リポジトリの前とページの前に確かめる
     result = collect_releases(
         replace(RELEASES, repos=repos),
         TARGET.period,
@@ -611,6 +611,32 @@ def test_deadline_stops_the_rest(limits):
     assert fetch.urls() == [releases_url("a/one"), releases_url("b/two")]
     assert result.error is None
     assert result.failed_parts == (FailedPart("c/three", "timeout"),)
+
+
+def test_deadline_stops_between_pages(limits):
+    fetch = FakeFetch({releases_url("a/one"): b"[" + b",".join([b"{}"] * 30) + b"]"})
+    times = iter([0.0, 0.0, 11.0])  # 1ページ目の後、2ページ目の前で上限を過ぎる
+    result = collect_releases(
+        replace(RELEASES, repos=("a/one",)),
+        TARGET.period,
+        client(limits, fetch),
+        deadline=10.0,
+        clock=lambda: next(times),
+    )
+    assert len(fetch.calls) == 1
+    assert result.error is not None
+
+
+def test_readme_deadline_stops_the_rest(limits):
+    fetch = FakeFetch(
+        {readme_url("a/one"): readme_body("x"), readme_url("b/two"): readme_body("y")}
+    )
+    times = iter([0.0, 11.0])
+    result = fetch_readmes(
+        ["a/one", "b/two"], client(limits, fetch), deadline=10.0, clock=lambda: next(times)
+    )
+    assert fetch.urls() == [readme_url("a/one")]
+    assert result.errors == {"b/two": "timeout"}
 
 
 @pytest.mark.parametrize(

@@ -64,7 +64,7 @@ def collect_releases(
     取れなかったリポジトリは failed_parts に残し、取れた分は使う。すべてが取れなかったときだけ
     情報源を失敗にする（US-E6-03）。ページの上限に達したリポジトリは、取れた分を使ったうえで
     TRUNCATED として failed_parts に残す（取りこぼしたおそれを読者に伝えるため）。
-    deadline は情報源ごとの時間の上限（clock の値。structure.md 6.4）。リポジトリの間で確かめ、
+    deadline は情報源ごとの時間の上限（clock の値。structure.md 6.4）。リポジトリの間とページの間で確かめ、
     過ぎた後のリポジトリには要求を出さず、timeout として取れなかったものにする。
     attempts はこの情報源で使った要求の回数（再試行を含む）。
     """
@@ -82,7 +82,9 @@ def collect_releases(
             failed.append(FailedPart(full_name, stopped))
             continue
         try:
-            repo_records, complete = _repo_releases(full_name, period, client, fetched_at)
+            repo_records, complete = _repo_releases(
+                full_name, period, client, fetched_at, deadline, clock
+            )
         except GitHubError as e:
             log.warning("%s：%s が取れない（%s）", SOURCE_ID, full_name, e.category)
             failed.append(FailedPart(full_name, e.category))
@@ -104,7 +106,12 @@ def collect_releases(
 
 
 def _repo_releases(
-    full_name: str, period: Period, client: GitHubClient, fetched_at: datetime
+    full_name: str,
+    period: Period,
+    client: GitHubClient,
+    fetched_at: datetime,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[list[Record], bool]:
     """1つのリポジトリのリリースを、新しい順のページで期間の始まりまで取る。
 
@@ -121,6 +128,8 @@ def _repo_releases(
     """
     records = []
     for page in range(1, MAX_PAGES + 1):
+        if deadline is not None and clock() >= deadline:  # ページの間でも時間の上限を確かめる
+            raise GitHubError(f"{full_name}：時間の上限に達した", github_api.TIMEOUT, 0)
         data = client.get(f"/repos/{full_name}/releases", {"per_page": PER_PAGE, "page": page})
         try:
             if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
@@ -211,7 +220,13 @@ class ReadmeResult:
     invalid_names: int = 0
 
 
-def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResult:
+def fetch_readmes(
+    full_names: Iterable[str],
+    client: GitHubClient,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> ReadmeResult:
     """渡されたリポジトリ（`owner/repo`）の README を取る。
 
     1件の失敗では止めず、続きを取る（README は項目の補足で、なくても項目は載せられるため）。
@@ -220,6 +235,7 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
     大文字・小文字を区別しないので、小文字にそろえて重なりを除く。
     1MB を超える README は API が本文を返さない（encoding が none）ので、README がないものと
     同じく失敗にしない。
+    deadline は時間の上限（clock の値）。過ぎた後のリポジトリには要求を出さず、timeout にする。
     """
     before = client.rest_calls
     readmes: dict[str, Readme] = {}
@@ -239,6 +255,8 @@ def fetch_readmes(full_names: Iterable[str], client: GitHubClient) -> ReadmeResu
         if full_name in seen:
             continue
         seen.add(full_name)
+        if stopped is None and deadline is not None and clock() >= deadline:
+            stopped = github_api.TIMEOUT
         if stopped is not None:
             errors[full_name] = stopped
             continue
