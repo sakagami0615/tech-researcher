@@ -92,6 +92,8 @@ sqlite3 -readonly "$TR_DATA_DIR/db/tech-researcher.sqlite3" \
   "SELECT source_id, status, error_category, attempts, record_count FROM source_fetches WHERE run_id = (SELECT max(run_id) FROM runs WHERE run_id LIKE 'obs-%');"
 ```
 
+- ① の例外で閉じた runs の `error_category` は例外の型の名前（`RuntimeError` など）です。標準出力の要約では、同じ失敗が worker の終了コード（`exit_1`）で出ます
+- 収集用トークンの形が誤っているとき（使えない文字を含むなど）は、トークンがないものとして扱います。ログの最初に `auth` の失敗が1行残ります
 - 観測と同じ時刻にドライラン（`bin/tr-run daily --dry-run`）を動かさないでください。ロックが別なので同時に動けますが、同じ収集用トークンで GitHub Search の毎分の回数を取り合います
 - `status` が `running` のまま残った観測は、上限時間で止められたなど、途中で終わった実行です。ログ（`$TR_DATA_DIR/logs/YYYY/MM/<実行ID>.jsonl`）で原因を確かめます
 - 同じ対象日にもう一度動かしても、Star 数と人気型フィードの記録は最初のものを残し、items は同じ行を更新します

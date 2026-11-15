@@ -136,13 +136,13 @@ def test_source_fetch_states():
 @pytest.mark.parametrize(
     ("fetch", "expected"),
     [
-        (GitHubFetch(3, 3, 2), ("ok", None, 3)),
-        (GitHubFetch(0, 0, 1), ("no_results", None, 0)),
+        (GitHubFetch(3, 2), ("ok", None, 3)),
+        (GitHubFetch(0, 1), ("no_results", None, 0)),
         # Search が上限で止まっても、測れた分があれば部分的な成功（ok）
-        (GitHubFetch(5, 2, 101, "上限", "budget"), ("ok", None, 2)),
-        (GitHubFetch(4, 0, 2, "401", "auth"), ("failed", "auth", 0)),
-        (GitHubFetch(0, 0, 0, "x", None), ("failed", "fetch_failed", 0)),
-        (GitHubFetch(0, 0, 0, skipped=True), ("skipped", None, 0)),
+        (GitHubFetch(2, 101, "上限", "budget"), ("ok", None, 2)),
+        (GitHubFetch(0, 2, "401", "auth"), ("failed", "auth", 0)),
+        (GitHubFetch(0, 0, "x", None), ("failed", "fetch_failed", 0)),
+        (GitHubFetch(0, 0, skipped=True), ("skipped", None, 0)),
     ],
 )
 def test_github_fetch_states(fetch, expected):

@@ -6,7 +6,7 @@
 
 from datetime import UTC, timedelta
 
-from tech_researcher.collect.records import Event, Item
+from tech_researcher.collect.records import Event, Item, Record
 from tech_researcher.periods import (
     Period,
     Target,
@@ -56,17 +56,22 @@ def event_in_window(item: Item, event: Event, target: Target) -> bool:
 
 def published_before_period(item: Item, target: Target) -> bool:
     """公開が対象期間より前か（AI の入力の needs_period_event。2.5）。公開日時が不明なら False。"""
-    # 時刻まで分かる公開日時を優先する（event_in_window と同じ）
-    dated = [r for r in item.sources if r.published_at is not None]
-    published = next((r for r in dated if r.published_precision == "datetime"), None) or next(
-        iter(dated), None
-    )
+    published = published_source(item)
     if published is None:
         return False
     if published.published_precision == "date":
         days, as_of = last30days_window(target.period)
         return published.published_at.astimezone(UTC).date() < as_of - timedelta(days=days)
     return published.published_at < target.period.start
+
+
+def published_source(item: Item) -> Record | None:
+    """公開日時を代表する出典。時刻まで分かる公開日時を優先し、なければ日付だけのもの
+    （event_in_window と同じ順。items の代表の値にも使う）。公開日時がなければ None。"""
+    dated = [r for r in item.sources if r.published_at is not None]
+    return next((r for r in dated if r.published_precision == "datetime"), None) or next(
+        iter(dated), None
+    )
 
 
 def _date_only(item: Item, event: Event) -> bool:

@@ -274,7 +274,7 @@ def _collect_github(
     if settings is None or not settings.enabled:
         return None
     if target.cadence != "daily":
-        github = GitHubFetch(0, 0, 0, skipped=True)
+        github = GitHubFetch(0, 0, skipped=True)
     else:
         try:
             client = collectors.github(token, config.limits)
@@ -291,7 +291,6 @@ def _collect_github(
             # 最初の失敗は Search を先に見る
             failure = found if found.error is not None else stars
             github = GitHubFetch(
-                len(found.candidates),
                 len(stars.snapshots),
                 found.search_attempts + stars.calls,
                 failure.error,
@@ -301,7 +300,7 @@ def _collect_github(
             name = type(e).__name__
             source = GITHUB_REPOS_SOURCE_ID
             log.write("collect", "failure", source=source, error_category=name, exc=e)
-            github = GitHubFetch(0, 0, 0, name, name)
+            github = GitHubFetch(0, 0, name, name)
     at = collectors.now()
     category = None
     if github.error is not None:

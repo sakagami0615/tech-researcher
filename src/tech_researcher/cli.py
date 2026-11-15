@@ -22,7 +22,7 @@ import json
 import os
 import sqlite3
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,23 +90,32 @@ def _run(
     if args.stage == "verify":
         return run_verify(config, target, files.run_id, files.dir, log, scanner)
     conn = open_readonly(files.db) if files.dry_run else open_db(files.db)
+
+    def daily_input() -> None:
+        if args.cadence == "daily" and not files.observation:  # 週次の ② の入力は週次の Issue で
+            write_daily_input(config, target, files.dir)
+
     with closing(conn) if conn is not None else nullcontext():
         if files.dry_run:
             summary = run_collect(config, target, files.dir, log, db=conn, write_db=False)
-        else:
-            assert conn is not None
-            start_run(conn, files.run_id, target, files.started_at)
-            summary = _collect(config, target, files, log, conn)
-    if args.cadence == "daily" and not files.observation:  # 週次の ② の入力は、週次の Issue で足す
-        write_daily_input(config, target, files.dir)
-    return summary
+            daily_input()
+            return summary
+        assert conn is not None
+        start_run(conn, files.run_id, target, files.started_at)
+        return _collect(config, target, files, log, conn, daily_input)
 
 
 def _collect(
-    config: Config, target: Target, files: RunFiles, log: RunLog, conn: sqlite3.Connection
+    config: Config,
+    target: Target,
+    files: RunFiles,
+    log: RunLog,
+    conn: sqlite3.Connection,
+    then: Callable[[], None],
 ) -> dict:
     """本番の ①。① で実行エラーと分かったら、runs を failed（collect）で閉じる。
 
+    then は ① の続きの処理（日次の ② の入力を書く）で、その失敗も ① の例外として扱う。
     1つも取得できなかった日（collect_failure）と、① の例外が実行エラーになる（統括スクリプトの
     判定と同じ）。観測（obs-）は ① で終わるので、それ以外なら observed で閉じる。通常の日次・週次は
     ② 以降に進むので、ここでは閉じない（② 以降の失敗と成功の終わりは、その分岐と ⑤ の Issue で
@@ -114,6 +123,7 @@ def _collect(
     """
     try:
         summary = run_collect(config, target, files.dir, log, db=conn, write_db=True)
+        then()
     except Exception as e:
         with suppress(Exception):  # 閉じられなくても、元の失敗を伝える（running のまま残る）
             _finish(conn, files.run_id, type(e).__name__)

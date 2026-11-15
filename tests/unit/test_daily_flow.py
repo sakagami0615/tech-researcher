@@ -451,6 +451,19 @@ def test_production_collect_exception_closes_run_as_failed(host, monkeypatch):
     assert run[3:] == ("failed", "collect", "RuntimeError", 1)
 
 
+def test_production_daily_input_failure_closes_run_as_failed(host, monkeypatch):
+    """① の続き（② の入力を書く）の失敗も ① の失敗として閉じる。"""
+
+    def broken(*args, **kwargs):
+        raise OSError("書けない")
+
+    monkeypatch.setattr(cli, "write_daily_input", broken)
+    code, summary, _ = host.run()
+    assert (code, summary["failed_stage"]) == (1, "collect")
+    [run] = host.runs()
+    assert run[3:] == ("failed", "collect", "OSError", 1)
+
+
 def test_dry_run_does_not_change_existing_db(host):
     """ドライランは本番の DB を読み取り専用で開き、何も書かない（D-22）。"""
     with contextlib.closing(open_db(db_path(host.data))) as conn:

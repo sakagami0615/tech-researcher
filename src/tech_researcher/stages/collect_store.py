@@ -26,7 +26,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from tech_researcher.collect.github_candidates import ACTIVITY_PATHS, repo_from_url
-from tech_researcher.collect.period_filter import event_in_window
+from tech_researcher.collect.period_filter import event_in_window, published_source
 from tech_researcher.collect.records import Event, Item, Record, SourceResult
 from tech_researcher.collect.sources import GITHUB_REPOS_SOURCE_ID
 from tech_researcher.db.items import ItemRow, upsert_items
@@ -43,11 +43,10 @@ _HN_HOST = "news.ycombinator.com"
 class GitHubFetch:
     """候補集めと Star の測定（github_repos）の結果のうち、保存とログに使うもの。
 
-    measured は測った（同じ対象日の記録を使ったものを含む）リポジトリの数、candidates は候補の数。
+    measured は測った（同じ対象日の記録を使ったものを含む）リポジトリの数。
     error・error_category は最初の失敗（Search を先に見る）。skipped は測らなかった（週次）。
     """
 
-    candidates: int
     measured: int
     attempts: int
     error: str | None = None
@@ -130,12 +129,7 @@ def item_row(item: Item, target: Target) -> ItemRow:
 
 def representative(item: Item) -> Record:
     """代表の出典（時刻まで分かる公開日時 → 日付だけの公開日時 → 最初の出典）。"""
-    dated = [r for r in item.sources if r.published_at is not None]
-    return (
-        next((r for r in dated if r.published_precision == "datetime"), None)
-        or next(iter(dated), None)
-        or item.sources[0]
-    )
+    return published_source(item) or item.sources[0]
 
 
 def inclusion_event(item: Item, target: Target) -> Event:
