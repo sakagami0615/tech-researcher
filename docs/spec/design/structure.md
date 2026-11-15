@@ -461,7 +461,7 @@ ${TR_DATA_DIR}/
 │       ├── agent-input.json            # ② ④ の入力
 │       ├── agent-output.json           # ② ④ の出力
 │       ├── validation.json             # ③ の結果（合否、除外した項目と理由）
-│       ├── secret-scan.json            # 秘匿情報の検査の結果（検出したかどうかと、箇所の種類だけ）
+│       ├── secret-scan.json            # 秘匿情報の検査の結果（検出したかどうかと、検出の分類だけ）
 │       └── issue.md                    # ③ が作った Issue のタイトル・ラベル・本文（⑤ に渡す）
 └── dry-run/
     └── <実行ID>/
@@ -470,7 +470,7 @@ ${TR_DATA_DIR}/
         ├── agent-input.json            # ② の入力
         ├── agent-output.json           # ② の出力（structured_output）
         ├── validation.json             # ③ の結果（合否、除外した項目と理由）
-        ├── secret-scan.json            # 秘匿情報の検査の結果（検出したかどうかと、箇所の種類だけ）
+        ├── secret-scan.json            # 秘匿情報の検査の結果（検出したかどうかと、検出の分類だけ）
         ├── investigation.json          # ④ を実行したときだけ
         ├── issue.md                    # 作るはずだった Issue のタイトル・ラベル・本文（レポート・不合格・実行エラーのいずれか）
         └── log.jsonl                   # その実行のログ

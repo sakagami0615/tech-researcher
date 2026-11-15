@@ -368,6 +368,25 @@ def test_ai_failure_stops_before_verify(host):
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
 
 
+@pytest.mark.parametrize("feed", [FEED, EMPTY_FEED])
+def test_output_write_failure_is_analyze_failure(host, monkeypatch, feed):
+    """② の出力を書けないときは、AI を呼んだ日も0件の日も ② の失敗にする。"""
+
+    def unwritable(job, output):
+        raise OSError("ディスクがいっぱい")
+
+    monkeypatch.setattr(orchestrator, "_write_output", unwritable)
+    host.feed = feed
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 1
+    assert (summary["failed_stage"], summary["error_category"]) == (
+        "analyze",
+        "output_write_failed",
+    )
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
+
+
 def test_all_sources_failed_is_error_not_empty_report(host):
     """取得の失敗は、正常の0件（該当なしのレポート）と区別する（US-E6-03・US-E6-04）。"""
     host.feed = None

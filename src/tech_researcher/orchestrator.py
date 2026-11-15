@@ -517,20 +517,26 @@ def _analyze(job: Job) -> str | None:
     except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
         job.log.write("analyze", "failure", error_category="bad_input", exc=e)
         return "bad_input"
-    if not data["items"]:
-        _write_output(job, {"items": []})
-        job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
-        return None
+    if data["items"]:
+        try:
+            output = invoke.call_agent(body, job.limits.analyze * MINUTE)
+        except NotImplementedError:
+            job.log.write("analyze", "failure", error_category="not_implemented")
+            return "not_implemented"
+        except Exception as e:
+            job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
+            return "agent_failed"
+    else:
+        output = {"items": []}
     try:
-        output = invoke.call_agent(body, job.limits.analyze * MINUTE)
         _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
-    except NotImplementedError:
-        job.log.write("analyze", "failure", error_category="not_implemented")
-        return "not_implemented"
-    except Exception as e:  # JSON にできない値を返したときも含む
-        job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
-        return "agent_failed"
-    job.log.write("analyze", "end")
+    except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
+        job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
+        return "output_write_failed"
+    if data["items"]:
+        job.log.write("analyze", "end")
+    else:
+        job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
     return None
 
 
