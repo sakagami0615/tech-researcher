@@ -14,6 +14,7 @@ SOURCES = {
     "github_repos": {
         "enabled": True,
         "display_name": "GitHub",
+        "search_without_topic": True,
         "search_topics": ["llm"],
         "watch_repos": ["anthropics/claude-code"],
         "threshold_increase": 100,
@@ -95,7 +96,8 @@ def test_repository_config_loads():
     assert config.last30days_topic == "technology news"
     assert config.qiita.enabled and "LLM" in config.qiita.tags
     repos = config.github_repos
-    assert repos.enabled and "llm" in repos.search_topics
+    assert repos.enabled and repos.search_without_topic and "llm" in repos.search_topics
+    assert repos.watch_repos == ()
     assert (repos.search_days, repos.search_min_stars) == (14, 200)  # 観測までの仮の値
     assert config.limits.http_retry_waits_s == (5, 20)
     assert config.limits.agent_max_turns is None
@@ -164,6 +166,8 @@ def test_last30days_topic_is_read(base):
         lambda d: d["sources"]["qiita"].update(tags="LLM"),
         lambda d: d["sources"]["github_repos"].update(report_top_n=0),
         lambda d: d["sources"]["github_repos"].update(search_topics=["LLM"]),
+        lambda d: d["sources"]["github_repos"].update(search_without_topic="yes"),
+        lambda d: d["sources"]["github_repos"].pop("search_without_topic"),
         lambda d: d["sources"]["github_repos"].update(search_topics=["ai agents"]),
         lambda d: d["sources"]["github_repos"].update(search_topics=["llm", "llm"]),
         lambda d: d["sources"]["github_repos"].update(search_topics=["a" * 51]),
@@ -200,6 +204,13 @@ def test_invalid_values_are_rejected(base, mutate):
     mutate(data)
     with pytest.raises(ConfigError):
         parse_config(data)
+
+
+def test_github_repos_lists_can_be_empty(base):
+    data = full(base)
+    data["sources"]["github_repos"].update(search_topics=[], watch_repos=[])
+    repos = parse_config(data).github_repos
+    assert (repos.search_topics, repos.watch_repos) == ((), ())
 
 
 def test_github_repos_watch_repos_are_lowercased_and_topics_can_be_empty(base):

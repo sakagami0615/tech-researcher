@@ -3,10 +3,11 @@
 Star 数を測る候補を、次の3つの経路から集めて1つにまとめる。
 
 - search（新規）：Search API で、作成日が対象日の D_search 日前以降、Star が C_search 以上の
-  リポジトリを、設定のトピックごとに Star 数の順で取る
+  リポジトリを、Star 数の順で取る。トピックを付けない検索（設定で on/off）と、設定のトピックごとの
+  検索を行う
 - mention（言及）：その回に集めたほかの情報源のレコードの URL・指している先・候補リンクから
   `github.com/{owner}/{repo}` を抜き出す。レコードを受け取るだけで、ほかの収集処理には依存しない
-- watch（監視リスト）：直近 WATCH_DAYS 日の間に初めて Star 数を測ったリポジトリ
+- watch（監視リスト）：直近 WATCH_DAYS 日に Search・言及の経路で候補になったリポジトリ
   （star_snapshots）と、設定の watch_repos
 
 Search の失敗では止めず、取れた分と、ほかの経路の候補を返す（error に最初の失敗を残す）。
@@ -153,7 +154,7 @@ def _search(
     settings: GitHubRepos, day: date, client: GitHubClient | None
 ) -> tuple[list[str], int, GitHubError | None]:
     """Search の経路。（見つけたリポジトリ、要求の回数、最初の失敗）を返す。"""
-    if not settings.search_topics:
+    if not search_topics(settings):
         return [], 0, None
     if client is None or not client.authenticated:
         return [], 0, GitHubError("収集用トークンがない", github_api.AUTH, 0)
@@ -169,16 +170,17 @@ _STOP_CATEGORIES = frozenset({github_api.AUTH, github_api.RATE_LIMITED, github_a
 def search_repos(
     client: GitHubClient, settings: GitHubRepos, day: date
 ) -> tuple[list[str], GitHubError | None]:
-    """設定のトピックごとに Search API を呼び、（見つかったリポジトリ、最初の失敗）を返す。
+    """検索ごとに Search API を呼び、（見つかったリポジトリ、最初の失敗）を返す。
 
-    Star 数の順にページを送り、件数が尽きるか、Search の上限（1,000件）まで取る。
-    あるトピックで失敗したら、そのトピックをやめて次へ進む。認証・レート制限・この実行の
-    上限の失敗では、残りのトピックも呼ばずにやめる。重なったリポジトリは除く。
+    検索は search_topics の順（トピックを付けない検索が先）。Star 数の順にページを送り、
+    件数が尽きるか、Search の上限（1,000件）まで取る。ある検索で失敗したら、その検索をやめて
+    次へ進む。認証・レート制限・この実行の上限の失敗では、残りの検索も呼ばずにやめる。
+    重なったリポジトリは除く。
     """
     since = day - timedelta(days=settings.search_days)
     repos: dict[str, None] = {}
     first_error: GitHubError | None = None
-    for topic in settings.search_topics:
+    for topic in search_topics(settings):
         try:
             _search_topic(client, topic, since, settings, repos)
         except GitHubError as e:
@@ -188,9 +190,14 @@ def search_repos(
     return list(repos), first_error
 
 
+def search_topics(settings: GitHubRepos) -> list[str | None]:
+    """行う検索のトピック。None はトピックを付けない検索。"""
+    return [None] * settings.search_without_topic + list(settings.search_topics)
+
+
 def _search_topic(
     client: GitHubClient,
-    topic: str,
+    topic: str | None,
     since: date,
     settings: GitHubRepos,
     repos: dict[str, None],
@@ -203,15 +210,17 @@ def _search_topic(
         names = parse_search(data)
         repos.update(dict.fromkeys(names))
         if data.get("incomplete_results"):
-            log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", topic, page)
+            name = topic or "（トピックなし）"
+            log.warning("GitHub Search：%s の結果が途中で切られた（page %d）", name, page)
         total = min(data["total_count"], MAX_SEARCH_RESULTS)
         if len(names) < PER_PAGE or page * PER_PAGE >= total:
             break
 
 
-def search_query(topic: str, since: date, min_stars: int) -> str:
-    """トピック・作成日の下限・Star の下限の検索条件（GitHub の検索の構文）。"""
-    return f"topic:{topic} created:>={since.isoformat()} stars:>={min_stars}"
+def search_query(topic: str | None, since: date, min_stars: int) -> str:
+    """検索条件（GitHub の検索の構文）。topic が None ならトピックを付けない。"""
+    query = f"created:>={since.isoformat()} stars:>={min_stars}"
+    return query if topic is None else f"topic:{topic} {query}"
 
 
 def parse_search(data: object) -> list[str]:

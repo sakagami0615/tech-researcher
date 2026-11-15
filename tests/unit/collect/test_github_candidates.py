@@ -10,6 +10,7 @@ from tech_researcher.collect import github_api
 from tech_researcher.collect.github_api import GitHubClient, GitHubError
 from tech_researcher.collect.github_candidates import (
     Candidate,
+    CandidateResult,
     collect_candidates,
     mentioned_repos,
     parse_search,
@@ -28,6 +29,7 @@ NOW = datetime(2026, 11, 3, 21, 0, tzinfo=UTC)
 SETTINGS = GitHubRepos(
     enabled=True,
     display_name="GitHub",
+    search_without_topic=False,
     search_topics=("llm", "mcp"),
     watch_repos=("anthropics/claude-code",),
     threshold_increase=100,
@@ -76,7 +78,8 @@ class FakeSearch:
     def __call__(self, url, limits, *, headers, sleep):
         query = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
         self.queries.append(query)
-        topic = query["q"].split()[0].removeprefix("topic:")
+        first = query["q"].split()[0]
+        topic = first.removeprefix("topic:") if first.startswith("topic:") else "*"
         outcome = self.pages[topic][int(query["page"]) - 1]
         if isinstance(outcome, Exception):
             raise outcome
@@ -91,6 +94,24 @@ def test_search_query():
     assert search_query("llm", date(2026, 10, 20), 200) == (
         "topic:llm created:>=2026-10-20 stars:>=200"
     )
+    assert search_query(None, date(2026, 10, 20), 200) == "created:>=2026-10-20 stars:>=200"
+
+
+def test_search_without_topic_comes_first(limits):
+    fake = FakeSearch({"*": [page(["no/topic"])], "llm": [page([])], "mcp": [page([])]})
+    settings = replace(SETTINGS, search_without_topic=True)
+    result = collect_candidates(settings, T, [], client(limits, fake), None)
+    assert fake.queries[0]["q"] == "created:>=2026-10-20 stars:>=200"
+    assert fake.queries[0]["sort"] == "stars"
+    assert len(fake.queries) == 3
+    assert ("no/topic", ("search",)) in {(c.repo, c.routes) for c in result.candidates}
+
+
+def test_search_without_topic_only(limits):
+    fake = FakeSearch({"*": [page(["no/topic"])]})
+    settings = replace(SETTINGS, search_without_topic=True, search_topics=())
+    result = collect_candidates(settings, T, [], client(limits, fake), None)
+    assert result.error is None and len(fake.queries) == 1
 
 
 def test_parse_recorded_search_response():
@@ -151,7 +172,7 @@ def test_collects_all_routes(limits, tmp_path):
     conn = open_db(tmp_path / "db.sqlite3")
     conn.execute(
         "INSERT INTO star_snapshots VALUES ('old/watched', '2026-10-20', '2026-10-19T21:00:00Z',"
-        " 5, '2025-01-01T00:00:00Z')"
+        " 5, '2025-01-01T00:00:00Z', '[\"mention\"]')"
     )
     fake = FakeSearch(
         {
@@ -246,12 +267,10 @@ def test_without_token_search_is_skipped(limits, token):
     assert "anthropics/claude-code" in {c.repo for c in result.candidates}
 
 
-def test_empty_topics_mean_no_search(limits):
-    fake = FakeSearch({})
-    settings = replace(SETTINGS, search_topics=())
+def test_no_search_and_no_watch_repos(limits):
+    settings = replace(SETTINGS, search_topics=(), watch_repos=())
     result = collect_candidates(settings, T, [], None, None)
-    assert result.error is None and fake.queries == []
-    assert [c.repo for c in result.candidates] == ["anthropics/claude-code"]
+    assert result == CandidateResult((), 0)
 
 
 def test_disabled_source_collects_nothing(limits):

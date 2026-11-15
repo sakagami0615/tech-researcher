@@ -64,12 +64,13 @@ class GitHubRepos:
     D-13 の記号との対応：threshold_increase＝A、report_top_n＝N_report、new_repo_days＝D、
     new_repo_stars＝C、search_days＝D_search、search_min_stars＝C_search。
     search_days・search_min_stars は観測（PoC）で決める。
-    search_topics は Search で1つずつ検索するトピック。watch_repos は `owner/repo`（小文字に
-    そろえる）。
+    search_without_topic が True なら、トピックを付けない検索も行う。search_topics は Search で
+    1つずつ検索するトピック。watch_repos は `owner/repo`（小文字にそろえる）。どちらも空でよい。
     """
 
     enabled: bool
     display_name: str
+    search_without_topic: bool
     search_topics: tuple[str, ...]
     watch_repos: tuple[str, ...]
     threshold_increase: int
@@ -317,6 +318,7 @@ def _github_repos(sources: _Table | None) -> GitHubRepos | None:
     result = GitHubRepos(
         enabled=t.value("enabled", bool),
         display_name=t.text("display_name"),
+        search_without_topic=t.value("search_without_topic", bool),
         search_topics=t.strings("search_topics"),
         watch_repos=t.strings("watch_repos"),
         threshold_increase=t.int_at_least("threshold_increase"),

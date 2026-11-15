@@ -289,8 +289,9 @@ subqueries = [
 [sources.github_repos]          # 新着・急上昇（D-13）
 enabled = true
 display_name = "GitHub"
+search_without_topic = true     # トピックを付けない検索も行う
 search_topics = ["llm", "ai-agents"]
-watch_repos = ["anthropics/claude-code"]
+watch_repos = []                # 監視するリポジトリ（owner/repo）
 threshold_increase_A = 100
 report_top_N = 10
 new_repo_days_D = 14
