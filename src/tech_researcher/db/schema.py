@@ -110,6 +110,59 @@ MIGRATIONS: tuple[str, ...] = (
     ) STRICT;
     CREATE INDEX star_snapshots_target ON star_snapshots (target);
     """,
+    # 生成したレポート案と検証結果、除外した項目、Issue の対応（3.4。D-18）
+    """
+    CREATE TABLE reports (
+        run_id TEXT PRIMARY KEY REFERENCES runs (run_id),
+        cadence TEXT NOT NULL,
+        target TEXT NOT NULL,
+        status TEXT NOT NULL,
+        rejected_checks TEXT NOT NULL CHECK (json_valid(rejected_checks)),
+        counts_json TEXT NOT NULL CHECK (json_valid(counts_json)),
+        verification_json TEXT NOT NULL CHECK (json_valid(verification_json)),
+        ai_output_json TEXT,
+        body_markdown TEXT
+    ) STRICT;
+
+    CREATE TABLE report_entries (
+        run_id TEXT NOT NULL REFERENCES reports (run_id),
+        entry_no INTEGER NOT NULL,
+        section TEXT NOT NULL,
+        status TEXT NOT NULL,
+        exclusion_reasons TEXT NOT NULL CHECK (json_valid(exclusion_reasons)),
+        display_no INTEGER,
+        theme_id TEXT,
+        item_ids_json TEXT NOT NULL
+            CHECK (json_valid(item_ids_json) AND json_type(item_ids_json) = 'array'),
+        past_ids_json TEXT NOT NULL
+            CHECK (json_valid(past_ids_json) AND json_type(past_ids_json) = 'array'),
+        payload_json TEXT NOT NULL
+            CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+        PRIMARY KEY (run_id, entry_no)
+    ) STRICT;
+    CREATE UNIQUE INDEX report_entries_display_no
+        ON report_entries (run_id, display_no) WHERE display_no IS NOT NULL;
+    CREATE INDEX report_entries_theme_id ON report_entries (theme_id) WHERE theme_id IS NOT NULL;
+
+    CREATE TABLE issues (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs (run_id),
+        kind TEXT NOT NULL,
+        cadence TEXT NOT NULL,
+        target TEXT NOT NULL,
+        state TEXT NOT NULL,
+        repo TEXT,
+        number INTEGER,
+        created_at TEXT NOT NULL,
+        projects_state TEXT,
+        projects_attempts INTEGER NOT NULL DEFAULT 0,
+        projects_last_error TEXT,
+        projects_last_run_id TEXT,
+        UNIQUE (run_id, kind)
+    ) STRICT;
+    CREATE UNIQUE INDEX issues_report_target
+        ON issues (cadence, target) WHERE kind = 'report' AND state = 'created';
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

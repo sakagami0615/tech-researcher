@@ -27,7 +27,16 @@ def test_creates_db_with_settings(tmp_path):
     assert pragma(conn, "foreign_keys") == 1
     assert pragma(conn, "busy_timeout") == BUSY_TIMEOUT_MS
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
-    assert tables == {"runs", "source_fetches", "items", "feed_snapshots", "star_snapshots"}
+    assert tables == {
+        "runs",
+        "source_fetches",
+        "items",
+        "feed_snapshots",
+        "star_snapshots",
+        "reports",
+        "report_entries",
+        "issues",
+    }
     conn.close()
 
 
@@ -69,6 +78,20 @@ def test_upgrades_first_version_with_feed_snapshots(tmp_path, monkeypatch):
         "fetched_at",
     ]
     assert conn.execute("SELECT count(*) FROM runs").fetchone() == (1,)
+    conn.close()
+
+
+def test_upgrades_version_3_db_with_report_tables(tmp_path, monkeypatch):
+    """版3の DB（star_snapshots まで）に、版4で reports・report_entries・issues を足す。"""
+    path = tmp_path / "x.sqlite3"
+    with monkeypatch.context() as m:
+        m.setattr(schema, "MIGRATIONS", schema.MIGRATIONS[:3])
+        m.setattr(schema, "SCHEMA_VERSION", 3)
+        open_db(path).close()
+    conn = open_db(path)
+    assert pragma(conn, "user_version") == SCHEMA_VERSION
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
+    assert {"reports", "report_entries", "issues"} <= names
     conn.close()
 
 
