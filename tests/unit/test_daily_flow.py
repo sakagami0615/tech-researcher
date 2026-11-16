@@ -562,15 +562,40 @@ def test_verify_checks_worker_data_not_the_copy_given_to_ai(host):
     assert [x["item_ids"] for x in validation["excluded"]] == [["d3"]]
 
 
-def test_secret_in_ai_ids_is_masked_in_results(host):
-    host.ai = lambda data: {"items": [entry("d1", 1), entry(TOKEN, 2)]}
-    code, summary, _ = host.run("--dry-run")
+@pytest.mark.parametrize(
+    "secret", ["Pw0rd*~x_y", "sk-ant-oat01-_" + "A" * 90], ids=["known", "anthropic_key"]
+)
+def test_secret_in_raw_ai_output_stops_the_report(host, secret):
+    """無害化でエスケープされる記号を含む値も、AI の出力の全文を検査して見つける（US-E7-05）。
 
-    assert code == 0
+    本文では `\\*`・`\\_` に変わって値が割れるので、本文の検査だけでは見逃す。
+    """
+    host.worker_env["API_SECRET"] = "Pw0rd*~x_y"
+    host.ai = lambda data: {
+        "items": [entry("d1", 1), entry("d2", 2, points=[f"値は {secret} です"], depth="brief")]
+    }
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1
+    assert summary["error_category"] == "secret_detected"
     out_dir = Path(summary["output_dir"])
-    for name in ("validation.json", "log.jsonl", "issue.md"):
+    assert not (out_dir / "issue.md").exists()
+    assert json.loads((out_dir / "secret-scan.json").read_text())["detected"] is True
+    assert secret not in out
+    assert secret not in (out_dir / "log.jsonl").read_text()
+
+
+def test_secret_in_ai_ids_is_masked_in_results(host):
+    """AI の出力の全文に秘匿情報があれば、ID の中でも全体を止める。結果のファイルには残さない。"""
+    host.ai = lambda data: {"items": [entry("d1", 1), entry(TOKEN, 2)]}
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1 and summary["error_category"] == "secret_detected"
+    out_dir = Path(summary["output_dir"])
+    assert not (out_dir / "issue.md").exists()
+    assert TOKEN not in out
+    for name in ("validation.json", "log.jsonl"):
         assert TOKEN not in (out_dir / name).read_text(encoding="utf-8"), name
-    assert "[MASKED:known]" in (out_dir / "validation.json").read_text(encoding="utf-8")
 
 
 # D-13 の観測（observe.py）。bin/tr-run を使わず、日次と同じロックで ① だけを動かす

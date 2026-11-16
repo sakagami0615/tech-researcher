@@ -75,6 +75,15 @@ def run_verify(
     items = _numbered(run_dir)
     data = _input(config, target, items)
     output = json.loads((run_dir / AGENT_OUTPUT).read_text(encoding="utf-8"))
+    # 無害化でエスケープや囲みが入ると値の途中が割れ、本文の検査では見えなくなる。GitHub は描画で
+    # エスケープを消すので、無害化の前の AI の出力の全文も検査する。除外した項目の中でも全体を止める
+    raw_kinds = sorted({f.kind for f in scanner.find(json.dumps(output, ensure_ascii=False))})
+    if raw_kinds:
+        _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
+        log.write(
+            "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(raw_kinds)
+        )
+        return _finish(run_dir, log, SECRET_DETECTED, None, entries=0, excluded=[])
     try:
         entries = parse_daily_output(output)
     except ValueError as e:

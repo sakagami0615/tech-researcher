@@ -129,3 +129,7 @@ def test_reference_at_the_start_is_not_treated_as_a_block():
 )
 def test_leftover_at_dollar_and_emphasis_are_escaped(raw, expected):
     assert sanitize_text(raw) == expected
+
+
+def test_underscore_inside_a_word_is_kept_even_next_to_a_reference():
+    assert sanitize_text("ghp_abcdef1234") == "ghp_`abcdef1234`"

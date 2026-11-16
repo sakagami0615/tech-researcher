@@ -53,18 +53,24 @@ def sanitize_text(text: str) -> str:
     - 先頭のブロック記法（`#`・`>`・`-`・`1.` など）をエスケープする
     """
     text = _SPACES.sub(" ", text).strip().replace("`", "'")
+    # 語の途中かは、囲む前の連結した文字列で判定する（`ghp_abc` の `_` を割らない）
+    edges = {m.start() for m in _EDGE_UNDERSCORE.finditer(text)}
     parts: list[str] = []
     last = 0
     for match in _REFERENCE.finditer(text):
-        parts.append(_escape(text[last : match.start()]))
+        parts.append(_escape(text, last, match.start(), edges))
         parts.append(f"`{match.group()}`")
         last = match.end()
-    parts.append(_escape(text[last:]))
+    parts.append(_escape(text, last, len(text), edges))
     return _BLOCK_START.sub(_escape_block, "".join(parts), count=1)
 
 
-def _escape(segment: str) -> str:
-    return _EDGE_UNDERSCORE.sub(r"\\_", segment.translate(_ESCAPES))
+def _escape(text: str, start: int, end: int, edges: set[int]) -> str:
+    """text[start:end] をエスケープする。edges は、エスケープする _ の text 内の位置。"""
+    return "".join(
+        "\\_" if i in edges else ch.translate(_ESCAPES)
+        for i, ch in enumerate(text[start:end], start)
+    )
 
 
 def _escape_block(match: re.Match[str]) -> str:
