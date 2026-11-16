@@ -1,4 +1,4 @@
-"""worker.env の確認とマスク用の秘匿値（envfiles.py。D-05・structure.md 3.7）。
+"""worker.env・agent.env の確認とマスク用の秘匿値（envfiles.py。D-05・structure.md 3.7）。
 
 置き場所と権限の確認は、統括スクリプトの起動の検査（test_orchestrator.py）で確かめる。
 """
@@ -8,6 +8,8 @@ import os
 import pytest
 
 from tech_researcher.envfiles import remove_snapshot, secret_values, snapshot
+
+ENV_FILES = ["agent.env", "worker.env"]
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +83,8 @@ def _secrets(tmp_path):
     secrets.mkdir(mode=0o700)
     (secrets / "worker.env").write_text("GITHUB_TOKEN=fake-collect\n")
     (secrets / "worker.env").chmod(0o600)
+    (secrets / "agent.env").write_text("CLAUDE_CODE_OAUTH_TOKEN=fake-claude\n")
+    (secrets / "agent.env").chmod(0o600)
     return secrets
 
 
@@ -91,8 +95,10 @@ def test_snapshot_is_private_copy(tmp_path):
     assert copy.stat().st_mode & 0o777 == 0o700
     assert (copy / "worker.env").stat().st_mode & 0o777 == 0o600
     assert (copy / "worker.env").read_text() == "GITHUB_TOKEN=fake-collect\n"
+    assert (copy / "agent.env").stat().st_mode & 0o777 == 0o600
+    assert (copy / "agent.env").read_text() == "CLAUDE_CODE_OAUTH_TOKEN=fake-claude\n"
     remove_snapshot(copy)
-    assert [p.name for p in secrets.iterdir()] == ["worker.env"]
+    assert sorted(p.name for p in secrets.iterdir()) == ENV_FILES
 
 
 def test_snapshot_keeps_existing_folder_of_same_name(tmp_path):
@@ -112,7 +118,7 @@ def test_snapshot_failure_leaves_nothing(tmp_path):
     with pytest.raises(ValueError) as e:
         snapshot(secrets, "run1")
     assert str(secrets) not in str(e.value)
-    assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
+    assert sorted(p.name for p in secrets.iterdir()) == ENV_FILES
 
 
 def test_remove_snapshot_only_removes_snapshot_folders(tmp_path):
@@ -128,7 +134,7 @@ def test_snapshot_rejects_fifo_without_blocking(tmp_path):
     os.mkfifo(secrets / "worker.env", 0o600)
     with pytest.raises(ValueError):
         snapshot(secrets, "run1")
-    assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
+    assert sorted(p.name for p in secrets.iterdir()) == ENV_FILES
 
 
 def test_snapshot_rejects_loose_permissions_found_after_check(tmp_path):
@@ -136,7 +142,7 @@ def test_snapshot_rejects_loose_permissions_found_after_check(tmp_path):
     (secrets / "worker.env").chmod(0o644)
     with pytest.raises(ValueError, match="いまは 644"):  # 理由をそのまま伝える
         snapshot(secrets, "run1")
-    assert sorted(p.name for p in secrets.iterdir()) == ["worker.env"]
+    assert sorted(p.name for p in secrets.iterdir()) == ENV_FILES
 
 
 def test_rejects_bom_with_clear_message(tmp_path):
@@ -156,3 +162,36 @@ def test_snapshot_is_600_whatever_umask(tmp_path):
         os.umask(previous)
     assert (copy / "worker.env").stat().st_mode & 0o777 == 0o600
     assert secret_values(copy / "worker.env") == ["fake-collect"]
+
+
+def test_agent_env_holds_only_claude_token(tmp_path):
+    path = tmp_path / "agent.env"
+    path.write_text("# Claude のトークン\nCLAUDE_CODE_OAUTH_TOKEN=fake-claude\n", encoding="utf-8")
+    assert secret_values(path) == ["fake-claude"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ANTHROPIC_API_KEY",  # サブスクリプションのトークンより先に使われる（F3）
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CONFIG_DIR",  # イメージの設定（書き込み先・自動更新の停止）を上書きさせない
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "GITHUB_TOKEN",  # worker の認証情報を agent に渡さない
+    ],
+)
+def test_agent_env_rejects_other_names(tmp_path, name):
+    path = tmp_path / "agent.env"
+    path.write_text(f"CLAUDE_CODE_OAUTH_TOKEN=fake-claude\n{name}=fake-other\n", encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        secret_values(path)
+    message = str(e.value)
+    assert "agent.env の 2 行目の変数は使えない（使えるのは CLAUDE_CODE_OAUTH_TOKEN）" in message
+    assert "fake" not in message and name not in message
+
+
+def test_worker_env_names_are_not_limited(tmp_path):
+    path = tmp_path / "worker.env"
+    path.write_text("TR_ANY_NEW_TOKEN=fake-new\n", encoding="utf-8")
+    assert secret_values(path) == ["fake-new"]

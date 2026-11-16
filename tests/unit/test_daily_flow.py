@@ -111,11 +111,11 @@ class Host:
             code = cli.main(args, self.worker_env)
         return StageResult(code, out.getvalue(), err.getvalue())
 
-    def fake_call_agent(self, body, timeout_s):
+    def fake_call_agent(self, body, timeout_s, **_):
         assert timeout_s > 0  # 段階の上限を渡している
         data = json.loads(body)
         self._append("agent", data)
-        return self.ai(data)
+        return invoke.AgentResult(self.ai(data))
 
     def calls(self, kind: str) -> list:
         path = self.record / f"{kind}.jsonl"
@@ -158,6 +158,8 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
     h.secrets.mkdir(mode=0o700)
     (h.secrets / "worker.env").write_text(f"GITHUB_TOKEN={TOKEN}\n")
     (h.secrets / "worker.env").chmod(0o600)
+    (h.secrets / "agent.env").write_text("CLAUDE_CODE_OAUTH_TOKEN=\n")
+    (h.secrets / "agent.env").chmod(0o600)
     monkeypatch.chdir(h.repo)
     monkeypatch.setattr(
         orchestrator, "new_run_id", lambda now, **kwargs: new_run_id(STARTED, **kwargs)
@@ -563,7 +565,8 @@ def test_observation_collects_only_and_closes_run_as_observed(host):
     assert [c["args"] for c in host.calls("compose")] == [["collect", "daily", "--run-id", run_id]]
     assert host.calls("agent") == []  # ② 以降は動かさない
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]  # 実行中のファイルは消した
-    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # worker.env の写しも消した
+    # env_file の写しも消した
+    assert sorted(p.name for p in host.secrets.iterdir()) == ["agent.env", "worker.env"]
     assert host.runs() == [(run_id, "daily", "2026-10-23", "observed", None, None, 1)]
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         assert conn.execute("SELECT source_id, status FROM source_fetches").fetchall() == [

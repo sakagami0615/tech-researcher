@@ -4,13 +4,16 @@ docker を偽のプロセス（PATH の先頭に置いた `docker`）に差し�
 偽の docker は、受け取った引数と環境変数とロックの状態を calls.jsonl に書き、behavior.json の
 指示（ok・fail・bad・sleep）どおりに振る舞う。偽の docker には許可した環境変数しか届かないので、
 指示はファイルで渡す。① は ok のとき、日次の ② の入力（1項目）も書く。③ は verify の指示
-（既定は report）どおりの結果を返す。
-② の AI は、項目なしの出力を返す偽の実装に差し替える。段階を本物でつなぐ一巡は test_daily_flow.py。
+（既定は report）どおりの結果を返す。agent（② の Claude Code）は標準入力を agent-stdin に残し、
+agent の指示（標準出力・stderr・終了コード、または sleep）どおりに振る舞う。
+② の AI は、既定では項目なしの出力を返す偽の実装に差し替える（製品の call_agent と偽の docker を
+つなぐ検査は「② の AI の呼び出し」）。段階を本物でつなぐ一巡は test_daily_flow.py。
 """
 
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -30,6 +33,8 @@ LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").
 TOKEN = "ghp" + "_" + "y" * 36  # テスト用のダミー。実行時に組み立てる
 # worker.env の偽の秘匿値。トークンの形ではないので、既知の値としてだけ伏せられる
 WORKER_SECRET = "fake-issue-credential-0123"
+AGENT_SECRET = "fake-claude-credential-0456"  # agent.env の偽の値（Claude のトークンの代わり）
+ENV_FILES = ["agent.env", "worker.env"]
 PRODUCT_CALL_AGENT = invoke.call_agent
 
 FAKE_DOCKER = f"""#!{sys.executable}
@@ -49,8 +54,17 @@ with (here / "calls.jsonl").open("a") as f:
     f.write(json.dumps({{"argv": sys.argv[1:], "env": dict(os.environ), "locked": locked}}) + "\\n")
 command = sys.argv[1]
 mode = behavior["mode"]
+service = sys.argv[sys.argv.index("--label") + 2] if command == "compose" else None
 if command == "ps":
-    print("cid1" if mode == "sleep" else "")
+    print("cid1" if mode == "sleep" or behavior.get("agent") == "sleep" else "")
+elif service == "agent":
+    (here / "agent-stdin").write_bytes(sys.stdin.buffer.read())
+    agent = behavior["agent"]
+    if agent == "sleep":
+        time.sleep(60)
+    print(agent["stdout"])
+    print(agent.get("stderr", ""), file=sys.stderr)
+    sys.exit(agent.get("exit", 0))
 elif command == "compose" and "verify" in sys.argv:
     verify = behavior.get("verify", "report")
     if verify == "fail":
@@ -131,11 +145,16 @@ def host(tmp_path, monkeypatch) -> Host:
     worker_env = h.secrets / "worker.env"
     worker_env.write_text(f"GITHUB_TOKEN=fake-collect-token\nTR_ISSUE_TOKEN={WORKER_SECRET}\n")
     worker_env.chmod(0o600)
+    agent_env = h.secrets / "agent.env"
+    agent_env.write_text(f"# Claude のトークン\nCLAUDE_CODE_OAUTH_TOKEN={AGENT_SECRET}\n")
+    agent_env.chmod(0o600)
     docker = h.fake / "docker"
     docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
     h.behave("ok")
-    monkeypatch.setattr(invoke, "call_agent", lambda body, timeout_s: {"items": []})
+    monkeypatch.setattr(
+        invoke, "call_agent", lambda body, timeout_s, **_: invoke.AgentResult({"items": []})
+    )
     monkeypatch.setattr(orchestrator, "MINUTE", 0.05)
     monkeypatch.setattr(orchestrator, "STOP_GRACE_S", 1.0)
     monkeypatch.setattr(orchestrator, "POLL_S", 0.02)
@@ -341,10 +360,10 @@ def _loop(h):
     h.environ["TR_SECRETS_DIR"] = str(loop / "secrets")
 
 
-def _link_file(h):
+def _link_file(h, name="worker.env"):
     real = h.secrets / "real.env"
-    (h.secrets / "worker.env").rename(real)
-    (h.secrets / "worker.env").symlink_to(real)
+    (h.secrets / name).rename(real)
+    (h.secrets / name).symlink_to(real)
 
 
 @pytest.mark.parametrize(
@@ -375,6 +394,11 @@ def _link_file(h):
         (lambda h: (h.secrets / "worker.env").chmod(0o500), "worker.env の権限は 600・400"),
         (lambda h: (h.secrets / "worker.env").chmod(0o4600), "worker.env の権限は 600・400"),
         (_link_file, "シンボリックリンクにしない"),
+        # agent.env も同じく確かめる（D-05）
+        (lambda h: (h.secrets / "agent.env").unlink(), "agent.env がない"),
+        (lambda h: (h.secrets / "agent.env").chmod(0o640), "agent.env の権限は 600・400"),
+        (lambda h: (h.secrets / "agent.env").chmod(0o4600), "agent.env の権限は 600・400"),
+        (lambda h: _link_file(h, "agent.env"), "agent.env は通常のファイル"),
     ],
 )
 def test_rejects_bad_secrets_dir(host, capfd, change, message):
@@ -384,6 +408,7 @@ def test_rejects_bad_secrets_dir(host, capfd, change, message):
     assert out == ""
     assert message in err
     assert WORKER_SECRET not in err
+    assert AGENT_SECRET not in err
     assert str(host.secrets) not in err  # パスも出さない
     if host.environ.get("TR_SECRETS_DIR"):
         assert host.environ["TR_SECRETS_DIR"] not in err
@@ -452,7 +477,7 @@ def test_bad_snapshot_points_to_original_and_is_removed(host, capfd, monkeypatch
     assert "実行の始めに写した内容。書式の誤りは元のファイルを直す" in err
     assert "1 行目" in err
     assert host.calls() == []
-    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]
+    assert sorted(p.name for p in host.secrets.iterdir()) == ENV_FILES
 
 
 def test_rejects_secrets_owned_by_someone_else(host, capfd, monkeypatch):
@@ -484,7 +509,7 @@ def test_compose_reads_snapshot_of_worker_env_during_run(host, capfd, monkeypatc
     # 実行の途中で worker.env を書き換えても、compose が読む値はマスクに使う値と同じ（写し）
     record = tmp_path / "snapshot.json"
 
-    def run(self, service, args, timeout_s):  # ジョブの子プロセスで動く
+    def run(self, service, args, timeout_s, stdin=None):  # ジョブの子プロセスで動く
         (host.secrets / "worker.env").write_text("TR_ISSUE_TOKEN=fake-rewritten-credential\n")
         copy = Path(self.env["TR_SECRETS_DIR"])
         text = (copy / "worker.env").read_text()
@@ -502,11 +527,11 @@ def test_compose_reads_snapshot_of_worker_env_during_run(host, capfd, monkeypatc
     seen = json.loads(record.read_text())
     assert Path(seen["copy"]) == host.secrets / f".run-{summary['run_id']}"
     assert seen["modes"] == [0o700, 0o600]
-    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 終わったら写しを消す
+    assert sorted(p.name for p in host.secrets.iterdir()) == ENV_FILES  # 終わったら写しを消す
 
 
 def test_snapshot_failure_stops_before_start(host, capfd, monkeypatch):
-    def fail(path):
+    def fail(path, label=None):
         raise ValueError("TR_SECRETS_DIR の worker.env を読めない")
 
     monkeypatch.setattr(orchestrator, "secret_values", fail)
@@ -515,31 +540,75 @@ def test_snapshot_failure_stops_before_start(host, capfd, monkeypatch):
     assert out == ""
     assert "worker.env を読めない" in err
     assert host.calls() == []
-    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]  # 写しを残さない
+    assert sorted(p.name for p in host.secrets.iterdir()) == ENV_FILES  # 写しを残さない
 
 
 def test_snapshot_is_removed_after_stopped_run(host, capfd):
     host.behave("sleep", lock="daily-dry-run")
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
     summary_of(capfd)
-    assert [p.name for p in host.secrets.iterdir()] == ["worker.env"]
+    assert sorted(p.name for p in host.secrets.iterdir()) == ENV_FILES
 
 
-def test_compose_passes_worker_env_only_to_worker():
-    # worker.env は worker の env_file だけ。フォルダはどのサービスにもマウントしない
+def _services() -> dict[str, list[str]]:
+    """compose.yaml のサービスごとの行（コメントの行を除く）。"""
     text = (ROOT / "compose.yaml").read_text(encoding="utf-8")
     lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
-    uses = [line.strip() for line in lines if "TR_SECRETS_DIR" in line]
-    assert len(uses) == 1
-    assert uses[0].startswith("- path: ${TR_SECRETS_DIR:?")
-    assert uses[0].endswith("}/worker.env")
     top = [i for i, line in enumerate(lines) if line and not line[0].isspace()]
     start = next(i for i in top if lines[i] == "services:")
     end = next((i for i in top if i > start), len(lines))
-    section = lines[start + 1 : end]
-    services = [line.strip() for line in section if line.startswith("  ") and line[2] != " "]
-    assert services == ["worker:"]  # ほかのサービス（#18 の agent）を足したら、ここも見直す
-    assert sum("env_file:" in line for line in lines) == 1
+    services: dict[str, list[str]] = {}
+    for line in lines[start + 1 : end]:
+        if line.startswith("  ") and line[2] != " ":
+            name = line.strip().removesuffix(":")
+            services[name] = []
+        elif line.strip():
+            services[name].append(line.strip())
+    return services
+
+
+def test_compose_passes_each_env_file_only_to_its_service():
+    # worker.env は worker に、agent.env は agent にだけ渡す。フォルダはマウントしない
+    services = _services()
+    assert sorted(services) == ["agent", "worker"]  # サービスを足したら、ここも見直す
+    for service, env_file in (("worker", "worker.env"), ("agent", "agent.env")):
+        lines = services[service]
+        uses = [line for line in lines if "TR_SECRETS_DIR" in line]
+        assert len(uses) == 1
+        assert uses[0].startswith("- path: ${TR_SECRETS_DIR:?")
+        assert uses[0].endswith(f"}}/{env_file}")
+        assert lines[lines.index(uses[0]) + 1] == "required: true"
+        assert sum("env_file:" in line for line in lines) == 1
+
+
+def test_agent_service_is_read_only_without_data_or_tools():
+    """agent は読み取り専用で、書けるのは CLAUDE_CONFIG_DIR と /tmp だけ（D-04、structure.md 3.3）。
+
+    設定・実行データ・リポジトリはマウントせず、Docker のソケットも渡さない。実際のコンテナでの
+    確認は README の手順で行う。
+    """
+    lines = _services()["agent"]
+    assert "read_only: true" in lines
+    assert "init: true" in lines
+    assert "- ALL" in lines
+    assert "- no-new-privileges:true" in lines
+    assert not any(line.startswith(("volumes:", "environment:", "user:")) for line in lines)
+    tmpfs = [line.split(":")[0] for line in lines if line.startswith("- /")]
+    assert tmpfs == ["- /tmp", "- /claude"]
+    dockerfile = (ROOT / "docker" / "agent.Dockerfile").read_text(encoding="utf-8")
+    env = dict(re.findall(r"^(?:ENV\s+|\s+)([A-Z_]+)=(\S+?)(?: \\)?$", dockerfile, re.MULTILINE))
+    assert env["CLAUDE_CONFIG_DIR"] == "/claude"
+    assert env["CLAUDE_CODE_TMPDIR"] == "/tmp"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["HOME"].startswith("/tmp/")
+    # 版を固定する（D-07）。latest・stable などの名前で取らない
+    assert re.search(r"^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$", dockerfile, re.MULTILINE)
+    assert re.search(r"^USER 65534:65534$", dockerfile, re.MULTILINE)
+    for name in ("COPY src", "COPY config", "COPY third_party"):
+        assert (
+            name not in dockerfile
+        )  # agent のイメージにコードと設定を入れない（structure.md 2.2）
 
 
 # --- 要約 ---
@@ -603,9 +672,10 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_daily_stops_at_analyze_until_agent_exists(host, capfd, monkeypatch, dry_run):
-    """製品の ② はまだ AI を呼べない（#18）。③ を起動せずに実行エラーにする。"""
+def test_daily_stops_at_analyze_until_schema_exists(host, capfd, monkeypatch, tmp_path, dry_run):
+    """② の出力のスキーマ（#19）がまだなければ、AI も ③ も起動せずに実行エラーにする。"""
     monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
+    monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", tmp_path / "missing.json")
     host.behave("ok", lock="daily-dry-run" if dry_run else "daily")
     assert orchestrator.main(["daily", *(["--dry-run"] if dry_run else [])], host.environ) == 1
     summary = summary_of(capfd)
@@ -615,6 +685,117 @@ def test_daily_stops_at_analyze_until_agent_exists(host, capfd, monkeypatch, dry
         "not_implemented",
     )
     assert [c["argv"][-4] for c in host.calls()] == ["collect"]
+
+
+# --- ② の AI の呼び出し（agent コンテナ。agent/invoke.py、structure.md 3.3） ---
+
+NOT_LOGGED_IN = (ROOT / "tests" / "fixtures" / "agent" / "not-logged-in.json").read_text()
+AGENT_OK = json.dumps(
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 2,
+        "result": "AI の応答の文",
+        "modelUsage": {"claude-opus-4-5-20251101": {"inputTokens": 10}},
+        "structured_output": {"items": []},
+    }
+)
+
+
+@pytest.fixture
+def agent(host, monkeypatch, tmp_path) -> Host:
+    """製品の call_agent を使い、偽の docker の agent サービスに答えさせる。"""
+    monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)
+    schema = tmp_path / "daily_output.json"
+    schema.write_text('{\n  "type": "object"\n}\n')
+    monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", schema)
+    return host
+
+
+def _service(call: dict) -> str:
+    argv = call["argv"]
+    return argv[argv.index("--label") + 2]
+
+
+def test_agent_gets_input_on_stdin_with_fixed_command(agent, capfd):
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": AGENT_OK})
+    environ = {**agent.environ, "ANTHROPIC_API_KEY": "sk-ant-" + "a" * 30}
+    assert orchestrator.main(["daily", "--dry-run"], environ) == 0
+    summary = summary_of(capfd)
+    run_id, out_dir = summary["run_id"], Path(summary["output_dir"])
+    calls = agent.calls()
+    assert [_service(c) for c in calls] == ["worker", "agent", "worker"]  # ① ② ③
+    call = calls[1]
+    assert call["argv"] == [
+        "compose",
+        "--project-directory",
+        str(agent.repo),
+        "--file",
+        str(agent.repo / "compose.yaml"),
+        "--env-file",
+        os.devnull,
+        "run",
+        "--rm",
+        "-T",
+        "--label",
+        f"tech-researcher.run-id={run_id}",
+        "agent",
+        "claude",
+        "-p",
+        "/tr-daily-evaluate",
+        "--tools",
+        "",
+        "--disallowedTools",
+        "mcp__*",
+        "--strict-mcp-config",
+        "--output-format",
+        "json",
+        "--json-schema",
+        '{"type":"object"}',
+        "--no-session-persistence",
+    ]
+    # compose に渡すのは許可した環境変数だけ（ホストの ANTHROPIC_API_KEY は渡らない。F3）。
+    # Claude のトークンは compose が agent.env の写しから agent にだけ渡す
+    assert call["env"] == calls[0]["env"]
+    assert "ANTHROPIC_API_KEY" not in call["env"]
+    assert call["env"]["TR_SECRETS_DIR"] == str(agent.secrets / f".run-{run_id}")
+    # 標準入力は worker が書いた ② の入力。出力は構造化出力だけを残す
+    stdin = json.loads((agent.fake / "agent-stdin").read_bytes())
+    assert stdin == json.loads((out_dir / "agent-input.json").read_text())
+    assert json.loads((out_dir / "agent-output.json").read_text()) == {"items": []}
+    end = [r for r in agent.log(run_id) if (r["stage"], r["event"]) == ("analyze", "end")]
+    assert end[0]["detail"] == "model=claude-opus-4-5-20251101 turns=2"
+
+
+def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
+    stderr = f"auth failed for {AGENT_SECRET} and {TOKEN}"
+    agent.behave(
+        "ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "stderr": stderr, "exit": 1}
+    )
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    out, err = capfd.readouterr()
+    summary = json.loads(out)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
+    compose = [c for c in agent.calls() if c["argv"][0] == "compose"]
+    assert [_service(c) for c in compose] == ["worker", "agent"]  # ③ に進まない
+    log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
+    assert AGENT_SECRET not in out + err + log_text  # agent.env の値も伏せる
+    assert TOKEN not in out + err + log_text
+    assert "Not logged in" not in log_text  # result の文はログに残さない
+    assert "subtype=success terminal_reason=api_error" in log_text
+    assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
+
+
+def test_agent_timeout_stops_and_removes_container(agent, capfd):
+    agent.behave("ok", lock="daily-dry-run", agent="sleep")
+    started = time.monotonic()
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    assert time.monotonic() - started < 10
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "timeout")
+    argvs = [c["argv"] for c in agent.calls()]
+    assert ["rm", "--force", "cid1"] in argvs
 
 
 @pytest.mark.parametrize(
@@ -740,7 +921,7 @@ def test_stage_timeout_stops_and_removes_container(host, capfd):
 def _hang(pid_file: Path):
     """compose の代わりに、子プロセスを1つ起動して止まる（ジョブの子プロセスのグループに入る）。"""
 
-    def run(self, service, args, timeout_s):
+    def run(self, service, args, timeout_s, stdin=None):
         # SIGTERM を無視する孫（止めるには SIGKILL が要る）
         proc = subprocess.Popen(["sh", "-c", "trap '' TERM; sleep 60"])
         pid_file.write_text(str(proc.pid))

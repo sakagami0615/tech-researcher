@@ -65,7 +65,7 @@
 │       ├── cli.py                    # 各段階の入口（worker で動く）
 │       ├── orchestrator.py           # 統括スクリプトとその入口（ホストで動く。bin/tr-run が呼び、docker compose run を呼ぶ）
 │       ├── observe.py                # D-13 の観測の一時的な入口（ホストで動く。bin/tr-observe が呼ぶ。① だけ）
-│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env の場所・権限の確認、実行の間の写しの作成と削除、マスク用の秘匿値の読み出し（ホストで動く。3.7）
+│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env・agent.env の場所・権限の確認、実行の間の写しの作成と削除、マスク用の秘匿値の読み出し（ホストで動く。3.7）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
 │       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）
@@ -165,7 +165,7 @@ docker compose run --rm -T agent \
 | プロンプトの先頭を `/tr-daily-evaluate` にする | `Skill` の道具を許可せずにスキルの指示を渡す | F5・F15（確認済み） |
 | `--output-format json --json-schema` | 構造化出力で受け取る | F6 |
 | `--no-session-persistence` | セッションを保存せず、`CLAUDE_CONFIG_DIR` への書き込みを減らす。外部コンテンツを含む会話の記録をディスクに残さない | F9 |
-| `--max-turns` | 構造化出力の呼び直しが終わらないときに止める | F6・F9 |
+| `--max-turns` | 構造化出力の呼び直しが終わらないときに止める。値は PoC で決める（3.8 の7）。設定ファイルに書くまでは付けず、段階の上限時間で止める | F6・F9 |
 | 環境変数 `CLAUDE_CODE_OAUTH_TOKEN` | agent.env から渡す | F2・D-05 |
 | 環境変数 `ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN` を渡さない | 従量課金のキーが先に使われるのを防ぐ。統括スクリプトは、compose に渡す環境変数を許可したものだけに絞る | F3・D-05 |
 | 環境変数 `CLAUDE_CONFIG_DIR`・`CLAUDE_CODE_TMPDIR` | 書き込めるのをこの2つの場所だけにする | F10・D-04 |
@@ -227,16 +227,17 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 - 統括スクリプト（ホスト）は env_file の中身を環境変数として読み込まず、compose が各コンテナにだけ渡す。統括スクリプトから compose に渡す環境変数は、許可したものだけに絞る（F3 の `ANTHROPIC_API_KEY` などがホストのシェルにあっても、コンテナに入れない）
 - compose に渡すのは `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と `DOCKER_CONFIG` だけにする。リポジトリの `.env` は読ませない（`--env-file /dev/null`）。`TR_DATA_DIR` は統括スクリプトが確かめて解決したパスを、`TR_SECRETS_DIR` は確かめたフォルダの下に作る写しのフォルダ（下）を渡す
 - worker.env は、compose.yaml の worker の `env_file`（`${TR_SECRETS_DIR}/worker.env`、`required: true`）で worker にだけ渡す。`TR_SECRETS_DIR` はどのコンテナにもマウントせず、コンテナの環境変数にも入れない（compose の変数の展開にだけ使う）。worker の `environment`（`TR_DATA_DIR`）は env_file より優先されるので、worker.env から上書きできない
+- agent.env は、compose.yaml の agent の `env_file`（`${TR_SECRETS_DIR}/agent.env`、`required: true`）で agent にだけ渡す。worker には渡さず、agent には worker.env を渡さない。compose は使わないサービスの env_file もプロジェクトの読み込みで求めるので、① だけを動かすときも両方を置く（値は空でよい）。agent.env に書ける変数は `CLAUDE_CODE_OAUTH_TOKEN` だけに限り、ほかの名前の行があれば終了コード 2 で止める（行の番号だけを出す）。`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN` はサブスクリプションのトークンより先に使われ（F3）、`CLAUDE_CONFIG_DIR`・`DISABLE_AUTOUPDATER` などはイメージの設定（3.3）を上書きする（env_file はイメージの環境変数より優先される）ため
 - 統括スクリプトは起動の前に（ロックを取る前に）次を確かめ、満たさなければ終了コード 2 で止める。エラー文にはパスも値も入れない
   - `TR_SECRETS_DIR` が設定されていて、絶対パスで、解決したパスがリポジトリの外かつ `TR_DATA_DIR` の外（worker にマウントするため）
-  - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env` は通常のファイル（シンボリックリンクにしない）
+  - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env`・`agent.env` は通常のファイル（シンボリックリンクにしない）
   - どちらも持ち主が `bin/tr-run` を動かす人で、root ではない。compose は、`bin/tr-run` を動かす人の権限で env_file を読むため
-  - どちらもグループとほかの人の権限がなく、持ち主が読める（フォルダは写しを作るので持ち主が読み書きもできる 700、`worker.env` は 600。読み取りだけの 400 も可。これ以外の権限（実行や setuid の付いたものなど）は認めない）
-- 統括スクリプトは、1回の実行の始めに worker.env の写し（`${TR_SECRETS_DIR}/.run-<実行ID>/worker.env`。フォルダ 700・ファイル 600）を作り、compose にはその写しのフォルダを `TR_SECRETS_DIR` として渡す。実行が終わったら（上限やシグナルで止めたときも）消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値がずれないようにするため。統括スクリプトが強制終了されたときは写しが残るが、元のファイルと同じ 700 のフォルダの中にある。次の実行は自動では消さない（ロックの違う日次と週次が同時に動きうるので、動いている実行の写しを消すおそれがある）。運用者が実行していないときに消す
-- worker.env の書式は `名前=値` を1行に1つに限る。名前は英数字と `_`（先頭は数字以外）、値は引用符で囲まず、空白・引用符・`$`・`\` を含めない。空行と、空白・タブで字下げしてもよい `#` で始まる行は読み飛ばす（字下げに使えるのは空白とタブだけ）。行末の CRLF は可。統括スクリプトは、ロックを取る前に元のファイルを、実行では写しを確かめ、違う行があれば終了コード 2 で止める（エラー文には行の番号だけを出す）。compose は書式の誤り（閉じていない引用符・名前に使えない文字など）をその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開してエラー文に値の一部を出しうるため、そうなる書き方を compose に渡す前に止める
-- 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env の秘匿値（7.3 の名前の規則）を読む。上の書式なら compose のエラー文に値は出ないはずだが、念のため段階の失敗の stderr も伏せる。読んだ値は環境変数にも compose にも渡さない。秘匿値でない値（投稿先のリポジトリ名や Projects の番号。D-20）は伏せない。7.3 と同じく、短い値や一般的な語を伏せるとログが読めなくなり、公開しても害がないため
+  - どちらもグループとほかの人の権限がなく、持ち主が読める（フォルダは写しを作るので持ち主が読み書きもできる 700、`worker.env`・`agent.env` は 600。読み取りだけの 400 も可。これ以外の権限（実行や setuid の付いたものなど）は認めない）
+- 統括スクリプトは、1回の実行の始めに worker.env・agent.env の写し（`${TR_SECRETS_DIR}/.run-<実行ID>/` の下。フォルダ 700・ファイル 600）を作り、compose にはその写しのフォルダを `TR_SECRETS_DIR` として渡す。実行が終わったら（上限やシグナルで止めたときも）消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値がずれないようにするため。統括スクリプトが強制終了されたときは写しが残るが、元のファイルと同じ 700 のフォルダの中にある。次の実行は自動では消さない（ロックの違う日次と週次が同時に動きうるので、動いている実行の写しを消すおそれがある）。運用者が実行していないときに消す
+- worker.env・agent.env の書式は `名前=値` を1行に1つに限る。名前は英数字と `_`（先頭は数字以外）、値は引用符で囲まず、空白・引用符・`$`・`\` を含めない。空行と、空白・タブで字下げしてもよい `#` で始まる行は読み飛ばす（字下げに使えるのは空白とタブだけ）。行末の CRLF は可。統括スクリプトは、ロックを取る前に元のファイルを、実行では写しを確かめ、違う行があれば終了コード 2 で止める（エラー文には行の番号だけを出す）。compose は書式の誤り（閉じていない引用符・名前に使えない文字など）をその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開してエラー文に値の一部を出しうるため、そうなる書き方を compose に渡す前に止める
+- 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env・agent.env の秘匿値（7.3 の名前の規則）を読む。上の書式なら compose のエラー文に値は出ないはずだが、念のため段階の失敗の stderr も伏せる。読んだ値は環境変数にも compose にも渡さない。秘匿値でない値（投稿先のリポジトリ名や Projects の番号。D-20）は伏せない。7.3 と同じく、短い値や一般的な語を伏せるとログが読めなくなり、公開しても害がないため
 - worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
-- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env は agent コンテナ（#18）を足すときに同じ形で足す
+- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env の変数名は `deploy/env/agent.env.example` に置く
 - `DOCKER_CONFIG` は、このプロジェクト専用のフォルダ（`${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`、権限 700）にする。利用者の `~/.docker/config.json` の `proxies` は compose がコンテナの環境変数に入れるため。`TR_DATA_DIR` の下には置かない（worker にマウントするので、コンテナの中から次のコンテナの設定を書き換えられる）。Docker のコンテキストは使えず、デーモンは `DOCKER_HOST` で指定する
 - `TR_UID`・`TR_GID` を省略したときは、`bin/tr-run` を動かしている人の ID を渡す。0（root）は拒否する
 

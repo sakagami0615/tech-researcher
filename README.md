@@ -32,11 +32,13 @@ bin/setup-third-party.sh
 ```sh
 export TR_DATA_DIR=/srv/tech-researcher   # データ用フォルダ。リポジトリの外の絶対パスで、先に作っておく
 export TR_UID=$(id -u) TR_GID=$(id -g)    # データ用フォルダの持ち主（省略時は 1000）。0（root）にしない
-export TR_SECRETS_DIR=$HOME/.config/tech-researcher/secrets   # worker.env を置くフォルダ（下の「認証情報」）
+export TR_SECRETS_DIR=$HOME/.config/tech-researcher/secrets   # worker.env・agent.env を置くフォルダ（下の「認証情報」）
 install -d -m 00700 "$TR_SECRETS_DIR"   # 00 で setgid も外す（親のフォルダから引き継がない）
 install -m 600 deploy/env/worker.env.example "$TR_SECRETS_DIR/worker.env"
+install -m 600 deploy/env/agent.env.example "$TR_SECRETS_DIR/agent.env"
 "${EDITOR:-vi}" "$TR_SECRETS_DIR/worker.env"   # 値を入れる。引用符で囲まず、1行に1つ（値に `$` を含めない）
-docker compose build worker   # compose.yaml の読み込みに worker.env が要るので、上で先に作る
+"${EDITOR:-vi}" "$TR_SECRETS_DIR/agent.env"    # Claude のトークン（② を動かすときに要る）
+docker compose build worker   # compose.yaml の読み込みに worker.env と agent.env が要るので、上で先に作る
 ```
 
 - `config/` は読み取り専用で、`${TR_DATA_DIR}` はコンテナの `/data` にマウントします。ほかの場所（ルートのファイルシステム）は読み取り専用で、書けるのは `/data` と `/tmp` だけです
@@ -51,13 +53,33 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 
 標準出力には件数と失敗した情報源の ID だけが出ます。日次は ② の入力 `agent-input.json` も書きます。エラーのときに出るログのパスは、コンテナの中のパス（`/data/…`）です。収集結果は `$TR_DATA_DIR/dry-run/$run_id/collected.json`、ログは同じフォルダの `log.jsonl` にあります。
 
-### 認証情報（worker.env）
+### 認証情報（worker.env・agent.env）
 
-worker が使う認証情報は、リポジトリの外の `${TR_SECRETS_DIR}/worker.env` に書きます。compose が worker のコンテナにだけ環境変数として渡します（agent には渡しません。フォルダもマウントしません）。変数名は `deploy/env/worker.env.example` にあります。作り方は上の「worker コンテナ」の手順のとおりです。
+認証情報は、リポジトリの外の `${TR_SECRETS_DIR}` に2つのファイルで置きます。compose が `worker.env` は worker のコンテナにだけ、`agent.env` は agent のコンテナにだけ環境変数として渡します（フォルダはどちらにもマウントしません）。変数名は `deploy/env/worker.env.example`・`deploy/env/agent.env.example` にあります。作り方は上の「worker コンテナ」の手順のとおりです。compose.yaml の読み込みに両方が要るので、収集だけを動かすとき（観測など）も `agent.env` を置きます（値は空でかまいません）。
 
-- いまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
-- `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env` は 600（または 400）で、どちらも `bin/tr-run` を動かす人（root 以外）が持ち主です。`worker.env` はシンボリックリンクにしません。書き方は `名前=値` を1行に1つで、値は引用符で囲まず、空白・引用符・`$`・`\` を含めません（空行と `#` のコメント行は可）。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります（書き方の誤りは行の番号だけを出します）
-- 統括スクリプトは worker.env を環境変数として読み込みません。実行の始めに同じフォルダの `.run-<実行ID>/` に写しを作って compose に読ませ、実行が終わったら消します（実行の途中で worker.env を書き換えても、その実行には効きません）。`bin/tr-run` が強制終了されると `${TR_SECRETS_DIR}/.run-*` が残ることがあります。実行していないときに消してください（トークンを差し替えたときも）。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
+- `worker.env` のいまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
+- `agent.env` に書けるのは、Claude Code のサブスクリプションのトークン `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で発行）だけです。`ANTHROPIC_API_KEY` など、ほかの変数を書くと起動の前に止まります（従量課金のキーが先に使われたり、イメージの設定を上書きしたりするため）。空なら ② は認証の失敗（`agent_failed`）になります
+- `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env`・`agent.env` は 600（または 400）で、どれも `bin/tr-run` を動かす人（root 以外）が持ち主です。ファイルはシンボリックリンクにしません。書き方は `名前=値` を1行に1つで、値は引用符で囲まず、空白・引用符・`$`・`\` を含めません（空行と `#` のコメント行は可）。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります（書き方の誤りは行の番号だけを出します）
+- 統括スクリプトは worker.env・agent.env を環境変数として読み込みません。実行の始めに同じフォルダの `.run-<実行ID>/` に写しを作って compose に読ませ、実行が終わったら消します（実行の途中で書き換えても、その実行には効きません）。`bin/tr-run` が強制終了されると `${TR_SECRETS_DIR}/.run-*` が残ることがあります。実行していないときに消してください（トークンを差し替えたときも）。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
+
+## agent コンテナ
+
+② 評価・要約（と後の ④ 失敗時の調査）は、agent コンテナの Claude Code が道具なしで行います（`docker/agent.Dockerfile`・`compose.yaml`）。統括スクリプトが `docker compose run --rm -T agent claude -p /tr-daily-evaluate …` で起動し、② の入力を標準入力に渡して、標準出力の JSON から構造化出力を受け取ります（`src/tech_researcher/agent/invoke.py`）。
+
+- Claude Code の版はイメージで固定します（`docker/agent.Dockerfile` の `CLAUDE_CODE_VERSION`）。npm のパッケージから実行ファイルだけを取り出し、インストールスクリプトは動かしません。版を変えたときは、AI の回帰テスト（D-07）を流します
+- 自動更新と、テレメトリなどの不要な通信を止めます（`DISABLE_AUTOUPDATER=1`・`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`）
+- ルートのファイルシステムは読み取り専用で、書けるのは `CLAUDE_CONFIG_DIR`（`/claude`）と `/tmp` だけです（どちらも tmpfs で、コンテナを消すと消えます）。設定・実行データ・リポジトリはマウントしません。root では動かさず、権限（capabilities）をすべて外します
+- 道具と MCP をなくし（`--tools ""`・`--disallowedTools "mcp__*"`・`--strict-mcp-config`）、構造化出力（`--output-format json --json-schema`）で受け取り、セッションを保存しません（`--no-session-persistence`）。`--bare`（サブスクリプションのトークンを読まない）と `--model` は付けず、使われたモデルはログ（② の終わりの `detail`）に残します。`[limits]` の `agent_max_turns` を書いたときだけ `--max-turns` を付けます
+- スキーマは `src/tech_researcher/schemas/daily_output.json` です。まだなければ、② を実行エラー（`not_implemented`）にして AI を呼びません
+
+ビルドと、トークンを使わない確認（版と、読み取り専用で起動できること）：
+
+```sh
+docker compose build agent
+docker compose run --rm -T agent claude --version   # 固定した版が出る
+# /app などは書けず（Read-only file system）、/claude と /tmp だけに書ける
+docker compose run --rm -T agent sh -c 'touch /app/x; touch /claude/x /tmp/x && echo ok'
+```
 
 ## 実行（bin/tr-run）
 
@@ -70,10 +92,10 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 - 引数は `daily`・`weekly` と `--dry-run` だけです。対象日（週）は実行した時点から決まり、過去の期間は指定できません
 - 同じ種類の実行が動いていれば、何もせずに終了コード 3 で終わります（ロックは `$TR_DATA_DIR/locks/` の `daily`・`weekly` と、それぞれのドライラン用で別）
 - ジョブ全体と段階ごとの上限時間は、設定ファイルの `[limits.daily]`・`[limits.weekly]` です。超えたら止め、その実行のコンテナを消します
-- compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません。`TR_SECRETS_DIR` は worker.env の場所を compose に教えるだけで、コンテナには入りません
+- compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません。`TR_SECRETS_DIR` は worker.env・agent.env の場所を compose に教えるだけで、コンテナには入りません
 - `DOCKER_CONFIG` は `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`（権限 700）です。`~/.docker/config.json` の `proxies` などはコンテナに入りません。このため Docker のコンテキスト（`DOCKER_CONTEXT`・`docker context use`）は使えず、デーモンは `DOCKER_HOST` で指定します。compose のプラグインは、`~/.docker/cli-plugins` ではなく、システムの場所（`/usr/libexec/docker/cli-plugins` など）に入れておきます
 - 標準出力には、実行 ID・種類・対象日・結果の種別・件数・取得できなかった情報源の名前・ドライランの出力先だけを JSON 1行で出します。ドライランでは同じものを出力のフォルダの `summary.json` に残します
-- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。ただし ② の AI の呼び出し（agent コンテナ）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
+- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。② は agent コンテナの Claude Code を呼びます（上の「agent コンテナ」）。ただし出力のスキーマ（`schemas/daily_output.json`）と内側のスキル（`tr-daily-evaluate`）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。② が失敗したときは、`agent_failed`（終了コードが0でない、または構造化出力がない。認証の失敗を含む）・`timeout`・`bad_output` などの分類を要約とログに出します。ログには Claude Code の分類（`subtype` など）だけを残し、AI の応答の文は残しません。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
 - ① は、本番では DB（`$TR_DATA_DIR/db/tech-researcher.sqlite3`）を開き、runs の開始・取得結果（source_fetches）・収集項目（items。日次だけ）・Star 数と人気型フィードの記録（日次だけ）を書きます。① で実行エラーになった本番の実行（すべての情報源の取得に失敗した日など）は runs を `failed` で閉じます。② 以降の終わりは、それぞれの失敗の分岐と ⑤ で書くので、それまで本番の runs は `running` のまま残ります。ドライランは DB を読み取り専用で開き、何も書きません（DB がなければ前日の記録がないものとして動きます）
 - 週次は ① 収集だけです。ドライランは ① の後に終わり、本番は ① の後に実行エラー（`not_implemented`）で終わります
 
