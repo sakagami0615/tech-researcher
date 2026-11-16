@@ -1,7 +1,8 @@
 """② ④ の AI の呼び出しの境界（structure.md 2.2・3.3・8.3）。AI の差し替えはここで行う。
 
-agent コンテナの Claude Code を `docker compose run --rm -T agent claude -p …` で呼ぶ（起動は統括
-スクリプトの Compose が行う）。入力は標準入力の JSON、出力は標準出力の結果の JSON で、そこから
+agent コンテナの Claude Code を `docker compose run --rm -T agent agent-run <スキル名> -p …` で呼ぶ
+（起動は統括スクリプトの Compose が行う。agent-run はスキルの SKILL.md があることを確かめてから
+claude を動かす）。入力は標準入力の JSON、出力は標準出力の結果の JSON で、そこから
 構造化出力（structured_output）を取り出す。
 
 - 道具（`--tools ""`）と MCP（`--disallowedTools "mcp__*"`・`--strict-mcp-config`）をなくす
