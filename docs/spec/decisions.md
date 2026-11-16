@@ -97,7 +97,7 @@
 
 - ② と ④ の AI には、道具（ツール）を持たせない。スキルの起動にも `Skill` の道具は要らない（2026-10-27 に確認）ので、道具は一切許可しない。`--model` は付けず、Claude Code の既定のモデルに任せる
 - 道具は `--tools ""` で外す。組み込みの道具（Bash・Read・WebFetch・WebSearch などを含む）はすべて外れる。`--tools` は MCP の道具に効かないので、`--disallowedTools "mcp__*"` と `--strict-mcp-config` を合わせて付ける（Claude Code の公式ドキュメント。2026-10-25 に確認）。起動の引数は [design/structure.md](design/structure.md#33-統括スクリプトから-agent-の-claude-code-を呼ぶ形) 3.3 に定める
-- ② と ④ への入力は標準入力で渡し、AI の出力は構造化出力（`--output-format json` と `--json-schema`）で受け取る。スキーマに合う出力は、標準出力の JSON の `structured_output` に入る。終了コードが0でないとき、または `structured_output` がないときは失敗とする（`subtype` が `success` でも `structured_output` がないことがある。公式ドキュメント、2026-10-25 に確認）。受け取った JSON は、コードが形を確かめてからファイルに保存する。AI はファイルに触れない。入力と出力の JSON の形は [design/data-model.md](design/data-model.md#4-ai-への入力と-ai-の出力) 4章に定める
+- ② と ④ への入力は標準入力で渡し、AI の出力は構造化出力（`--output-format json` と `--json-schema`）で受け取る。スキーマに合う出力は、標準出力の JSON の `structured_output` に入る。終了コードが0でないとき、または `structured_output` がないときは失敗とする（`subtype` が `success` でも `structured_output` がないことがある。公式ドキュメント、2026-10-25 に確認）。受け取った JSON は、コードがファイルに保存する。② は structured_output をそのまま保存し、形の検査は ③ の D6(a) で行う（違反は全体の不合格）。AI はファイルに触れない。入力と出力の JSON の形は [design/data-model.md](design/data-model.md#4-ai-への入力と-ai-の出力) 4章に定める
 - `claude -p` の標準入力は 10MB が上限で、超えると非0で終わる（公式ドキュメント、2026-10-25 に確認）。② の入力は日次 2MB・週次 8MB を上限とし、超えたら実行エラーにする（D-21）
 - AI の道具から書き込める場所はない。Claude Code 自身は設定・セッションのファイル（`CLAUDE_CONFIG_DIR`）と一時ファイル（`CLAUDE_CODE_TMPDIR`）を書くので、その2つの場所だけはコンテナ内で書き込めるようにする。`--no-session-persistence` を付けて、セッションをディスクに保存しない
 - ③ の検証は、agent に渡したコピーではなく、worker が持つ元の収集結果（DB または worker 側のファイル）と照合する
@@ -107,7 +107,7 @@
 - 理由：従量課金を避けつつ、外部コンテンツを読む AI から、コマンドの実行・ファイルの読み書き・GitHub への書き込み・収集データの書き換えの手段を取り上げる。決定的な処理をコードに置く方針（concept.md）にも合う
 - 残るリスク：agent コンテナにある Claude のトークンを外部に送られる可能性。コマンドを実行できないため経路はほぼ塞がれるが、ゼロではない。被害はサブスクリプションの利用枠の不正利用。`claude setup-token` で発行したトークンを失効させる方法は未確認。公式ドキュメントには、全端末からサインアウトすると失効するという趣旨の記述だけがあり、トークンを個別に失効させる手順は見当たらなかった（2026-10-25）。PoC で、使い捨てのトークンを発行し、失効の方法と、`claude -p` が認証エラーになるまでの時間を確かめる
 - PoC で確認すること（Claude のトークンを使って実行する。手順は [design/structure.md](design/structure.md#38-poc-で確認すること) 3.8）
-  - 残り：サブスクリプションの利用上限の範囲で日次・週次が完了するか。agent コンテナでの内側のスキルの置き場所と、読み取り専用のファイルシステムで起動できるか
+  - 残り：サブスクリプションの利用上限の範囲で日次・週次が完了するか。agent コンテナでの内側のスキルの置き場所と、読み取り専用のファイルシステムでトークンを使って実行できるか（トークンなしの起動は確認済み。design/structure.md 3.8 の6）
 - 確かめたこと（2026-10-27、開発機で `claude -p` を4回実行。Claude Code 2.1.310）
   - `--tools ""` のまま、プロンプトの先頭の `/スキル名` でスキルが展開された（`Skill` の道具は要らない）。作業ディレクトリの `.claude/skills/` に置いたスキルが読まれた
   - 使える道具は `StructuredOutput` だけで、構造化出力（`structured_output`）が返った

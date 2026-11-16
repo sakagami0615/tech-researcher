@@ -4,8 +4,8 @@
 流れ：
 
 1. 引数（`daily`・`weekly` と `--dry-run` だけ）と環境を確かめる。TR_DATA_DIR はリポジトリの外の
-   既存のフォルダ、TR_UID・TR_GID は 0（root）以外、TR_SECRETS_DIR は worker.env を置いた
-   リポジトリの外の非公開のフォルダ（envfiles.py）
+   既存のフォルダ、TR_UID・TR_GID は 0（root）以外、TR_SECRETS_DIR は worker.env・agent.env を
+   置いたリポジトリの外の非公開のフォルダ（envfiles.py）
 2. 種類ごとのロック（flock）を取る。日次・週次で別にし、ドライランは本番と別にする
    （ドライランが本番の実行を止めないように。US-E8-04）。取れなければ何もせずに終わる
 3. 実行 ID と対象日を決め、ジョブを子プロセスで動かす。ジョブ全体の上限を超えたら、子プロセスの
@@ -16,11 +16,12 @@
 
 compose には許可した環境変数だけを渡し、リポジトリの .env も読ませない（3.7）。ホストのシェルに
 ANTHROPIC_API_KEY や COMPOSE_FILE などがあっても、compose の変数の展開と設定に使わせない。
-worker.env の中身は compose が worker にだけ渡す。統括スクリプトは秘匿値をマスクのためにだけ読む。
+worker.env の中身は compose が worker にだけ、agent.env の中身は agent にだけ渡す。統括スクリプトは
+秘匿値をマスクのためにだけ読む。
 
-日次は ① 収集（worker）→ ② 評価・要約（agent/invoke.py）→ ③ 検証・検査（worker）とつなぐ。
-② の AI の呼び出し（agent コンテナ。#18）と ⑤ 投稿はまだないので、それまでの本番の日次は ② で
-実行エラー（not_implemented）になる。② をつないだ後も、⑤ ができるまでは ③ の後に実行エラーで
+日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
+とつなぐ。内側のスキル（agent/skills/tr-daily-evaluate/SKILL.md）がまだなければ、AI を呼ばずに
+② を実行エラー（not_implemented）にする。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで
 終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗した
 ときの ④・⑤ への分岐も、それらの Issue で足す。
 
@@ -41,6 +42,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from importlib import resources
 from pathlib import Path
 
 from tech_researcher.agent import invoke
@@ -48,13 +50,13 @@ from tech_researcher.agent.daily import InputTooLarge, encode_input
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
 from tech_researcher.envfiles import (
+    ENV_FILES,
     SECRETS_DIR_ENV,
-    SNAPSHOT_LABEL,
-    WORKER_ENV,
     remove_snapshot,
     secret_values,
     secrets_dir,
     snapshot,
+    snapshot_label,
 )
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import JST, Target, daily_target, weekly_target
@@ -62,6 +64,7 @@ from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
 from tech_researcher.stages.collect import collect_failure
 from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
 from tech_researcher.stages.daily import RESULTS as VERIFY_RESULTS
+from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -70,6 +73,8 @@ WORKER = "worker"
 # compose run で作るコンテナに付けるラベル。上限で止めるときに、その実行のコンテナだけを消す
 RUN_ID_LABEL = "tech-researcher.run-id"
 SUMMARY = "summary.json"  # ドライランの出力のフォルダに残す要約（structure.md 7.2）
+# ② 日次の出力のスキーマ。`--json-schema` に渡し、③ も同じものを検査に使う（structure.md 2.2）
+DAILY_SCHEMA = resources.files("tech_researcher") / "schemas" / DAILY_OUTPUT_SCHEMA
 
 # compose に渡す環境変数（許可リスト）。PATH・HOME は docker の CLI とプラグインを探すため、
 # DOCKER_HOST は Docker のデーモンの指定（rootless など）のため。DOCKER_CONFIG は統括スクリプトが
@@ -150,8 +155,13 @@ class Compose:
     def env(self) -> Mapping[str, str]:
         return self._env
 
-    def run(self, service: str, args: Sequence[str], timeout_s: float) -> StageResult:
-        """段階を1つ起動して終わりを待つ。timeout_s を超えたら止め、そのコンテナを消す。"""
+    def run(
+        self, service: str, args: Sequence[str], timeout_s: float, stdin: bytes | None = None
+    ) -> StageResult:
+        """段階を1つ起動して終わりを待つ。timeout_s を超えたら止め、そのコンテナを消す。
+
+        stdin は標準入力に渡すバイト列（② ④ の入力）。None なら何も渡さない。
+        """
         command = [
             "docker",
             "compose",
@@ -173,13 +183,12 @@ class Compose:
             command,
             cwd=self._repo,
             env=self._env,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
         )
         try:
-            out, err = proc.communicate(timeout=timeout_s)
+            out, err = proc.communicate(stdin, timeout=timeout_s)
         except subprocess.TimeoutExpired:
             # SIGTERM で docker の CLI は終わるが、コンテナは動き続ける（実機で確認）。ラベルで消す
             proc.terminate()
@@ -188,12 +197,12 @@ class Compose:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                out, err = "", ""
-            return StageResult(None, out, err, not self._remove_quietly())
+                out, err = b"", b""
+            return StageResult(None, _text(out), _text(err), not self._remove_quietly())
         if proc.returncode != 0:
             # CLI が異常終了しても（SIGKILL など）、コンテナは残りうる
-            return StageResult(proc.returncode, out, err, not self._remove_quietly())
-        return StageResult(proc.returncode, out, err)
+            return StageResult(proc.returncode, _text(out), _text(err), not self._remove_quietly())
+        return StageResult(proc.returncode, _text(out), _text(err))
 
     def _remove_quietly(self) -> bool:
         """消せたら True。消せなくても段階の結果（上限・終了コード）を返すため、止めない。"""
@@ -224,6 +233,11 @@ class Compose:
                 timeout=DOCKER_TIMEOUT_S,
                 check=True,
             )
+
+
+def _text(data: bytes) -> str:
+    # ホストのロケールによらず UTF-8 で読む。壊れたバイト列でも止めない（中身は parse が確かめる）
+    return data.decode("utf-8", errors="replace")
 
 
 @dataclass(frozen=True)
@@ -273,7 +287,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     except Busy:
         print(f"tr-run: 同じ種類の実行（{name}）が動いている", file=sys.stderr)
         return EXIT_BUSY
-    except (OSError, UsageError) as e:  # ロックのファイル・fork・worker.env の写しなど
+    except (OSError, UsageError) as e:  # ロックのファイル・fork・env_file の写しなど
         return _usage_error(e, environ)
 
 
@@ -295,7 +309,8 @@ def _parser() -> argparse.ArgumentParser:
 def check_environment(environ: Mapping[str, str], repo: Path) -> tuple[Path, dict[str, str]]:
     """データ用フォルダと、compose に渡す環境変数（許可リスト）を返す。
 
-    worker.env の場所・権限と書式もここで確かめる（中身を環境変数として読み込まない。D-05）。
+    worker.env・agent.env の場所・権限と書式もここで確かめる（中身を環境変数として読み込まない。
+    D-05）。
     """
     data = data_dir(environ, repo).resolve()  # リポジトリの外であることも確かめる（D-22）
     if not data.is_dir():
@@ -303,7 +318,8 @@ def check_environment(environ: Mapping[str, str], repo: Path) -> tuple[Path, dic
     env = {name: environ[name] for name in COMPOSE_ENV if environ.get(name)}
     env["TR_DATA_DIR"] = str(data)
     secrets = secrets_dir(environ, repo, data)
-    secret_values(secrets / WORKER_ENV)  # 書式もロックの前に確かめる（実行では写しを読み直す）
+    for name in ENV_FILES:  # 書式もロックの前に確かめる（実行では写しを読み直す）
+        secret_values(secrets / name)
     env[SECRETS_DIR_ENV] = str(secrets)
     env["DOCKER_CONFIG"] = str(docker_config(environ))
     for name, current in UID_ENV.items():
@@ -369,12 +385,16 @@ def _new_job(
     except ValueError as e:
         raise UsageError(str(e)) from None
     try:
-        worker_secrets = secret_values(copy / WORKER_ENV, SNAPSHOT_LABEL)
+        env_secrets = [
+            value
+            for name in ENV_FILES
+            for value in secret_values(copy / name, snapshot_label(name))
+        ]
     except ValueError as e:
         remove_snapshot(copy)
         raise UsageError(str(e)) from None
     compose_env = {**compose_env, SECRETS_DIR_ENV: str(copy)}
-    scanner = SecretScanner(known_secret_values(environ) + worker_secrets)
+    scanner = SecretScanner(known_secret_values(environ) + env_secrets)
     return Job(
         repo=repo,
         config=config,
@@ -387,7 +407,7 @@ def _new_job(
 
 
 def supervise(job: Job, run: Callable[[Job], int] | None = None) -> int:
-    """ジョブを動かし、終わったら（止めたときも）worker.env の写しを消す（envfiles.py）。"""
+    """ジョブを動かし、終わったら（止めたときも）env_file の写しを消す（envfiles.py）。"""
     try:
         return _supervise(job, run)
     finally:
@@ -546,6 +566,9 @@ def _run_stages(job: Job) -> Summary:
 def _analyze(job: Job) -> str | None:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
 
+    structured_output はそのまま保存し、形の検査は ③ の D6(a) で行う（違反は全体の不合格。
+    D-04、D-07・US-E7-02）。
+
     入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。収集結果が0件の
     日も AI を呼ばず、項目のない出力をコードが作る（③ が「該当なし」の本文にする。
     report-templates.md 1.5）。
@@ -562,15 +585,34 @@ def _analyze(job: Job) -> str | None:
     except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
         job.log.write("analyze", "failure", error_category="bad_input", exc=e)
         return "bad_input"
+    result = None
     if data["items"]:
         try:
-            output = invoke.call_agent(body, job.limits.analyze * MINUTE)
-        except NotImplementedError:
+            result = invoke.call_agent(
+                body,
+                job.limits.analyze * MINUTE,
+                runner=job.compose,
+                skill=job.repo / invoke.SKILLS_DIR / invoke.DAILY_SKILL,
+                schema=DAILY_SCHEMA,
+                max_turns=job.config.limits.agent_max_turns,
+            )
+        except NotImplementedError:  # 内側のスキル（#22）がまだない
             job.log.write("analyze", "failure", error_category="not_implemented")
             return "not_implemented"
+        except invoke.AgentError as e:
+            # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
+            detail = job.scanner.mask(e.detail)[-STDERR_TAIL_CHARS:]
+            job.log.write("analyze", "failure", error_category=e.category, detail=detail)
+            if e.remove_failed:
+                job.log.write("analyze", "failure", error_category="container_remove_failed")
+            return e.category
+        except OSError as e:  # docker を起動できない
+            job.log.write("analyze", "failure", error_category="launch_failed", exc=e)
+            return "launch_failed"
         except Exception as e:
             job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
             return "agent_failed"
+        output = result.output
     else:
         output = {"items": []}
     try:
@@ -578,8 +620,11 @@ def _analyze(job: Job) -> str | None:
     except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
         job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
         return "output_write_failed"
-    if data["items"]:
-        job.log.write("analyze", "end")
+    if result is not None:
+        # 使われたモデル（structure.md 3.3）。runs への記録と前回との比較は #22 で足す
+        models = ",".join(result.models) or "unknown"
+        turns = "unknown" if result.num_turns is None else result.num_turns
+        job.log.write("analyze", "end", detail=f"model={models} turns={turns}")
     else:
         job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
     return None

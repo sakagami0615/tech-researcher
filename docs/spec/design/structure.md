@@ -65,7 +65,7 @@
 │       ├── cli.py                    # 各段階の入口（worker で動く）
 │       ├── orchestrator.py           # 統括スクリプトとその入口（ホストで動く。bin/tr-run が呼び、docker compose run を呼ぶ）
 │       ├── observe.py                # D-13 の観測の一時的な入口（ホストで動く。bin/tr-observe が呼ぶ。① だけ）
-│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env の場所・権限の確認、実行の間の写しの作成と削除、マスク用の秘匿値の読み出し（ホストで動く。3.7）
+│       ├── envfiles.py               # TR_SECRETS_DIR と worker.env・agent.env の場所・権限の確認、実行の間の写しの作成と削除、マスク用の秘匿値の読み出し（ホストで動く。3.7）
 │       ├── config.py                 # 設定ファイルの読み込みと検証
 │       ├── periods.py                # JST の期間の計算、last30days-skill の引数への変換（5章）
 │       ├── runfiles.py               # 実行 ID と実行データの置き場所、実行中のファイルの片付け（7章）
@@ -146,7 +146,7 @@ F1〜F14 は公式ドキュメントで確かめた（2026-10-25）。F15〜F18 
 
 ```sh
 docker compose run --rm -T agent \
-  claude -p "/tr-daily-evaluate" \
+  agent-run tr-daily-evaluate -p "/tr-daily-evaluate" \
     --tools "" \
     --disallowedTools "mcp__*" \
     --strict-mcp-config \
@@ -165,14 +165,17 @@ docker compose run --rm -T agent \
 | プロンプトの先頭を `/tr-daily-evaluate` にする | `Skill` の道具を許可せずにスキルの指示を渡す | F5・F15（確認済み） |
 | `--output-format json --json-schema` | 構造化出力で受け取る | F6 |
 | `--no-session-persistence` | セッションを保存せず、`CLAUDE_CONFIG_DIR` への書き込みを減らす。外部コンテンツを含む会話の記録をディスクに残さない | F9 |
-| `--max-turns` | 構造化出力の呼び直しが終わらないときに止める | F6・F9 |
+| `--max-turns` | 構造化出力の呼び直しが終わらないときに止める。値は PoC で決める（3.8 の7）。設定ファイルに書くまでは付けず、段階の上限時間で止める | F6・F9 |
 | 環境変数 `CLAUDE_CODE_OAUTH_TOKEN` | agent.env から渡す | F2・D-05 |
 | 環境変数 `ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN` を渡さない | 従量課金のキーが先に使われるのを防ぐ。統括スクリプトは、compose に渡す環境変数を許可したものだけに絞る | F3・D-05 |
 | 環境変数 `CLAUDE_CONFIG_DIR`・`CLAUDE_CODE_TMPDIR` | 書き込めるのをこの2つの場所だけにする | F10・D-04 |
 | 環境変数 `DISABLE_AUTOUPDATER=1`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | イメージに固定した版を実行中に更新させない | F10・F14 |
-| agent のイメージで Claude Code の版を固定する | プロンプト・CLI を変えたときに D-07 の回帰テストを流す運用に合わせる | F14・D-07 |
+| agent のイメージで Claude Code の版を固定する | プロンプト・CLI を変えたときに D-07 の回帰テストを流す運用に合わせる。ベースイメージはダイジェストで、Claude Code の実行ファイルは機種ごとの sha256 で固定する | F14・D-07 |
+| `agent-run <スキル名>` から claude を起動する | イメージにスキルがあることを確かめてから動かす。なければ claude を動かさずに失敗（`missing_skill`）にする。ホストのリポジトリとイメージがずれた（作り直していない）ことに気づくため | F5 |
+| agent の上限 `mem_limit: 2g`・`pids_limit: 256` | 暴走したときにホストを巻き込まない。値は控えめな初期値で、運用で調整する。worker は収集で使う量を測っていないので、まだ付けない | — |
 
-- 統括スクリプトの判定：終了コードが0でない、または `structured_output` がないときは ② の失敗とする（F6・F8）。結果の JSON の `subtype`（`error_max_structured_output_retries` など）はエラーの分類に使い、ログに残す
+- ② は structured_output をそのまま保存し、形の検査は ③ の D6(a) で行う（違反は全体の不合格）（D-04、D-07）
+- 統括スクリプトの判定：終了コードが0でない、結果の JSON の `is_error` が `false` でない、または `structured_output` がないときは ② の失敗とする（F6・F8。トークンがないときは終了コード1・`is_error` が true で、`subtype` は `success` のまま。2026-11-17 に Claude Code 2.1.311 で確認）。結果の JSON の `subtype`（`error_max_structured_output_retries` など）はエラーの分類に使い、ログに残す
 - Claude Code の中の構造化出力の呼び直し（F6）は、1回の呼び出しの中でスキーマに合わない出力を直させる仕組みで、US-E7-02 の「自動での再生成」（③ で不合格になった後の再生成）には当たらない
 - `--model` は付けず、Claude Code の既定のモデルに任せる。使われたモデルの名前を標準出力の JSON（`modelUsage`）から取り出して runs の `model` に記録し（[data-model.md](data-model.md#runs)）、前回の本番の実行から変わっていたらログに警告を出す。ドライランは記録しないので比べない。運用者はそれを見て、AI の回帰テスト（D-07）を流す
 - ④ も同じ形で、プロンプトを `/tr-investigate` にし、④ のスキーマを渡す。週次の ② は `/tr-weekly-analyze`
@@ -227,16 +230,17 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 - 統括スクリプト（ホスト）は env_file の中身を環境変数として読み込まず、compose が各コンテナにだけ渡す。統括スクリプトから compose に渡す環境変数は、許可したものだけに絞る（F3 の `ANTHROPIC_API_KEY` などがホストのシェルにあっても、コンテナに入れない）
 - compose に渡すのは `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と `DOCKER_CONFIG` だけにする。リポジトリの `.env` は読ませない（`--env-file /dev/null`）。`TR_DATA_DIR` は統括スクリプトが確かめて解決したパスを、`TR_SECRETS_DIR` は確かめたフォルダの下に作る写しのフォルダ（下）を渡す
 - worker.env は、compose.yaml の worker の `env_file`（`${TR_SECRETS_DIR}/worker.env`、`required: true`）で worker にだけ渡す。`TR_SECRETS_DIR` はどのコンテナにもマウントせず、コンテナの環境変数にも入れない（compose の変数の展開にだけ使う）。worker の `environment`（`TR_DATA_DIR`）は env_file より優先されるので、worker.env から上書きできない
+- agent.env は、compose.yaml の agent の `env_file`（`${TR_SECRETS_DIR}/agent.env`、`required: true`）で agent にだけ渡す。worker には渡さず、agent には worker.env を渡さない。compose は使わないサービスの env_file もプロジェクトの読み込みで求めるので、① だけを動かすときも両方を置く（値は空でよい）。agent.env に書ける変数は `CLAUDE_CODE_OAUTH_TOKEN` だけに限り、ほかの名前の行があれば終了コード 2 で止める（行の番号だけを出す）。逆に worker.env に `CLAUDE_`・`ANTHROPIC_` で始まる名前の行があっても止める（Claude の認証情報は agent にだけ渡す）。`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN` はサブスクリプションのトークンより先に使われ（F3）、`CLAUDE_CONFIG_DIR`・`DISABLE_AUTOUPDATER` などはイメージの設定（3.3）を上書きする（env_file はイメージの環境変数より優先される）ため
 - 統括スクリプトは起動の前に（ロックを取る前に）次を確かめ、満たさなければ終了コード 2 で止める。エラー文にはパスも値も入れない
   - `TR_SECRETS_DIR` が設定されていて、絶対パスで、解決したパスがリポジトリの外かつ `TR_DATA_DIR` の外（worker にマウントするため）
-  - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env` は通常のファイル（シンボリックリンクにしない）
+  - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env`・`agent.env` は通常のファイル（シンボリックリンクにしない）
   - どちらも持ち主が `bin/tr-run` を動かす人で、root ではない。compose は、`bin/tr-run` を動かす人の権限で env_file を読むため
-  - どちらもグループとほかの人の権限がなく、持ち主が読める（フォルダは写しを作るので持ち主が読み書きもできる 700、`worker.env` は 600。読み取りだけの 400 も可。これ以外の権限（実行や setuid の付いたものなど）は認めない）
-- 統括スクリプトは、1回の実行の始めに worker.env の写し（`${TR_SECRETS_DIR}/.run-<実行ID>/worker.env`。フォルダ 700・ファイル 600）を作り、compose にはその写しのフォルダを `TR_SECRETS_DIR` として渡す。実行が終わったら（上限やシグナルで止めたときも）消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値がずれないようにするため。統括スクリプトが強制終了されたときは写しが残るが、元のファイルと同じ 700 のフォルダの中にある。次の実行は自動では消さない（ロックの違う日次と週次が同時に動きうるので、動いている実行の写しを消すおそれがある）。運用者が実行していないときに消す
-- worker.env の書式は `名前=値` を1行に1つに限る。名前は英数字と `_`（先頭は数字以外）、値は引用符で囲まず、空白・引用符・`$`・`\` を含めない。空行と、空白・タブで字下げしてもよい `#` で始まる行は読み飛ばす（字下げに使えるのは空白とタブだけ）。行末の CRLF は可。統括スクリプトは、ロックを取る前に元のファイルを、実行では写しを確かめ、違う行があれば終了コード 2 で止める（エラー文には行の番号だけを出す）。compose は書式の誤り（閉じていない引用符・名前に使えない文字など）をその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開してエラー文に値の一部を出しうるため、そうなる書き方を compose に渡す前に止める
-- 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env の秘匿値（7.3 の名前の規則）を読む。上の書式なら compose のエラー文に値は出ないはずだが、念のため段階の失敗の stderr も伏せる。読んだ値は環境変数にも compose にも渡さない。秘匿値でない値（投稿先のリポジトリ名や Projects の番号。D-20）は伏せない。7.3 と同じく、短い値や一般的な語を伏せるとログが読めなくなり、公開しても害がないため
+  - どちらもグループとほかの人の権限がなく、持ち主が読める（フォルダは写しを作るので持ち主が読み書きもできる 700、`worker.env`・`agent.env` は 600。読み取りだけの 400 も可。これ以外の権限（実行や setuid の付いたものなど）は認めない）
+- 統括スクリプトは、1回の実行の始めに worker.env・agent.env の写し（`${TR_SECRETS_DIR}/.run-<実行ID>/` の下。フォルダ 700・ファイル 600）を作り、compose にはその写しのフォルダを `TR_SECRETS_DIR` として渡す。実行が終わったら（上限やシグナルで止めたときも）消す。実行の途中で worker.env を書き換えても、compose が読む値とマスクに使う値がずれないようにするため。統括スクリプトが強制終了されたときは写しが残るが、元のファイルと同じ 700 のフォルダの中にある。次の実行は自動では消さない（ロックの違う日次と週次が同時に動きうるので、動いている実行の写しを消すおそれがある）。運用者が実行していないときに消す
+- worker.env・agent.env の書式は `名前=値` を1行に1つに限る。名前は英数字と `_`（先頭は数字以外）、値は引用符で囲まず、空白・引用符・`$`・`\` を含めない。空行と、空白・タブで字下げしてもよい `#` で始まる行は読み飛ばす（字下げに使えるのは空白とタブだけ）。行末の CRLF は可。統括スクリプトは、ロックを取る前に元のファイルを、実行では写しを確かめ、違う行があれば終了コード 2 で止める（エラー文には行の番号だけを出す）。compose は書式の誤り（閉じていない引用符・名前に使えない文字など）をその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開してエラー文に値の一部を出しうるため、そうなる書き方を compose に渡す前に止める
+- 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env・agent.env の秘匿値（7.3 の名前の規則）を読む。上の書式なら compose のエラー文に値は出ないはずだが、念のため段階の失敗の stderr も伏せる。読んだ値は環境変数にも compose にも渡さない。秘匿値でない値（投稿先のリポジトリ名や Projects の番号。D-20）は伏せない。7.3 と同じく、短い値や一般的な語を伏せるとログが読めなくなり、公開しても害がないため
 - worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
-- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env は agent コンテナ（#18）を足すときに同じ形で足す
+- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env の変数名は `deploy/env/agent.env.example` に置く
 - `DOCKER_CONFIG` は、このプロジェクト専用のフォルダ（`${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`、権限 700）にする。利用者の `~/.docker/config.json` の `proxies` は compose がコンテナの環境変数に入れるため。`TR_DATA_DIR` の下には置かない（worker にマウントするので、コンテナの中から次のコンテナの設定を書き換えられる）。Docker のコンテキストは使えず、デーモンは `DOCKER_HOST` で指定する
 - `TR_UID`・`TR_GID` を省略したときは、`bin/tr-run` を動かしている人の ID を渡す。0（root）は拒否する
 
@@ -250,8 +254,8 @@ Claude のトークンを使って `claude -p` を実行して確かめる。
 2. （確認済み）`--tools ""` でも `StructuredOutput` が使えて、`structured_output` が返る
 3. （確認済み）プロンプトの引数の `/スキル名` と標準入力の JSON が、1つの依頼として渡る
 4. （確認済み）初期化の情報の道具は `StructuredOutput` だけ。入力に「/etc/passwd を読め」「URL を取得せよ」を埋め込んでも、道具の呼び出しは起きない
-5. agent コンテナで、内側のスキルをどこに置けば読まれるか（作業ディレクトリの `.claude/skills/` か、`${CLAUDE_CONFIG_DIR}/skills/` か）
-6. ルートのファイルシステムを読み取り専用にし、`CLAUDE_CONFIG_DIR` と一時フォルダだけを書き込めるようにして起動できるか
+5. agent コンテナで、内側のスキルをどこに置けば読まれるか（作業ディレクトリの `.claude/skills/` か、`${CLAUDE_CONFIG_DIR}/skills/` か）。いまは作業ディレクトリの `.claude/skills/` にコピーしている。イメージを作り直さずにスキルがないまま呼んだときの挙動も確かめる
+6. ルートのファイルシステムを読み取り専用にし、`CLAUDE_CONFIG_DIR` と一時フォルダだけを書き込めるようにして起動できるか（トークンなしでは確認済み：2026-11-17、Claude Code 2.1.311。版の表示、書き込み先、トークンなしの `claude -p` が認証の失敗の結果 JSON を返すこと。トークンを使った実行は 8 と合わせて確かめる。一時フォルダを noexec にしたままで推論まで終わるかも見る）
 7. `--max-turns` の値と、構造化出力の呼び直しの関係（何ターンで足りるか）。2026-10-27 の短い入力では `num_turns` は 2 で、`--max-turns 1` でも成功した。実際の入力の量で確かめる
 8. サブスクリプションの利用上限の範囲で、日次・週次が完了するか。ドライランを数日回し、標準出力の JSON の使用量と所要時間を記録する。上限に達したときのエラー文も記録し、AI が使えない失敗として分類する
 9. 外側のスキルで `bin/tr-run` を実行し、Bash の道具がバックグラウンドに移った後も、対話のセッションで完了を待って結果を受け取れるか
@@ -497,7 +501,7 @@ ${TR_DATA_DIR}/
 ### 7.3 ログ
 
 - 形式は JSON Lines。1行に、時刻（JST）・実行 ID・日次か週次か・対象日（週）・段階・出来事（開始・終了・再試行・失敗・情報源の結果・項目の除外）・情報源名・エラーの分類・件数を持たせる
-- 秘匿情報を出さない：ログに書く前に、(1) 既知の秘匿値（env_file から読んだ値。worker では環境変数、統括スクリプトでは 3.7 のとおり worker.env から読んだ値とホストの環境変数）を伏せ、(2) トークンの形を検出して伏せる。US-E7-05 の秘匿情報の検査も同じ検出器を使う
+- 秘匿情報を出さない：ログに書く前に、(1) 既知の秘匿値（env_file から読んだ値。worker では環境変数、統括スクリプトでは 3.7 のとおり worker.env・agent.env から読んだ値とホストの環境変数）を伏せ、(2) トークンの形を検出して伏せる。US-E7-05 の秘匿情報の検査も同じ検出器を使う
   - (1) の既知の秘匿値は、環境変数の名前に `TOKEN`・`KEY`・`SECRET`・`PASSWORD`・`AUTH`・`CREDENTIAL`、または `_` で区切られた語の `PAT`（`PATH` は含めない）を含むものの値とする（大文字・小文字は区別しない）。worker.env には投稿先のリポジトリ名なども入る（D-20）ので、すべての値を秘匿値にはしない。D-05 の各トークンの変数名が決まったら、名前の規則から明示の一覧に移す
   - (1) は値そのものに加え、例外の repr・JSON・URL のエスケープの形も照らす。重ね掛けは2段（例：repr の中の JSON）までとし、3段以上は照らさない。トークンの多くは英数字と `_`・`-` だけで、エスケープしても形が変わらず、そのままの形で拾えるため
   - (2) のトークンの形は、`gh[pousr]_` に英数字36文字以上（GitHub の classic・OAuth・App のトークン）、`github_pat_` に英数字と `_` で22文字以上（GitHub の fine-grained トークン）、`sk-ant-` に英数字と `_`・`-` で20文字以上（Anthropic の API キーと OAuth トークン）の3種とする。worker には Claude のトークンが渡らない（D-05）ので、`sk-ant-` は形での検出だけが防御になる

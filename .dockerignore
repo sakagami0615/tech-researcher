@@ -4,6 +4,8 @@
 !uv.lock
 !README.md
 !src/
+!agent/skills/
+!docker/agent-run.sh
 !third_party/last30days/LICENSE
 !third_party/last30days/skills/last30days/scripts/
 **/__pycache__

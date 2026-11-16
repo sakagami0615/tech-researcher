@@ -1,4 +1,4 @@
-# worker・agent のコンテナ（D-04、structure.md 2章・3章）。agent は #18 で足す。
+# worker・agent のコンテナ（D-04、structure.md 2章・3章）。
 # 統括スクリプト（ホスト）が `docker compose run --rm -T <サービス> …` で1段階ずつ起動する。
 # どのコンテナにも Docker のソケットを渡さない。
 name: tech-researcher
@@ -40,3 +40,30 @@ services:
       - type: bind
         source: ${TR_DATA_DIR:?TR_DATA_DIR にデータ用フォルダ（リポジトリの外の絶対パス）を設定する}
         target: /data
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    image: tech-researcher-agent
+    # 道具を持たない Claude Code だけを動かす（structure.md 3.3。コマンドは agent/invoke.py が付ける）。
+    # 設定・実行データ・リポジトリはマウントせず、入力は標準入力、出力は標準出力だけ
+    init: true
+    # 使えるメモリとプロセス数の上限（structure.md 3.3）。道具がないので子プロセスはほぼ作らない
+    mem_limit: 2g
+    pids_limit: 256
+    read_only: true
+    # 書き込めるのは CLAUDE_CONFIG_DIR（/claude）と一時フォルダ（/tmp）だけ（D-04、F10）
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+      - /claude:rw,noexec,nosuid,nodev,size=64m,uid=65534,gid=65534,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Claude のトークン（D-05）。agent にだけ渡す。worker.env は渡さない。統括スクリプトが変数名を
+    # 確かめ、ANTHROPIC_API_KEY など従量課金のキーや、イメージの設定（CLAUDE_CONFIG_DIR・自動更新の
+    # 停止など）を上書きする変数は入れさせない（envfiles.py、structure.md 3.3・3.7）
+    env_file:
+      - path: ${TR_SECRETS_DIR:?TR_SECRETS_DIR に agent.env を置くフォルダ（リポジトリの外の絶対パス）を設定する}/agent.env
+        required: true
