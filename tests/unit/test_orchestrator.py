@@ -768,6 +768,17 @@ def test_agent_gets_input_on_stdin_with_fixed_command(agent, capfd):
     assert end[0]["detail"] == "model=claude-opus-4-5-20251101 turns=2"
 
 
+def test_agent_end_log_without_model_or_turns(agent, capfd):
+    stdout = json.loads(AGENT_OK)
+    del stdout["num_turns"]
+    stdout["modelUsage"] = {}
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": json.dumps(stdout)})
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 0
+    run_id = summary_of(capfd)["run_id"]
+    end = [r for r in agent.log(run_id) if (r["stage"], r["event"]) == ("analyze", "end")]
+    assert end[0]["detail"] == "model=unknown turns=unknown"
+
+
 def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
     stderr = f"auth failed for {AGENT_SECRET} and {TOKEN}"
     agent.behave(
