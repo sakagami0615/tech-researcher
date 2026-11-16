@@ -14,7 +14,7 @@ from tech_researcher.agent.daily import display_name
 from tech_researcher.collect.aggregate import candidate_links
 from tech_researcher.collect.records import Item, Record
 from tech_researcher.collect.urls import normalize_url
-from tech_researcher.periods import JST
+from tech_researcher.periods import JST, Target
 
 _WEEKDAYS = "月火水木金土日"
 _ID_VALUE = re.compile(r"[A-Za-z0-9]+(-[A-Za-z0-9]+)*")  # HTML コメントの中に -- を作らない（4.1）
@@ -40,6 +40,12 @@ class Report:
 def day_label(day: date) -> str:
     """`YYYY-MM-DD（曜）`（0.4）。"""
     return f"{day.isoformat()}（{_WEEKDAYS[day.weekday()]}）"
+
+
+def period_text(target: Target) -> str:
+    """`YYYY-MM-DD（曜）HH:MM 〜 YYYY-MM-DD（曜）HH:MM（JST）`（0.4）。"""
+    start, end = (t.astimezone(JST) for t in (target.period.start, target.period.end))
+    return f"{day_label(start.date())}{start:%H:%M} 〜 {day_label(end.date())}{end:%H:%M}（JST）"
 
 
 def identifier(cadence: str, target: date, run_id: str) -> str:
