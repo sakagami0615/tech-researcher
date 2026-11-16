@@ -1,11 +1,13 @@
 # agent：② 評価・要約 ④ 失敗時の調査で Claude Code を動かすコンテナ（D-04、structure.md 2.2・3.3）。
 # 統括スクリプトが `docker compose run --rm -T agent claude -p …` で起動する（agent/invoke.py）。
 # イメージに入れるのは Claude Code 本体だけ。src/・config/・third_party/ と実行データは入れない。
-# 内側のスキル（agent/skills/）は、それを作る Issue（#22）で /app/.claude/skills/ にコピーする。
+# 内側のスキル（agent/skills/。中身は #22 で足す）は、作業ディレクトリの .claude/skills/ に置く
+# （プロンプトの先頭の /スキル名 で展開される。F15。コンテナでの読まれ方は 3.8 の5で確かめる）。
 
 # Claude Code の版を固定する（D-07 の回帰テストを、版を変えたときに流すため）。npm の stable の版。
-# npm の登録の整合性（integrity）で検証したパッケージから、ネイティブの実行ファイルだけを取り出す。
-# 第三者のインストールスクリプトは動かさない（--ignore-scripts。その機種向けのパッケージは入る）
+# npm のパッケージ（登録元が返す integrity とだけ照らす。ロックファイルはない）から、ネイティブの
+# 実行ファイルだけを取り出す。第三者のインストールスクリプトは動かさない（--ignore-scripts。
+# その機種向けのパッケージは入る）。取り出した後に版を確かめる
 FROM node:26.13.1-trixie-slim AS install
 ARG CLAUDE_CODE_VERSION=2.1.311
 RUN npm install --global --omit=dev --ignore-scripts --no-audit --no-fund \
@@ -29,5 +31,6 @@ ENV HOME=/tmp/home \
     DISABLE_AUTOUPDATER=1 \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 WORKDIR /app
+COPY agent/skills/ /app/.claude/skills/
 # root で動かさない。データ用フォルダをマウントしないので、運用者の UID に合わせる必要もない
 USER 65534:65534

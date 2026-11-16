@@ -4,6 +4,7 @@
 !uv.lock
 !README.md
 !src/
+!agent/skills/
 !third_party/last30days/LICENSE
 !third_party/last30days/skills/last30days/scripts/
 **/__pycache__

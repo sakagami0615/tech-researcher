@@ -617,7 +617,7 @@ def _analyze(job: Job) -> str | None:
         job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
         return "output_write_failed"
     if result is not None:
-        # 使われたモデル（structure.md 3.3）。runs への記録と前回との比較は DB の保存で足す
+        # 使われたモデル（structure.md 3.3）。runs への記録と前回との比較は #22 で足す
         models = ",".join(result.models) or "unknown"
         job.log.write("analyze", "end", detail=f"model={models} turns={result.num_turns}")
     else:

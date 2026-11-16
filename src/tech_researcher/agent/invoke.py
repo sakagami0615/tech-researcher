@@ -62,9 +62,10 @@ class AgentError(Exception):
     - timeout：段階の上限の時間を超えた（コンテナは止めて消す）
     - agent_failed：終了コードが0でない、is_error、または構造化出力がない（F6・F8）
     - bad_output：標準出力に結果の JSON がない
-    - bad_schema：スキーマのファイルが JSON でない
+    - bad_schema：スキーマのファイルを読めない、または JSON でない
 
-    detail はログにだけ残す情報（Claude Code の分類と stderr の末尾）。AI の出力の文は入れない。
+    detail はログにだけ残す情報（stderr と、その後ろに Claude Code の分類）。AI の出力の文は
+    入れない。
     """
 
     def __init__(self, category: str, detail: str = "", *, remove_failed: bool = False):
@@ -100,12 +101,14 @@ def load_schema(path: Path | Traversable) -> str:
     """`--json-schema` に渡すスキーマ（1行の JSON）。
 
     ファイルがなければ NotImplementedError（スキーマを作る Issue の前。統括スクリプトは ② を
-    not_implemented にする）。JSON でなければ AgentError(bad_schema)。
+    not_implemented にする）。読めない・JSON でなければ AgentError(bad_schema)。
     """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise NotImplementedError("出力のスキーマがまだない") from None
+    except OSError, UnicodeDecodeError:  # 権限・フォルダ・UTF-8 でないなど
+        raise AgentError("bad_schema", "スキーマのファイルを読めない") from None
     try:
         schema = json.loads(text)
     except json.JSONDecodeError:
@@ -136,7 +139,8 @@ def call_agent(
     try:
         return parse_result(result.returncode, result.stdout)
     except AgentError as e:
-        detail = f"{e.detail}\n{result.stderr}" if result.stderr else e.detail
+        # ログでは末尾を残して切るので、Claude Code の分類を stderr の後ろに置く
+        detail = f"{result.stderr}\n{e.detail}" if result.stderr else e.detail
         raise AgentError(e.category, detail, remove_failed=result.remove_failed) from None
 
 

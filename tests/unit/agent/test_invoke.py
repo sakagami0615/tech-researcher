@@ -126,10 +126,13 @@ def test_missing_schema_is_not_implemented(tmp_path):
     assert runner.calls == []  # AI を呼ばない
 
 
-@pytest.mark.parametrize("text", ["{not json", "[]"])
+@pytest.mark.parametrize("text", ["{not json", "[]", b"\xff"])
 def test_broken_schema_is_error_without_calling(tmp_path, text):
     path = tmp_path / "daily_output.json"
-    path.write_text(text, encoding="utf-8")
+    if isinstance(text, bytes):
+        path.write_bytes(text)  # UTF-8 でない
+    else:
+        path.write_text(text, encoding="utf-8")
     runner = FakeRunner(Done(0, result()))
     with pytest.raises(invoke.AgentError) as e:
         call(runner, path)
@@ -207,8 +210,16 @@ def test_failure_keeps_stderr_for_log(schema):
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "agent_failed"
-    assert e.value.detail.endswith("\nerror: something")
+    assert e.value.detail.startswith("error: something\n")
     assert e.value.remove_failed
+
+
+def test_classification_survives_long_stderr_cut(schema):
+    # ログには末尾だけを残す（orchestrator の STDERR_TAIL_CHARS）。分類が切り落とされない
+    runner = FakeRunner(Done(1, NOT_LOGGED_IN, "#1 building\n" * 1000))
+    with pytest.raises(invoke.AgentError) as e:
+        call(runner, schema)
+    assert "subtype=success terminal_reason=api_error" in e.value.detail[-2000:]
 
 
 def test_timeout_is_its_own_category(schema):
@@ -216,3 +227,12 @@ def test_timeout_is_its_own_category(schema):
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "timeout"
+
+
+def test_unreadable_schema_is_bad_schema(tmp_path):
+    runner = FakeRunner(Done(0, result()))
+    with pytest.raises(invoke.AgentError) as e:
+        call(runner, tmp_path)  # フォルダは読めない
+    assert e.value.category == "bad_schema"
+    assert str(tmp_path) not in e.value.detail
+    assert runner.calls == []
