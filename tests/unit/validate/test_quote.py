@@ -370,13 +370,15 @@ def test_quote_excluded_entry_does_not_take_the_id_from_a_later_entry():
                 "id": "i1",
                 "links": [],
                 "needs_period_event": False,
-                "untrusted": untrusted(title=english_run(300)),
+                "untrusted": untrusted(title=english_run(40)),
             },
         ]
     }
-    bad = daily_entry(item_ids=("i1",), headline=english_run(300))
+    bad = daily_entry(item_ids=("i1",), headline=english_run(40))
     good = daily_entry(item_ids=("i1",), headline="別の見出し")
-    kept, excluded = _check_entries([bad, good], data, items, LIMITS)
+    kept, excluded = _check_entries(
+        [bad, good], data, items, QuoteLimits(max_en=30, primary_max_en=30)
+    )
     assert kept == [good]
     assert [(c, x.entry) for c, x in excluded] == [("long_quote", bad)]
 
