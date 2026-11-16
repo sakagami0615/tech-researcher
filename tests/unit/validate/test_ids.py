@@ -1,7 +1,7 @@
 import pytest
 
 from tech_researcher.agent.daily import DailyEntry
-from tech_researcher.validate.ids import check_daily_ids
+from tech_researcher.validate.ids import check_daily_duplicates, check_daily_ids
 
 DATA = {
     "items": [
@@ -52,7 +52,7 @@ def test_violating_entry_is_excluded_with_reason(bad, reason):
 
 def test_duplicate_ids_keep_first_entry():
     first, second = entry(["i1"], headline="先"), entry(["i2", "i1"], headline="後")
-    kept, excluded = check_daily_ids([first, second], DATA)
+    kept, excluded = check_daily_duplicates([first, second])
     assert kept == [first] and excluded[0].entry == second
     assert "重複" in excluded[0].reason
 
@@ -60,6 +60,7 @@ def test_duplicate_ids_keep_first_entry():
 def test_excluded_entry_does_not_block_later_ids():
     bad, later = entry(["i1", "i9"]), entry(["i1"])
     kept, _ = check_daily_ids([bad, later], DATA)
+    kept, _ = check_daily_duplicates(kept)
     assert kept == [later]
 
 

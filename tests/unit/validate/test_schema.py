@@ -18,6 +18,21 @@ ITEM = {
     "period_event": None,
 }
 
+# スキーマに使ってよいキーワード（型・必須・enum・null の可否・追加プロパティの禁止）。
+# ほかのキーワード（minLength・pattern・format など）が入ったら失敗する
+ALLOWED_KEYWORDS = {
+    "$schema",
+    "title",
+    "type",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "enum",
+    "anyOf",
+}
+PROPERTY_NAMES = set(ITEM) | {"items"}
+
 
 def test_valid_output_passes():
     check_schema({"items": []})
@@ -73,8 +88,8 @@ def test_length_and_id_existence_are_not_in_the_schema():
             ]
         }
     )
-    banned = {"minLength", "maxLength", "minItems", "maxItems", "pattern", "format", "minimum"}
-    assert not banned & _keys(json.loads(schema_text(DAILY_OUTPUT_SCHEMA)))
+    used = _keys(json.loads(schema_text(DAILY_OUTPUT_SCHEMA)))
+    assert used - ALLOWED_KEYWORDS - PROPERTY_NAMES == set()
 
 
 def test_schema_enums_match_code_constants():

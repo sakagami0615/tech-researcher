@@ -113,7 +113,7 @@ def source_line(
 
 def _primary_url(items: Mapping[str, Item], item_id: str | None, link_id: str | None) -> str | None:
     # 両方あれば候補リンクを優先する（data-model.md 4.2 の初期案）。D6(b) に合わせて他項目の
-    # 候補リンクも引ける。自項目の出典に限ることは D1（後の Issue）で検査する
+    # 候補リンクも引ける。自項目の出典に限ることは D1（validate/sources.py）で検査する
     if link_id is not None:
         links = {
             link.link_id: link.url for i, it in items.items() for link in candidate_links(it, i)

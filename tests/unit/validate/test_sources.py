@@ -67,3 +67,25 @@ def test_bad_url_in_merged_source_is_excluded():
     items = {"i1": Item(merged.url, (record, bad_record), (), (), (), (), None)}
     kept, excluded = check_daily_sources([entry(["i1"])], items)
     assert kept == [] and len(excluded) == 1
+
+
+def test_duplicate_id_is_judged_after_other_checks():
+    """period_event 欠落で除外される先の項目が、後の項目の ID を取らない（③ の検査の並び）。"""
+    from tech_researcher.stages.daily import _check_entries
+
+    data = {
+        "items": [
+            {"id": "i1", "needs_period_event": True, "links": []},
+            {"id": "i2", "needs_period_event": False, "links": []},
+        ]
+    }
+
+    def make(ids, period_event):
+        return DailyEntry(
+            ids, None, None, "ai", 1, "full", "見出し", ("要点",), "理由", period_event
+        )
+
+    a, b = make(("i1",), None), make(("i1", "i2"), "出来事")
+    kept, excluded = _check_entries([a, b], data, ITEMS)
+    assert kept == [b]
+    assert [(c, x.entry) for c, x in excluded] == [("missing_period_event", a)]

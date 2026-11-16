@@ -33,7 +33,7 @@ from tech_researcher.periods import Target
 from tech_researcher.render.common import Report
 from tech_researcher.render.daily import render_daily
 from tech_researcher.stages.collect import COLLECTED, load_collected
-from tech_researcher.validate.ids import Excluded, check_daily_ids
+from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check_daily_ids
 from tech_researcher.validate.period_event import check_period_events
 from tech_researcher.validate.secret_scan import SecretScanner
 from tech_researcher.validate.sources import check_daily_sources
@@ -109,12 +109,15 @@ def _check_entries(
     """項目単位の検査を順に行う。違反した項目は除外し、検査の分類と一緒に返す。
 
     ID の存在（D6(b)）を先に確かめる。後ろの検査は ID から値を引くので、存在する ID だけを渡す。
+    ID の重複は最後に判定する。
     """
     excluded: list[tuple[str, Excluded]] = []
     for category, check in (
         ("invalid_id", lambda e: check_daily_ids(e, data)),
         ("invalid_source", lambda e: check_daily_sources(e, items)),
         ("missing_period_event", lambda e: check_period_events(e, data)),
+        # 重複は最後に、ほかの検査をすべて通った項目の中で判定する（後の検査もこの前に足す）
+        ("duplicate_id", check_daily_duplicates),
     ):
         entries, rejected = check(entries)
         excluded += [(category, x) for x in rejected]
