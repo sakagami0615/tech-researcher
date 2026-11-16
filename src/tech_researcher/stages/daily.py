@@ -15,7 +15,7 @@
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from tech_researcher.agent.daily import (
@@ -77,7 +77,10 @@ def run_verify(
     output = json.loads((run_dir / AGENT_OUTPUT).read_text(encoding="utf-8"))
     # 無害化でエスケープや囲みが入ると値の途中が割れ、本文の検査では見えなくなる。GitHub は描画で
     # エスケープを消すので、無害化の前の AI の出力の全文も検査する。除外した項目の中でも全体を止める
-    raw_kinds = sorted({f.kind for f in scanner.find(json.dumps(output, ensure_ascii=False))})
+    # 全文は json.dumps で1段エスケープされるので、すでにエスケープ済みの値は照合の段数を超える。
+    # キーと文字列の値を1つずつも検査する
+    texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
+    raw_kinds = sorted({f.kind for text in texts for f in scanner.find(text)})
     if raw_kinds:
         _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
         log.write(
@@ -135,6 +138,19 @@ def _check_entries(
         entries, rejected = check(entries)
         excluded += [(category, x) for x in rejected]
     return entries, excluded
+
+
+def _strings(value: object) -> Iterator[str]:
+    """JSON の値の、すべてのキーと文字列の値。"""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
 
 
 def _numbered(run_dir: Path) -> dict[str, Item]:

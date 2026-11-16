@@ -585,6 +585,18 @@ def test_secret_in_raw_ai_output_stops_the_report(host, secret):
     assert secret not in (out_dir / "log.jsonl").read_text()
 
 
+def test_double_escaped_secret_in_ai_string_is_detected(host):
+    """AI が値を2回エスケープして書いても、文字列の値を1つずつ検査して見つける。"""
+    secret = 'Pa"x0rd\\z'
+    host.worker_env["API_SECRET"] = secret
+    twice = json.dumps(json.dumps(secret)[1:-1])[1:-1]
+    host.ai = lambda data: {"items": [entry("d1", 1, points=[f"値は {twice} です"])]}
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1 and summary["error_category"] == "secret_detected"
+    assert not (Path(summary["output_dir"]) / "issue.md").exists()
+
+
 def test_secret_in_ai_ids_is_masked_in_results(host):
     """AI の出力の全文に秘匿情報があれば、ID の中でも全体を止める。結果のファイルには残さない。"""
     host.ai = lambda data: {"items": [entry("d1", 1), entry(TOKEN, 2)]}
