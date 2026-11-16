@@ -17,7 +17,10 @@ DAILY_OUTPUT_SCHEMA = "daily_output.json"
 
 @cache
 def schema_text(name: str) -> str:
-    """スキーマのファイルの中身。`--json-schema` にはこの文字列をそのまま渡す。"""
+    """スキーマのファイルの中身（③ の検査用）。
+
+    `--json-schema` には agent/invoke.py の load_schema が同じファイルを1行にして渡す。
+    """
     return (resources.files("tech_researcher") / "schemas" / name).read_text(encoding="utf-8")
 
 

@@ -65,7 +65,7 @@ class AgentError(Exception):
     - timeout：段階の上限の時間を超えた（コンテナは止めて消す）
     - agent_failed：終了コードが0でない、is_error、または構造化出力がない（F6・F8）
     - bad_output：標準出力に結果の JSON がない
-    - bad_schema：スキーマのファイルを読めない、または JSON でない
+    - bad_schema：スキーマのファイルがない・読めない、または JSON でない
 
     detail はログにだけ残す情報（stderr と、その後ろに Claude Code の分類）。AI の出力の文は
     入れない。
@@ -103,14 +103,11 @@ def claude_command(prompt: str, schema: str, max_turns: int | None) -> list[str]
 def load_schema(path: Path | Traversable) -> str:
     """`--json-schema` に渡すスキーマ（1行の JSON）。
 
-    ファイルがなければ NotImplementedError（スキーマを作る Issue の前。統括スクリプトは ② を
-    not_implemented にする）。読めない・JSON でなければ AgentError(bad_schema)。
+    ない・読めない・JSON でなければ AgentError(bad_schema)（パッケージの作り方の誤りなど）。
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raise NotImplementedError("出力のスキーマがまだない") from None
-    except OSError, UnicodeDecodeError:  # 権限・フォルダ・UTF-8 でないなど
+    except OSError, UnicodeDecodeError:  # ない・権限・フォルダ・UTF-8 でないなど
         raise AgentError("bad_schema", "スキーマのファイルを読めない") from None
     try:
         schema = json.loads(text)
@@ -133,9 +130,10 @@ def call_agent(
     """入力の JSON（標準入力に渡すバイト列）を AI に渡し、構造化出力を返す。
 
     skill はリポジトリの内側のスキルのフォルダ（agent/skills/<名前>）。プロンプトは `/<名前>`。
-    SKILL.md かスキーマのファイルがまだなければ NotImplementedError（それを作る Issue の前。
-    AI を呼ばない）。timeout_s は段階の上限（limits の analyze。D-21）。失敗は AgentError。
-    docker を起動できなければ OSError。返す構造化出力の形は確かめない（③ が D6(a) で検査する）。
+    SKILL.md がまだなければ NotImplementedError（それを作る Issue の前。AI を呼ばない。ホストの
+    リポジトリで確かめるので、イメージを作り直していなければずれることがある。README）。
+    timeout_s は段階の上限（limits の analyze。D-21）。失敗は AgentError。docker を起動できなければ
+    OSError。返す構造化出力の形は確かめない（③ が D6(a) で検査する）。
     """
     if not (skill / "SKILL.md").is_file():
         raise NotImplementedError("内側のスキルがまだない")

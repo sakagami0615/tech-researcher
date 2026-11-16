@@ -70,7 +70,8 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 - 自動更新と、テレメトリなどの不要な通信を止めます（`DISABLE_AUTOUPDATER=1`・`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`）
 - ルートのファイルシステムは読み取り専用で、書けるのは `CLAUDE_CONFIG_DIR`（`/claude`）と `/tmp` だけです（どちらも tmpfs で、コンテナを消すと消えます）。設定・実行データ・リポジトリはマウントしません。root では動かさず、権限（capabilities）をすべて外します
 - 道具と MCP をなくし（`--tools ""`・`--disallowedTools "mcp__*"`・`--strict-mcp-config`）、構造化出力（`--output-format json --json-schema`）で受け取り、セッションを保存しません（`--no-session-persistence`）。`--bare`（サブスクリプションのトークンを読まない）と `--model` は付けず、使われたモデルはログ（② の終わりの `detail`）に残します。`[limits]` の `agent_max_turns` を書いたときだけ `--max-turns` を付けます
-- スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキルは `agent/skills/tr-daily-evaluate/SKILL.md` です。どちらかがまだなければ、② を実行エラー（`not_implemented`）にして AI を呼びません
+- スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキルは `agent/skills/tr-daily-evaluate/SKILL.md` です。スキルがまだなければ、② を実行エラー（`not_implemented`）にして AI を呼びません（スキルの有無はリポジトリで確かめます）
+- イメージは `docker compose build agent` を実行した時点の `agent/skills/` と Claude Code の版を持ちます。`agent/skills/` や `CLAUDE_CODE_VERSION` を変えたら、`docker compose build agent` をやり直してください（`bin/tr-run` は作り直しません）
 
 ビルドと、トークンを使わない確認（版と、読み取り専用で起動できること）：
 

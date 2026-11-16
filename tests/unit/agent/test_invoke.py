@@ -148,10 +148,11 @@ def test_packaged_daily_schema_is_passed_on_one_line():
     assert json.loads(text) == json.loads(DAILY_SCHEMA.read_text(encoding="utf-8"))
 
 
-def test_missing_schema_is_not_implemented(tmp_path):
+def test_missing_schema_is_bad_schema(tmp_path):
     runner = FakeRunner(Done(0, result()))
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(invoke.AgentError) as e:
         call(runner, tmp_path / "missing.json")
+    assert e.value.category == "bad_schema"
     assert runner.calls == []  # AI を呼ばない
 
 

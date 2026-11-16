@@ -20,11 +20,10 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 秘匿値をマスクのためにだけ読む。
 
 日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
-とつなぐ。内側のスキル（agent/skills/tr-daily-evaluate/SKILL.md）か出力のスキーマ
-（schemas/daily_output.json）がまだなければ、AI を呼ばずに ② を実行エラー（not_implemented）に
-する。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで終わる。週次は ① の後に終わる
-（ドライランは ① だけ、本番は not_implemented）。段階が失敗したときの ④・⑤ への分岐も、それらの
-Issue で足す。
+とつなぐ。内側のスキル（agent/skills/tr-daily-evaluate/SKILL.md）がまだなければ、AI を呼ばずに
+② を実行エラー（not_implemented）にする。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで
+終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗した
+ときの ④・⑤ への分岐も、それらの Issue で足す。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -594,7 +593,7 @@ def _analyze(job: Job) -> str | None:
                 schema=DAILY_SCHEMA,
                 max_turns=job.config.limits.agent_max_turns,
             )
-        except NotImplementedError:  # 内側のスキル（#22）か出力のスキーマがまだない
+        except NotImplementedError:  # 内側のスキル（#22）がまだない
             job.log.write("analyze", "failure", error_category="not_implemented")
             return "not_implemented"
         except invoke.AgentError as e:

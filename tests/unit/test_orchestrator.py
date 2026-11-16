@@ -671,19 +671,10 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
     assert host.calls()[0]["locked"]
 
 
-@pytest.mark.parametrize(
-    ("dry_run", "missing"), [(False, "skill"), (True, "skill"), (True, "schema")]
-)
-def test_daily_stops_at_analyze_until_skill_and_schema_exist(
-    host, capfd, monkeypatch, tmp_path, dry_run, missing
-):
-    """内側のスキル（#22）か出力のスキーマがまだなければ、AI も ③ も起動せずに実行エラーにする。"""
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_daily_stops_at_analyze_until_skill_exists(host, capfd, monkeypatch, dry_run):
+    """内側のスキル（#22）がまだなければ、AI も ③ も起動せずに実行エラーにする。"""
     monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
-    if missing == "schema":
-        skill = host.repo / "agent" / "skills" / "tr-daily-evaluate"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("---\nname: tr-daily-evaluate\n---\n")
-        monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", tmp_path / "missing.json")
     host.behave("ok", lock="daily-dry-run" if dry_run else "daily")
     assert orchestrator.main(["daily", *(["--dry-run"] if dry_run else [])], host.environ) == 1
     summary = summary_of(capfd)
