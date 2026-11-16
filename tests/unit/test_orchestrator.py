@@ -592,6 +592,8 @@ def test_agent_service_is_read_only_without_data_or_tools():
     assert "init: true" in lines
     assert "mem_limit: 2g" in lines
     assert "pids_limit: 256" in lines
+    # worker は収集で使う量を測っていないので、まだ上限を付けない
+    assert not any(line.startswith(("mem_limit:", "pids_limit:")) for line in _services()["worker"])
     assert "- ALL" in lines
     assert "- no-new-privileges:true" in lines
     assert not any(line.startswith(("volumes:", "environment:", "user:")) for line in lines)

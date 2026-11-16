@@ -70,8 +70,8 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 - 自動更新と、テレメトリなどの不要な通信を止めます（`DISABLE_AUTOUPDATER=1`・`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`）
 - ベースイメージはダイジェストで、Claude Code の実行ファイルは機種ごとの sha256（`CLAUDE_CODE_SHA256_AMD64`・`_ARM64`）で固定します。版を上げるときは、タグ・ダイジェスト・sha256 を一緒に変えます
 - claude は `agent-run <スキル名>`（`docker/agent-run.sh`）から起動します。イメージにスキルがなければ claude を動かさず、② は `missing_skill` で失敗します（イメージの作り直し忘れ）
-- ② の出力はそのまま保存し、スキーマの検査は ③ の D6(a) で行います（合わなければ全体を不合格）
-- メモリは 2GB、プロセス数は 256 までです（`mem_limit`・`pids_limit`。worker も同じ）
+- ② は `structured_output` をそのまま保存し、形の検査は ③ の D6(a) で行います（違反は全体の不合格）
+- メモリは 2GB、プロセス数は 256 までです（`mem_limit`・`pids_limit`）
 - ルートのファイルシステムは読み取り専用で、書けるのは `CLAUDE_CONFIG_DIR`（`/claude`）と `/tmp` だけです（どちらも tmpfs で、コンテナを消すと消えます）。設定・実行データ・リポジトリはマウントしません。root では動かさず、権限（capabilities）をすべて外します
 - 道具と MCP をなくし（`--tools ""`・`--disallowedTools "mcp__*"`・`--strict-mcp-config`）、構造化出力（`--output-format json --json-schema`）で受け取り、セッションを保存しません（`--no-session-persistence`）。`--bare`（サブスクリプションのトークンを読まない）と `--model` は付けず、使われたモデルはログ（② の終わりの `detail`）に残します。`[limits]` の `agent_max_turns` を書いたときだけ `--max-turns` を付けます
 - スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキルは `agent/skills/tr-daily-evaluate/SKILL.md` です。スキルがまだなければ、② を実行エラー（`not_implemented`）にして AI を呼びません（スキルの有無はリポジトリで確かめます）

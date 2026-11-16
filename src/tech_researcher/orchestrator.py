@@ -566,8 +566,8 @@ def _run_stages(job: Job) -> Summary:
 def _analyze(job: Job) -> str | None:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
 
-    スキーマの検査は ③ の D6(a) で行い、違反は全体の不合格にする（D-04 の注、D-07・US-E7-02）。
-    JSON のオブジェクトでない出力も、そのまま保存して ③ で不合格にする（#77）。
+    structured_output はそのまま保存し、形の検査は ③ の D6(a) で行う（違反は全体の不合格。
+    D-04、D-07・US-E7-02）。
 
     入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。収集結果が0件の
     日も AI を呼ばず、項目のない出力をコードが作る（③ が「該当なし」の本文にする。

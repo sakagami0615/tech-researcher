@@ -14,9 +14,6 @@ services:
     user: "${TR_UID:-1000}:${TR_GID:-1000}"
     # PID 1 を init にし、シグナルを転送して子プロセス（last30days-skill）を回収する
     init: true
-    # 使えるメモリとプロセス数の上限（structure.md 3.3。暴走したときにホストを巻き込まない）
-    mem_limit: 2g
-    pids_limit: 256
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=256m
