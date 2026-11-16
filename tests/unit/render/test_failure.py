@@ -199,7 +199,7 @@ def test_evidence_cannot_close_fence_when_rendered():
     assert '<pre lang="text"><code>' in html
     assert "<h1>" not in html and "<b>" not in html
     assert "&lt;b&gt;@octocat&lt;/b&gt;" in html
-    assert "```" in html.split("<pre lang=\"text\">")[1].split("</pre>")[0]
+    assert "```" in html.split('<pre lang="text">')[1].split("</pre>")[0]
 
 
 def test_select_evidence_drops_unknown_orders_and_limits():
