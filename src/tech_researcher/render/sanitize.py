@@ -22,9 +22,22 @@ _REFERENCE = re.compile(
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
-# 先頭に置くとブロックになる記法（見出し・引用・箇条書き・番号付きリスト・表・区切り線・脚注定義）
-_BLOCK_START = re.compile(r"^(?:\d+(?=[.)])|[#>\-+*_|~=\[])")
-_ESCAPES = str.maketrans({"\\": "\\\\", "<": "\\<", "|": "\\|", "&": "&amp;"})
+# 先頭に置くとブロックになる記法（見出し・引用・箇条書き・番号付きリスト・表・脚注定義）
+_BLOCK_START = re.compile(r"^(?:\d+(?=[.)])|[#>\-+|=\[])")
+# 語の途中の _（snake_case）は強調にならない。値を途中で割らないよう、そのままにする
+_EDGE_UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")
+_ESCAPES = str.maketrans(
+    {
+        "\\": "\\\\",
+        "<": "\\<",
+        "|": "\\|",
+        "&": "&amp;",
+        "$": "\\$",
+        "*": "\\*",
+        "~": "\\~",
+        "@": "＠",
+    }
+)
 
 
 def sanitize_text(text: str) -> str:
@@ -32,7 +45,9 @@ def sanitize_text(text: str) -> str:
 
     - 改行を含む空白を1つの空白にし、前後を取る（要点は配列の1要素が1行）
     - バッククォートは `'` にする（AI の囲みと、無害化の囲みが混ざらないように）
-    - `\\`・`<`・`|`・`&` をエスケープする（`&#64;` のような実体参照が `@` になるのを防ぐ）
+    - `\\`・`<`・`|`・`$`・`*`・`~`・`&`・語の途中でない `_` をエスケープする
+      （`&#64;` が `@` になるのを防ぐ。`$` は数式、`*_~` は強調で、ラベルをまねさせない）
+    - 囲みに当たらずに残った `@` は全角の `＠` にする（`a@.b.com` のメール自動リンクを防ぐ）
     - `@ユーザー名`・`@org/team`・`#数字`・`GH-数字`・`owner/repo#数字`・コミット SHA・
       `owner/repo@SHA` をインラインコードで囲む
     - 先頭のブロック記法（`#`・`>`・`-`・`1.` など）をエスケープする
@@ -41,11 +56,15 @@ def sanitize_text(text: str) -> str:
     parts: list[str] = []
     last = 0
     for match in _REFERENCE.finditer(text):
-        parts.append(text[last : match.start()].translate(_ESCAPES))
+        parts.append(_escape(text[last : match.start()]))
         parts.append(f"`{match.group()}`")
         last = match.end()
-    parts.append(text[last:].translate(_ESCAPES))
+    parts.append(_escape(text[last:]))
     return _BLOCK_START.sub(_escape_block, "".join(parts), count=1)
+
+
+def _escape(segment: str) -> str:
+    return _EDGE_UNDERSCORE.sub(r"\\_", segment.translate(_ESCAPES))
 
 
 def _escape_block(match: re.Match[str]) -> str:

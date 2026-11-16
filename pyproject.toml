@@ -15,6 +15,7 @@ tech-researcher = "tech_researcher.cli:main"
 
 [dependency-groups]
 dev = [
+    "cmarkgfm>=2025.10.22",
     "pytest",
     "ruff",
 ]

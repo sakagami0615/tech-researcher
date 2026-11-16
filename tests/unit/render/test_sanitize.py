@@ -32,7 +32,7 @@ def test_plain_formatting(raw, expected):
         ("12) 項目", "12\\) 項目"),
         ("| a | b |", "\\| a \\| b \\|"),  # 表にならない
         ("---", "\\---"),
-        ("~~~", "\\~~~"),
+        ("~~~", "\\~\\~\\~"),
         ("[x]: y", "\\[x]: y"),
     ],
 )
@@ -89,13 +89,13 @@ def test_non_references_are_left_alone(text):
         ("abcdef1@octocat", "`abcdef1``@octocat`"),
         ("#1#2", "`#1``#2`"),
         ("_@octocat_ に通知", "\\_`@octocat_` に通知"),
-        ("_#12_", "\\_`#12`_"),
-        ("_abcdef1_", "\\_`abcdef1`_"),
+        ("_#12_", "\\_`#12`\\_"),
+        ("_abcdef1_", "\\_`abcdef1`\\_"),
         ("me@example.com", "me`@example`.com"),
         ("foo@-bar.com", "foo`@-bar`.com"),
         ("foo@_bar.com", "foo`@_bar`.com"),
-        ("___", "\\___"),
-        ("_ _ _", "\\_ _ _"),
+        ("___", "\\_\\_\\_"),
+        ("_ _ _", "\\_ \\_ \\_"),
     ],
 )
 def test_adjacent_and_emphasized_references(raw, expected):
@@ -114,3 +114,18 @@ def test_wrapped_text_is_not_escaped_again():
 
 def test_reference_at_the_start_is_not_treated_as_a_block():
     assert sanitize_text("#12 を直した") == "`#12` を直した"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("a@.evil.com", "a＠.evil.com"),
+        ("mailto:a@.b.com", "mailto:a＠.b.com"),
+        ("価格は $5 と $10", "価格は \\$5 と \\$10"),
+        ("**出典**：偽", "\\*\\*出典\\*\\*：偽"),
+        ("途中の *強調* と ~~消す~~", "途中の \\*強調\\* と \\~\\~消す\\~\\~"),
+        ("snake_case と _先頭", "snake_case と \\_先頭"),
+    ],
+)
+def test_leftover_at_dollar_and_emphasis_are_escaped(raw, expected):
+    assert sanitize_text(raw) == expected
