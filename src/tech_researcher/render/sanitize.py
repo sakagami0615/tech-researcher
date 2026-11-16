@@ -17,7 +17,7 @@ _REFERENCE = re.compile(
       | [A-Za-z0-9-]+/[A-Za-z0-9._-]+\#[0-9]+(?![0-9A-Za-z])         # owner/repo#数字
       | GH-[0-9]+(?![0-9A-Za-z])                                     # GH-数字
       | \#[0-9]+(?![0-9A-Za-z])                                      # #数字
-      | @[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9._-]+)?               # @ユーザー名・@org/team
+      | @[A-Za-z0-9_-][A-Za-z0-9_-]*(?:/[A-Za-z0-9._-]+)?               # @ユーザー名・@org/team
       | (?<![0-9A-Za-z])(?=[0-9]*[a-f])[0-9a-f]{7,40}(?![0-9A-Za-z])  # コミット SHA
     )""",
     re.VERBOSE | re.IGNORECASE,
