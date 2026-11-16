@@ -571,3 +571,38 @@ def test_narrow_space_in_the_source_is_a_plain_space():
     source = spaced.replace(" ", "\u202f")  # 元のテキストは 10\u202fGB のような書き方
     assert longest(spaced, source).violates
     assert normalize(source, external=True) == spaced
+
+
+@pytest.mark.parametrize("char", ["\u202f", "\u2009", "\u2006", "\u200a", "\u205f"])
+def test_copying_a_source_that_uses_narrow_spaces_as_is_is_detected(char):
+    spaced = " ".join(english_run(250)[i : i + 5] for i in range(0, 250, 5))
+    source = spaced.replace(" ", char)  # 元のテキストは単語の間が幅の狭い空白
+    assert longest(source, source).violates  # そのまま書き写す
+    assert longest(spaced, source).violates  # 普通の空白で書き写す
+
+
+def test_partial_violation_keeps_the_length_found_before_the_cap():
+    ja = japanese_run(101)
+    repeated = "。 ".join([ja[:51]] * (quote._MAX_HITS + 1))
+    result = longest(ja, ja + "。 " + repeated)  # 先に違反（重み202）があり、そのあと上限に届く
+    assert result.violates and result.partial and not result.unchecked
+    assert result.weight >= 202
+
+
+def test_partial_violation_across_sources_keeps_the_earlier_length():
+    ja = japanese_run(101)
+    repeated = "。 ".join([ja[:51]] * (quote._MAX_HITS + 1))
+    sources = [QuoteSource(ja), QuoteSource(repeated)]
+    result = longest_quote(ja, sources, LIMITS)
+    assert result.violates and result.partial and not result.unchecked
+    assert result.weight == 202
+
+
+def test_partial_reason_says_at_least_and_not_checked_to_the_end():
+    ja = japanese_run(101)
+    source = ja + "。 " + "。 ".join([ja[:51]] * (quote._MAX_HITS + 1))
+    kept, excluded = check_daily_quotes(
+        [daily_entry(points=(ja,))], data_with(d1=untrusted(primary_text=source)), {}, LIMITS
+    )
+    assert kept == []
+    assert "少なくとも" in excluded[0].reason and "途中で調べきれなかった" in excluded[0].reason

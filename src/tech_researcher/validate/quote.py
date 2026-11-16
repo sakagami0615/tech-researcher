@@ -15,7 +15,7 @@ AI の出力テキストと、AI に渡した入力のすべての元のテキ�
 import re
 import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from tech_researcher.agent.daily import DailyEntry
 from tech_researcher.collect.records import Item
@@ -93,6 +93,7 @@ class Quote:
     limit: int
     primary: bool
     unchecked: bool = False  # 同じ窓が多すぎて調べきれなかった。安全側として違反とみなす
+    partial: bool = False  # 違反は見つけたが、途中で調べきれなかった。長さは「少なくとも」
 
     @property
     def weight(self) -> int:
@@ -153,7 +154,7 @@ def _invisible(c: str) -> bool:
 def longest_quote(output: str, sources: Sequence[QuoteSource], limits: QuoteLimits) -> Quote | None:
     """出力と各元のテキストの一致のうち、上限を超えたものの最長（違反がなければ、窓が見つかった
     中の最長。窓が見つからなければ空）。調べきれなかったときは、unchecked の印が付く。"""
-    return _compare(normalize(output), _prepare(sources), limits, {})
+    return _compare(_outputs(output), _prepare(sources), limits)
 
 
 def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
@@ -174,24 +175,40 @@ def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
     return prepared
 
 
+def _outputs(text: str) -> tuple[str, ...]:
+    """AI の出力の正規化。幅の狭い空白を取り除いた形と、普通の空白にした形（元のテキストを
+    そのまま書き写したとき用）。同じなら1つにする。"""
+    removed, spaced = normalize(text), normalize(text, external=True)
+    return (removed,) if removed == spaced else (removed, spaced)
+
+
 def _compare(
-    output: str,
-    sources: Sequence[_Prepared],
-    limits: QuoteLimits,
-    masked: dict[tuple[str, ...], str],
+    outputs: Sequence[str], sources: Sequence[_Prepared], limits: QuoteLimits
 ) -> Quote | None:
-    """正規化した出力1つを、用意した元のテキストすべてと比べる。masked は語句ごとの出力の再利用。"""
+    """正規化した出力（の形）を、用意した元のテキストすべてと比べ、最も長く違反した一致を返す。
+
+    窓の位置を調べる回数の上限は、出力の形をまたいだ合計。上限に届いたときは、それまでに違反を
+    見つけていれば、その長さを partial の印を付けて返し、見つけていなければ、unchecked を返す。
+    """
     worst: Quote | None = None
     budget = [_MAX_HITS]
-    for source in sources:
-        if source.terms_key not in masked:
-            masked[source.terms_key] = _double(_mask(output, source.terms))
-        limit = limits.primary_max_en if source.primary else limits.max_en
-        quote = _best_quote(masked[source.terms_key], source.text, source.primary, limit, budget)
-        if quote.unchecked:
-            return quote
-        if worst is None or _rank(quote) > _rank(worst):
-            worst = quote
+    for output in outputs:
+        masked: dict[tuple[str, ...], str] = {}
+        for source in sources:
+            if source.terms_key not in masked:
+                masked[source.terms_key] = _double(_mask(output, source.terms))
+            limit = limits.primary_max_en if source.primary else limits.max_en
+            quote = _best_quote(
+                masked[source.terms_key], source.text, source.primary, limit, budget
+            )
+            if quote.unchecked:  # 上限に届いた。これ以上は調べない
+                if worst is not None and worst.violates:
+                    return replace(worst, partial=True)
+                return quote
+            if worst is None or _rank(quote) > _rank(worst):
+                worst = quote
+            if quote.partial:  # 上限に届いた。それまでの最長を、少なくともの長さとして返す
+                return replace(worst, partial=True)
     return worst
 
 
@@ -213,11 +230,13 @@ def _best_quote(a: str, b: str, primary: bool, limit: int, budget: list[int]) ->
     収まる）。最長を選ぶときは、伏せた語句の印を長さに数えない。
     """
     best = ""
+    partial = False
     reached: dict[int, int] = {}  # 対角線（b の位置 - a の位置）ごとに、測った一致の終わり
     for start, found in _windows(a, b, limit, budget):
         if found < 0:  # 同じ窓が多すぎて調べきれない
             if len(best) > limit:
-                break  # すでに違反が見つかっている
+                partial = True  # すでに違反が見つかっている
+                break
             return Quote("", limit, primary, unchecked=True)
         diagonal = found - start
         if reached.get(diagonal, -1) > start:
@@ -227,7 +246,7 @@ def _best_quote(a: str, b: str, primary: bool, limit: int, budget: list[int]) ->
         run = _MASKS.sub("", a[lo:hi])
         if len(run) > len(best):
             best = run
-    return Quote(best, limit, primary)
+    return Quote(best, limit, primary, partial=partial)
 
 
 def _extend(a: str, b: str, start: int, found: int, width: int) -> tuple[int, int]:
@@ -347,11 +366,16 @@ def _violation(entry: DailyEntry, sources: Sequence[_Prepared], limits: QuoteLim
     for text in (entry.headline, *entry.points, entry.importance, entry.period_event):
         if not text:
             continue
-        quote = _compare(normalize(text), sources, limits, {})
+        quote = _compare(_outputs(text), sources, limits)
         if quote is not None and quote.unchecked:
             return "同じ部分が元のテキストに多数あり、調べきれないため除外"
         if quote is not None and quote.violates:
             origin = "一次情報の本文" if quote.primary else "タイトル・抜粋"
+            if quote.partial:
+                return (
+                    f"{origin}との共通部分の長さ（日本語は2倍）が少なくとも {quote.weight} で、"
+                    f"上限 {quote.limit} を超えた（同じ部分が多く、途中で調べきれなかった）"
+                )
             return (
                 f"{origin}との共通部分の長さ（日本語は2倍）が {quote.weight} で、"
                 f"上限 {quote.limit} を超えた"
