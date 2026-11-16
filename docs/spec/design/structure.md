@@ -174,7 +174,7 @@ docker compose run --rm -T agent \
 | `agent-run <スキル名>` から claude を起動する | イメージにスキルがあることを確かめてから動かす。なければ claude を動かさずに失敗（`missing_skill`）にする。ホストのリポジトリとイメージがずれた（作り直していない）ことに気づくため | F5 |
 | コンテナの上限 `mem_limit: 2g`・`pids_limit: 256`（worker も同じ） | 暴走したときにホストを巻き込まない。値は控えめな初期値で、運用で調整する | — |
 
-- 統括スクリプトは、受け取った `structured_output` を ③ と同じスキーマで確かめてから保存し、合わなければ ② の失敗（`bad_output`）にする（D-04「形を確かめてから保存」。`--json-schema` で強制されるので、ふつうは起きない）
+- 統括スクリプトは、受け取った `structured_output` をそのまま保存し、スキーマの検査は ③ の D6(a) で行う（違反は全体の不合格。D-04 の注、D-07）
 - 統括スクリプトの判定：終了コードが0でない、結果の JSON の `is_error` が `false` でない、または `structured_output` がないときは ② の失敗とする（F6・F8。トークンがないときは終了コード1・`is_error` が true で、`subtype` は `success` のまま。2026-11-17 に Claude Code 2.1.311 で確認）。結果の JSON の `subtype`（`error_max_structured_output_retries` など）はエラーの分類に使い、ログに残す
 - Claude Code の中の構造化出力の呼び直し（F6）は、1回の呼び出しの中でスキーマに合わない出力を直させる仕組みで、US-E7-02 の「自動での再生成」（③ で不合格になった後の再生成）には当たらない
 - `--model` は付けず、Claude Code の既定のモデルに任せる。使われたモデルの名前を標準出力の JSON（`modelUsage`）から取り出して runs の `model` に記録し（[data-model.md](data-model.md#runs)）、前回の本番の実行から変わっていたらログに警告を出す。ドライランは記録しないので比べない。運用者はそれを見て、AI の回帰テスト（D-07）を流す

@@ -362,42 +362,26 @@ def test_unreadable_source_url_is_excluded(host, monkeypatch):
     assert json.loads((out_dir / "validation.json").read_text())["reason"] == "all_excluded"
 
 
-def test_rejected_output_makes_no_report(host):
-    host.ai = lambda data: {"items": [entry("d9", 1)]}
+@pytest.mark.parametrize(
+    ("output", "reason"),
+    [
+        ({"items": [entry("d9", 1)]}, "all_excluded"),
+        ({"items": "x"}, "invalid_output"),
+        ({"items": [entry("d1", 1, category="security")]}, "invalid_output"),
+        (["not", "object"], "invalid_output"),  # 形の誤りは D6(a) で全体を不合格（D-07）
+        ({"items": [entry("d1", 1, url="https://evil.example")]}, "invalid_output"),
+        ({"items": [{k: v for k, v in entry("d1", 1).items() if k != "depth"}]}, "invalid_output"),
+        (None, "invalid_output"),  # 出力がない場合も違反
+    ],
+)
+def test_rejected_output_makes_no_report(host, output, reason):
+    host.ai = lambda data: output
     code, summary, _ = host.run("--dry-run")
 
     assert code == 1
     assert (summary["result"], summary["failed_stage"]) == ("rejected", None)
     out_dir = Path(summary["output_dir"])
-    assert json.loads((out_dir / "validation.json").read_text())["reason"] == "all_excluded"
-    assert not (out_dir / "issue.md").exists()
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        {"items": "x"},
-        {"items": [entry("d1", 1, category="security")]},
-        ["not", "object"],
-        {"items": [entry("d1", 1, url="https://evil.example")]},
-        {"items": [{k: v for k, v in entry("d1", 1).items() if k != "depth"}]},
-        None,  # 出力がない場合も違反
-    ],
-)
-def test_output_not_matching_schema_is_not_saved(host, output):
-    """② の出力はスキーマで形を確かめてから保存する（D-04）。合わなければ ③ に進まない。"""
-    host.ai = lambda data: output
-    code, summary, _ = host.run("--dry-run")
-
-    assert code == 1
-    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
-        "error",
-        "analyze",
-        "bad_output",
-    )
-    out_dir = Path(summary["output_dir"])
-    assert not (out_dir / "agent-output.json").exists()
-    assert not (out_dir / "validation.json").exists()
+    assert json.loads((out_dir / "validation.json").read_text())["reason"] == reason
     assert not (out_dir / "issue.md").exists()
 
 

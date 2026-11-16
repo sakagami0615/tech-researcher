@@ -97,7 +97,7 @@
 
 - ② と ④ の AI には、道具（ツール）を持たせない。スキルの起動にも `Skill` の道具は要らない（2026-10-27 に確認）ので、道具は一切許可しない。`--model` は付けず、Claude Code の既定のモデルに任せる
 - 道具は `--tools ""` で外す。組み込みの道具（Bash・Read・WebFetch・WebSearch などを含む）はすべて外れる。`--tools` は MCP の道具に効かないので、`--disallowedTools "mcp__*"` と `--strict-mcp-config` を合わせて付ける（Claude Code の公式ドキュメント。2026-10-25 に確認）。起動の引数は [design/structure.md](design/structure.md#33-統括スクリプトから-agent-の-claude-code-を呼ぶ形) 3.3 に定める
-- ② と ④ への入力は標準入力で渡し、AI の出力は構造化出力（`--output-format json` と `--json-schema`）で受け取る。スキーマに合う出力は、標準出力の JSON の `structured_output` に入る。終了コードが0でないとき、または `structured_output` がないときは失敗とする（`subtype` が `success` でも `structured_output` がないことがある。公式ドキュメント、2026-10-25 に確認）。受け取った JSON は、コードが形を確かめてからファイルに保存する。AI はファイルに触れない。入力と出力の JSON の形は [design/data-model.md](design/data-model.md#4-ai-への入力と-ai-の出力) 4章に定める
+- ② と ④ への入力は標準入力で渡し、AI の出力は構造化出力（`--output-format json` と `--json-schema`）で受け取る。スキーマに合う出力は、標準出力の JSON の `structured_output` に入る。終了コードが0でないとき、または `structured_output` がないときは失敗とする（`subtype` が `success` でも `structured_output` がないことがある。公式ドキュメント、2026-10-25 に確認）。受け取った JSON は、コードが形を確かめてからファイルに保存する（② では JSON のオブジェクトであることを確かめて保存し、スキーマの検査は ③ の D6(a) で行う（違反は全体の不合格））。AI はファイルに触れない。入力と出力の JSON の形は [design/data-model.md](design/data-model.md#4-ai-への入力と-ai-の出力) 4章に定める
 - `claude -p` の標準入力は 10MB が上限で、超えると非0で終わる（公式ドキュメント、2026-10-25 に確認）。② の入力は日次 2MB・週次 8MB を上限とし、超えたら実行エラーにする（D-21）
 - AI の道具から書き込める場所はない。Claude Code 自身は設定・セッションのファイル（`CLAUDE_CONFIG_DIR`）と一時ファイル（`CLAUDE_CODE_TMPDIR`）を書くので、その2つの場所だけはコンテナ内で書き込めるようにする。`--no-session-persistence` を付けて、セッションをディスクに保存しない
 - ③ の検証は、agent に渡したコピーではなく、worker が持つ元の収集結果（DB または worker 側のファイル）と照合する
