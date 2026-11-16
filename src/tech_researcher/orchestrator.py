@@ -64,7 +64,7 @@ from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
 from tech_researcher.stages.collect import collect_failure
 from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
 from tech_researcher.stages.daily import RESULTS as VERIFY_RESULTS
-from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA
+from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA, check_schema
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -564,7 +564,8 @@ def _run_stages(job: Job) -> Summary:
 
 
 def _analyze(job: Job) -> str | None:
-    """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
+    """② を呼び、構造化出力をスキーマで確かめてから agent-output.json に保存する（D-04）。
+    失敗なら分類を返す（形が合わなければ bad_output）。
 
     入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。収集結果が0件の
     日も AI を呼ばず、項目のない出力をコードが作る（③ が「該当なし」の本文にする。
@@ -610,10 +611,15 @@ def _analyze(job: Job) -> str | None:
             job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
             return "agent_failed"
         output = result.output
+        try:  # 形を確かめてから保存する（D-04）。③ の D6(a) と同じスキーマ
+            check_schema(output)
+        except ValueError as e:  # 理由は場所と違反の種類だけ（AI の出力の値は入らない）
+            job.log.write("analyze", "failure", error_category="bad_output", detail=str(e))
+            return "bad_output"
     else:
         output = {"items": []}
     try:
-        _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
+        _write_output(job, output)  # 中身の検査（D1〜D4・D6）は ③ で行う
     except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
         job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
         return "output_write_failed"

@@ -64,10 +64,14 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 
 ## agent コンテナ
 
-② 評価・要約（と後の ④ 失敗時の調査）は、agent コンテナの Claude Code が道具なしで行います（`docker/agent.Dockerfile`・`compose.yaml`）。統括スクリプトが `docker compose run --rm -T agent claude -p /tr-daily-evaluate …` で起動し、② の入力を標準入力に渡して、標準出力の JSON から構造化出力を受け取ります（`src/tech_researcher/agent/invoke.py`）。
+② 評価・要約（と後の ④ 失敗時の調査）は、agent コンテナの Claude Code が道具なしで行います（`docker/agent.Dockerfile`・`compose.yaml`）。統括スクリプトが `docker compose run --rm -T agent agent-run tr-daily-evaluate -p /tr-daily-evaluate …` で起動し、② の入力を標準入力に渡して、標準出力の JSON から構造化出力を受け取ります（`src/tech_researcher/agent/invoke.py`）。
 
 - Claude Code の版はイメージで固定します（`docker/agent.Dockerfile` の `CLAUDE_CODE_VERSION`）。npm のパッケージから実行ファイルだけを取り出し、インストールスクリプトは動かしません。版を変えたときは、AI の回帰テスト（D-07）を流します
 - 自動更新と、テレメトリなどの不要な通信を止めます（`DISABLE_AUTOUPDATER=1`・`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`）
+- ベースイメージはダイジェストで、Claude Code の実行ファイルは機種ごとの sha256（`CLAUDE_CODE_SHA256_AMD64`・`_ARM64`）で固定します。版を上げるときは、タグ・ダイジェスト・sha256 を一緒に変えます
+- claude は `agent-run <スキル名>`（`docker/agent-run.sh`）から起動します。イメージにスキルがなければ claude を動かさず、② は `missing_skill` で失敗します（イメージの作り直し忘れ）
+- ② の出力はスキーマで形を確かめてから保存し、合わなければ `bad_output` にします
+- メモリは 2GB、プロセス数は 256 までです（`mem_limit`・`pids_limit`。worker も同じ）
 - ルートのファイルシステムは読み取り専用で、書けるのは `CLAUDE_CONFIG_DIR`（`/claude`）と `/tmp` だけです（どちらも tmpfs で、コンテナを消すと消えます）。設定・実行データ・リポジトリはマウントしません。root では動かさず、権限（capabilities）をすべて外します
 - 道具と MCP をなくし（`--tools ""`・`--disallowedTools "mcp__*"`・`--strict-mcp-config`）、構造化出力（`--output-format json --json-schema`）で受け取り、セッションを保存しません（`--no-session-persistence`）。`--bare`（サブスクリプションのトークンを読まない）と `--model` は付けず、使われたモデルはログ（② の終わりの `detail`）に残します。`[limits]` の `agent_max_turns` を書いたときだけ `--max-turns` を付けます
 - スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキルは `agent/skills/tr-daily-evaluate/SKILL.md` です。スキルがまだなければ、② を実行エラー（`not_implemented`）にして AI を呼びません（スキルの有無はリポジトリで確かめます）

@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Protocol
 
 AGENT_SERVICE = "agent"
+AGENT_RUN = "agent-run"  # イメージの中のラッパー（docker/agent-run.sh）
+MISSING_SKILL_EXIT = 78  # agent-run がスキルを見つけられなかったときの終了コード
 # 内側のスキル（structure.md 3.5）。リポジトリの agent/skills/ を、agent のイメージの
 # 作業ディレクトリの .claude/skills/ にコピーする（docker/agent.Dockerfile）
 SKILLS_DIR = Path("agent/skills")
@@ -66,6 +68,7 @@ class AgentError(Exception):
     - agent_failed：終了コードが0でない、is_error、または構造化出力がない（F6・F8）
     - bad_output：標準出力に結果の JSON がない
     - bad_schema：スキーマのファイルがない・読めない、または JSON でない
+    - missing_skill：イメージに渡すスキルがない（イメージを作り直していない。claude を動かさない）
 
     detail はログにだけ残す情報（stderr と、その後ろに Claude Code の分類）。AI の出力の文は
     入れない。
@@ -78,12 +81,17 @@ class AgentError(Exception):
         self.remove_failed = remove_failed
 
 
-def claude_command(prompt: str, schema: str, max_turns: int | None) -> list[str]:
-    """agent コンテナで動かす claude の引数（structure.md 3.3）。"""
+def claude_command(skill: str, schema: str, max_turns: int | None) -> list[str]:
+    """agent コンテナで動かすコマンド（structure.md 3.3）。
+
+    agent-run（docker/agent-run.sh）がスキルがイメージにあることを確かめてから、残りの引数で
+    claude を動かす。
+    """
     command = [
-        "claude",
+        AGENT_RUN,
+        skill,
         "-p",
-        prompt,  # 先頭の /スキル名 で、Skill の道具なしにスキルが展開される（F5・F15）
+        f"/{skill}",  # 先頭の /スキル名 で、Skill の道具なしにスキルが展開される（F5・F15）
         "--tools",
         "",
         "--disallowedTools",
@@ -137,10 +145,12 @@ def call_agent(
     """
     if not (skill / "SKILL.md").is_file():
         raise NotImplementedError("内側のスキルがまだない")
-    command = claude_command(f"/{skill.name}", load_schema(schema), max_turns)
+    command = claude_command(skill.name, load_schema(schema), max_turns)
     result = runner.run(AGENT_SERVICE, command, timeout_s, stdin=body)
     if result.returncode is None:
         raise AgentError("timeout", result.stderr, remove_failed=result.remove_failed)
+    if result.returncode == MISSING_SKILL_EXIT and _last_json(result.stdout) is None:
+        raise AgentError("missing_skill", result.stderr, remove_failed=result.remove_failed)
     try:
         return parse_result(result.returncode, result.stdout)
     except AgentError as e:

@@ -590,6 +590,8 @@ def test_agent_service_is_read_only_without_data_or_tools():
     lines = _services()["agent"]
     assert "read_only: true" in lines
     assert "init: true" in lines
+    assert "mem_limit: 2g" in lines
+    assert "pids_limit: 256" in lines
     assert "- ALL" in lines
     assert "- no-new-privileges:true" in lines
     assert not any(line.startswith(("volumes:", "environment:", "user:")) for line in lines)
@@ -605,6 +607,12 @@ def test_agent_service_is_read_only_without_data_or_tools():
     # 版を固定する（D-07）。latest・stable などの名前で取らない
     assert re.search(r"^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$", dockerfile, re.MULTILINE)
     assert re.search(r"^USER 65534:65534$", dockerfile, re.MULTILINE)
+    # ベースイメージはダイジェストで、実行ファイルは機種ごとの sha256 で固定する
+    froms = re.findall(r"^FROM (\S+)", dockerfile, re.MULTILINE)
+    assert froms and all(re.search(r"@sha256:[0-9a-f]{64}$", f) for f in froms)
+    for arch in ("AMD64", "ARM64"):
+        assert re.search(rf"^ARG CLAUDE_CODE_SHA256_{arch}=[0-9a-f]{{64}}$", dockerfile, re.M)
+    assert "sha256sum -c" in dockerfile
     for name in ("COPY src", "COPY config", "COPY third_party"):
         assert (
             name not in dockerfile
@@ -743,7 +751,8 @@ def test_agent_gets_input_on_stdin_with_fixed_command(agent, capfd):
         "--label",
         f"tech-researcher.run-id={run_id}",
         "agent",
-        "claude",
+        "agent-run",
+        "tr-daily-evaluate",
         "-p",
         "/tr-daily-evaluate",
         "--tools",

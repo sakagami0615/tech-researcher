@@ -89,9 +89,10 @@ def call(runner, schema, max_turns=None):
 
 
 def test_command_has_no_tools_and_uses_structured_output():
-    command = invoke.claude_command("/tr-daily-evaluate", '{"type":"object"}', None)
+    command = invoke.claude_command("tr-daily-evaluate", '{"type":"object"}', None)
     assert command == [
-        "claude",
+        "agent-run",  # スキルがイメージにあることを確かめてから claude を動かす
+        "tr-daily-evaluate",
         "-p",
         "/tr-daily-evaluate",
         "--tools",
@@ -112,7 +113,7 @@ def test_command_has_no_tools_and_uses_structured_output():
 
 
 def test_max_turns_is_passed_when_configured():
-    command = invoke.claude_command("/tr-daily-evaluate", "{}", 3)
+    command = invoke.claude_command("tr-daily-evaluate", "{}", 3)
     assert command[-2:] == ["--max-turns", "3"]
 
 
@@ -126,7 +127,7 @@ def test_call_passes_input_on_stdin_to_agent_service(schema):
     assert stdin == b'{"task": "daily"}'
     # スキーマのファイルの中身を1行の JSON にして渡す
     assert args == invoke.claude_command(
-        "/tr-daily-evaluate",
+        "tr-daily-evaluate",
         '{"type":"object","properties":{"items":{"type":"array"}},"required":["items"]}',
         4,
     )
@@ -266,3 +267,20 @@ def test_unreadable_schema_is_bad_schema(tmp_path):
     assert e.value.category == "bad_schema"
     assert str(tmp_path) not in e.value.detail
     assert runner.calls == []
+
+
+def test_missing_skill_in_image_is_its_own_category(schema):
+    # agent-run がイメージにスキルを見つけられなかった（イメージを作り直していない）
+    runner = FakeRunner(Done(78, "", "agent-run: スキル tr-daily-evaluate がイメージにない"))
+    with pytest.raises(invoke.AgentError) as e:
+        call(runner, schema)
+    assert e.value.category == "missing_skill"
+    assert "イメージにない" in e.value.detail
+
+
+def test_claude_exit_78_with_result_is_parsed_normally(schema):
+    # claude の結果の JSON があれば、終了コードが 78 でも agent-run の失敗とはみなさない
+    runner = FakeRunner(Done(78, NOT_LOGGED_IN))
+    with pytest.raises(invoke.AgentError) as e:
+        call(runner, schema)
+    assert e.value.category == "agent_failed"
