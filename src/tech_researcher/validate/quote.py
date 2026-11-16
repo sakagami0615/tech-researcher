@@ -45,8 +45,8 @@ _INVISIBLE_RANGES = (
     (0xE0100, 0xE01EF),  # 異体字セレクタ補助
 )
 
-# 幅の狭い空白。NFKC は普通の空白にしてしまい、英単語の途中に挟んで一致を切れるので、NFKC の前に
-# 取り除く
+# 幅の狭い空白。NFKC は普通の空白にしてしまい、出力で英単語の途中に挟んで一致を切れるので、
+# 出力では NFKC の前に取り除く
 _NARROW_SPACES = dict.fromkeys(map(ord, "\u2006\u2008\u2009\u200a\u202f\u205f"))
 
 # メタデータの語句を伏せる印は、語句ごとに私用領域の1文字にする（私用領域の文字は正規化で取り除く
@@ -113,13 +113,18 @@ class _Prepared:
     terms_key: tuple[str, ...]
 
 
-def normalize(text: str) -> str:
+def normalize(text: str, *, external: bool = False) -> str:
     """NFKC、見えない文字と Markdown 記号の除去、空白・改行の圧縮、大文字・小文字の統一。
 
     日本語の文字の前後の空白は取り除く（改行の位置で別の文字列にしない）。
+    幅の狭い空白は、AI の出力では取り除く（英単語の途中に挟んで一致を切る回避を防ぐ）。
+    元のテキスト（external）では普通の空白にする。外部のものなので回避は起きず、元の `10 GB`
+    （U+202F）を AI が普通の空白で書き写しても、一致が切れないようにする。
     """
+    if not external:
+        text = text.translate(_NARROW_SPACES)
     # U+2800（点字の空白）は空白に見えるので、空白にする
-    text = _strip_invisible(unicodedata.normalize("NFKC", text.translate(_NARROW_SPACES)))
+    text = _strip_invisible(unicodedata.normalize("NFKC", text))
     text = text.replace("\u2800", " ")
     text = _LIST_MARKER.sub("", text)
     text = _MARKDOWN.sub("", text)
@@ -146,7 +151,8 @@ def _invisible(c: str) -> bool:
 
 
 def longest_quote(output: str, sources: Sequence[QuoteSource], limits: QuoteLimits) -> Quote | None:
-    """出力と各元のテキストの最長一致のうち、上限を超えているもの（なければ最長のもの）。"""
+    """出力と各元のテキストの一致のうち、上限を超えたものの最長（違反がなければ、窓が見つかった
+    中の最長。窓が見つからなければ空）。調べきれなかったときは、unchecked の印が付く。"""
     return _compare(normalize(output), _prepare(sources), limits, {})
 
 
@@ -154,10 +160,16 @@ def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
     compiled: dict[tuple[str, ...], _Terms] = {}
     prepared = []
     for source in sources:
-        key = tuple(sorted({normalize(t) for t in source.meta_terms} - {""}, key=len, reverse=True))
+        key = tuple(
+            sorted(
+                {normalize(t, external=True) for t in source.meta_terms} - {""},
+                key=len,
+                reverse=True,
+            )
+        )
         if key not in compiled:
             compiled[key] = _terms(key)
-        text = _double(_mask(normalize(source.text), compiled[key]))
+        text = _double(_mask(normalize(source.text, external=True), compiled[key]))
         prepared.append(_Prepared(text, source.primary, compiled[key], key))
     return prepared
 
@@ -197,13 +209,15 @@ def _best_quote(a: str, b: str, primary: bool, limit: int, budget: list[int]) ->
     """出力 a と元のテキスト b（どちらも日本語の文字を2つ並べた形）の、長い一致を探す。
 
     窓が見つかった位置ごとに、その窓を含む一致の長さを両側へ伸ばして測る。上限を超えたらそこで
-    やめて、その一致を返す。超えなければ、測った中で最長のものを返す。
-    最長を選ぶときは、伏せた語句の印を長さに数えない。
+    測った中で最長のものを返す（上限を超えても打ち切らず、すべての窓を測る。費用は回数の上限に
+    収まる）。最長を選ぶときは、伏せた語句の印を長さに数えない。
     """
     best = ""
     reached: dict[int, int] = {}  # 対角線（b の位置 - a の位置）ごとに、測った一致の終わり
     for start, found in _windows(a, b, limit, budget):
         if found < 0:  # 同じ窓が多すぎて調べきれない
+            if len(best) > limit:
+                break  # すでに違反が見つかっている
             return Quote("", limit, primary, unchecked=True)
         diagonal = found - start
         if reached.get(diagonal, -1) > start:
@@ -213,8 +227,6 @@ def _best_quote(a: str, b: str, primary: bool, limit: int, budget: list[int]) ->
         run = _MASKS.sub("", a[lo:hi])
         if len(run) > len(best):
             best = run
-        if len(best) > limit:
-            break
     return Quote(best, limit, primary)
 
 

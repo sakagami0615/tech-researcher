@@ -495,8 +495,11 @@ def test_decision_matches_brute_force_on_random_mixed_texts():
         b = "".join(rng.choices(alphabet, k=rng.randint(1, 30)))
         limit = rng.randint(1, 12)
         limits = QuoteLimits(max_en=limit, primary_max_en=limit)
-        expected = brute_force_weight(normalize(a), normalize(b)) > limit
-        assert longest(a, b, limits=limits).violates is expected, (a, b, limit)
+        brute = brute_force_weight(normalize(a), normalize(b))
+        result = longest(a, b, limits=limits)
+        assert result.violates is (brute > limit), (a, b, limit)
+        if brute > limit:
+            assert result.weight == brute, (a, b, limit)  # 違反のときは最長の長さ
 
 
 def test_window_repeated_beyond_the_cap_is_treated_as_a_violation():
@@ -517,8 +520,11 @@ def test_decision_matches_brute_force_with_meta_terms():
         limit = rng.randint(1, 10)
         limits = QuoteLimits(max_en=limit, primary_max_en=limit)
         masked = [normalize(t).replace("あい", "\ue000") for t in (a, b)]
-        expected = brute_force_weight(*masked) > limit
-        assert longest(a, b, terms=["あい"], limits=limits).violates is expected, (a, b, limit)
+        brute = brute_force_weight(*masked)
+        result = longest(a, b, terms=["あい"], limits=limits)
+        assert result.violates is (brute > limit), (a, b, limit)
+        if brute > limit:
+            assert result.weight == brute, (a, b, limit)
 
 
 def test_unchecked_entry_is_excluded_with_its_own_reason():
@@ -549,3 +555,19 @@ def test_repeated_windows_in_many_entries_finish_in_time():
     kept, excluded = check_daily_quotes(entries, data, {}, LIMITS)
     assert time.monotonic() - start < TIME_LIMIT_S
     assert kept == entries and excluded == []  # 一致は101字で、上限（200）を超えない
+
+
+def test_violation_reports_the_longest_match():
+    a, b = "a" * 201, "b" * 300
+    result = longest(f"{a}x{b}", f"{a}y{b}")
+    assert result.violates and result.weight == 300
+    result = longest(f"{b}x{a}", f"{a}y{b}")
+    assert result.weight == 300
+
+
+def test_narrow_space_in_the_source_is_a_plain_space():
+    text = english_run(250)
+    spaced = " ".join(text[i : i + 5] for i in range(0, 250, 5))
+    source = spaced.replace(" ", "\u202f")  # 元のテキストは 10\u202fGB のような書き方
+    assert longest(spaced, source).violates
+    assert normalize(source, external=True) == spaced
