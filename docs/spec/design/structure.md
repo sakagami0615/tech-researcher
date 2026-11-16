@@ -73,8 +73,8 @@
 │       ├── collect/                  # last30days-skill のアダプタ、RSS、Qiita、GitHub Releases、GitHub の急上昇（D-03・D-13）
 │       ├── agent/                    # ② ④ の呼び出しの境界（claude の引数・入出力。AI の差し替えの境界）
 │       ├── schemas/                  # ② ④ の出力の JSON Schema（--json-schema に渡し、③ の検査にも使う）
-│       ├── validate/                 # D1〜D4・D6、無害化、秘匿情報の検査
-│       ├── render/                   # Issue 本文のテンプレート（report-templates.md）
+│       ├── validate/                 # D1〜D4・D6、文字数・要点数、秘匿情報の検査
+│       ├── render/                   # Issue 本文のテンプレートと AI の文章の無害化（report-templates.md 0.3）
 │       ├── publish/                  # Issue の作成、重複判定、Projects への登録
 │       ├── db/                       # SQLite（data-model.md）
 │       └── logging.py                # ログと秘匿情報のマスク（7章）
@@ -506,6 +506,7 @@ ${TR_DATA_DIR}/
   - (1) は値そのものに加え、例外の repr・JSON・URL のエスケープの形も照らす。重ね掛けは2段（例：repr の中の JSON）までとし、3段以上は照らさない。トークンの多くは英数字と `_`・`-` だけで、エスケープしても形が変わらず、そのままの形で拾えるため
   - (2) のトークンの形は、`gh[pousr]_` に英数字36文字以上（GitHub の classic・OAuth・App のトークン）、`github_pat_` に英数字と `_` で22文字以上（GitHub の fine-grained トークン）、`sk-ant-` に英数字と `_`・`-` で20文字以上（Anthropic の API キーと OAuth トークン）の3種とする。worker には Claude のトークンが渡らない（D-05）ので、`sk-ant-` は形での検出だけが防御になる
   - (2) は前側の境界を問わない（`%20ghp_…` や repr の `\nghp_…` も拾う）。長い識別子の一部や、技術記事が例として載せた `ghp_XXXX…` も検出する。US-E7-05 の検査では、見逃して漏らすより、誤検出で公開を止める側に倒す
+  - ③ の秘匿情報の検査（US-E7-05）は、AI の出力の全文（無害化の前）と、描画した本文の両方にかける。無害化はエスケープや囲みで値の途中を割る（例：`Pa$$w0rd` が `Pa\$\$w0rd` になる）うえ、GitHub は描画でそれを消して元の値を見せるので、本文だけを見ると見逃す。全文のどこかで見つかれば、除外した項目の中でも、Issue 全体を公開しない
   - 伏せた箇所は `[MASKED:種類]`（種類は `known`・`github_token`・`github_pat`・`anthropic_key`）に置き換え、値の一部も残さない
 - 例外のメッセージやスタックトレースは、ログに残しても Issue には書かない（US-E6-04、report-templates.md 3.2）。ログに残す前にも上のとおり伏せる
 - ④ の入力では、コードがログの行に ID（`L012` など）を付けて渡す

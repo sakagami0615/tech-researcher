@@ -351,6 +351,28 @@ def test_missing_period_event_is_excluded_and_logged(host, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("override", "category"),
+    [
+        ({"importance": "詳しくは https://example.net/x"}, "forbidden_link"),
+        ({"headline": "<!-- 隠す -->見出し"}, "forbidden_html"),
+        ({"points": ["要"] * 7}, "too_long"),
+    ],
+)
+def test_text_violations_are_excluded_and_logged(host, override, category):
+    """D2・D3・長さの検査が ③ につながっている。違反した項目だけを除外する。"""
+    host.ai = lambda data: {"items": [entry("d1", 1, **override), entry("d2", 2)]}
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    out_dir = Path(summary["output_dir"])
+    validation = json.loads((out_dir / "validation.json").read_text())
+    assert validation["entries"] == 1
+    assert [x["item_ids"] for x in validation["excluded"]] == [["d1"]]
+    records = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    assert [r["error_category"] for r in records if r["event"] == "excluded"] == [category]
+
+
 def test_unreadable_source_url_is_excluded(host, monkeypatch):
     """出典の URL を許可集合と照らす検査（D1）が、③ につながっている。"""
     monkeypatch.setattr("tech_researcher.validate.sources.normalize_url", lambda u: None)
@@ -540,15 +562,52 @@ def test_verify_checks_worker_data_not_the_copy_given_to_ai(host):
     assert [x["item_ids"] for x in validation["excluded"]] == [["d3"]]
 
 
-def test_secret_in_ai_ids_is_masked_in_results(host):
-    host.ai = lambda data: {"items": [entry("d1", 1), entry(TOKEN, 2)]}
-    code, summary, _ = host.run("--dry-run")
+@pytest.mark.parametrize(
+    "secret", ["Pw0rd*~x_y", "sk-ant-oat01-_" + "A" * 90], ids=["known", "anthropic_key"]
+)
+def test_secret_in_raw_ai_output_stops_the_report(host, secret):
+    """無害化でエスケープされる記号を含む値も、AI の出力の全文を検査して見つける（US-E7-05）。
 
-    assert code == 0
+    本文では `\\*`・`\\_` に変わって値が割れるので、本文の検査だけでは見逃す。
+    """
+    host.worker_env["API_SECRET"] = "Pw0rd*~x_y"
+    host.ai = lambda data: {
+        "items": [entry("d1", 1), entry("d2", 2, points=[f"値は {secret} です"], depth="brief")]
+    }
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1
+    assert summary["error_category"] == "secret_detected"
     out_dir = Path(summary["output_dir"])
-    for name in ("validation.json", "log.jsonl", "issue.md"):
+    assert not (out_dir / "issue.md").exists()
+    assert json.loads((out_dir / "secret-scan.json").read_text())["detected"] is True
+    assert secret not in out
+    assert secret not in (out_dir / "log.jsonl").read_text()
+
+
+def test_double_escaped_secret_in_ai_string_is_detected(host):
+    """AI が値を2回エスケープして書いても、文字列の値を1つずつ検査して見つける。"""
+    secret = 'Pa"x0rd\\z'
+    host.worker_env["API_SECRET"] = secret
+    twice = json.dumps(json.dumps(secret)[1:-1])[1:-1]
+    host.ai = lambda data: {"items": [entry("d1", 1, points=[f"値は {twice} です"])]}
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1 and summary["error_category"] == "secret_detected"
+    assert not (Path(summary["output_dir"]) / "issue.md").exists()
+
+
+def test_secret_in_ai_ids_is_masked_in_results(host):
+    """AI の出力の全文に秘匿情報があれば、ID の中でも全体を止める。結果のファイルには残さない。"""
+    host.ai = lambda data: {"items": [entry("d1", 1), entry(TOKEN, 2)]}
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1 and summary["error_category"] == "secret_detected"
+    out_dir = Path(summary["output_dir"])
+    assert not (out_dir / "issue.md").exists()
+    assert TOKEN not in out
+    for name in ("validation.json", "log.jsonl"):
         assert TOKEN not in (out_dir / name).read_text(encoding="utf-8"), name
-    assert "[MASKED:known]" in (out_dir / "validation.json").read_text(encoding="utf-8")
 
 
 # D-13 の観測（observe.py）。bin/tr-run を使わず、日次と同じロックで ① だけを動かす

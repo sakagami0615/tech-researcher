@@ -3,8 +3,8 @@
 - ① の後に、collected.json から ② の入力（agent-input.json）を作る。統括スクリプトがそれを
   agent に標準入力で渡し、構造化出力を agent-output.json に保存する
 - ③ は、agent に渡したコピーではなく、worker の collected.json から同じ入力を作り直して照合する
-  （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落を検査する。
-  D2・D3・文字数は #20、D4 は #21 で足す
+  （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落、D2・D3、
+  文字数と要点数を検査する。D4 は #21 で足す
 - 秘匿情報を検出したら Issue の本文を残さない（US-E7-05）。⑤ の直前の検査は ⑤ の Issue で足す
 - 不合格・実行エラーの本文（とその秘匿情報の検査）は #38 で足す。いまは不合格のとき issue.md・
   secret-scan.json を書かない
@@ -15,7 +15,7 @@
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from tech_researcher.agent.daily import (
@@ -37,6 +37,7 @@ from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check
 from tech_researcher.validate.period_event import check_period_events
 from tech_researcher.validate.secret_scan import SecretScanner
 from tech_researcher.validate.sources import check_daily_sources
+from tech_researcher.validate.text import check_daily_html, check_daily_lengths, check_daily_links
 
 AGENT_INPUT = "agent-input.json"
 AGENT_OUTPUT = "agent-output.json"
@@ -74,6 +75,18 @@ def run_verify(
     items = _numbered(run_dir)
     data = _input(config, target, items)
     output = json.loads((run_dir / AGENT_OUTPUT).read_text(encoding="utf-8"))
+    # 無害化でエスケープや囲みが入ると値の途中が割れ、本文の検査では見えなくなる。GitHub は描画で
+    # エスケープを消すので、無害化の前の AI の出力の全文も検査する。除外した項目の中でも全体を止める
+    # 全文は json.dumps で1段エスケープされるので、すでにエスケープ済みの値は照合の段数を超える。
+    # キーと文字列の値を1つずつも検査する
+    texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
+    raw_kinds = sorted({f.kind for text in texts for f in scanner.find(text)})
+    if raw_kinds:
+        _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
+        log.write(
+            "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(raw_kinds)
+        )
+        return _finish(run_dir, log, SECRET_DETECTED, None, entries=0, excluded=[])
     try:
         entries = parse_daily_output(output)
     except ValueError as e:
@@ -116,12 +129,28 @@ def _check_entries(
         ("invalid_id", lambda e: check_daily_ids(e, data)),
         ("invalid_source", lambda e: check_daily_sources(e, items)),
         ("missing_period_event", lambda e: check_period_events(e, data)),
+        ("forbidden_link", check_daily_links),  # D2
+        ("forbidden_html", check_daily_html),  # D3
+        ("too_long", check_daily_lengths),
         # 重複は最後に、ほかの検査をすべて通った項目の中で判定する（後の検査もこの前に足す）
         ("duplicate_id", check_daily_duplicates),
     ):
         entries, rejected = check(entries)
         excluded += [(category, x) for x in rejected]
     return entries, excluded
+
+
+def _strings(value: object) -> Iterator[str]:
+    """JSON の値の、すべてのキーと文字列の値。"""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
 
 
 def _numbered(run_dir: Path) -> dict[str, Item]:

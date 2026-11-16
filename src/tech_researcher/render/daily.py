@@ -1,7 +1,7 @@
 """日次レポート Issue のタイトルと本文（report-templates.md 1章）。
 
 AI の部品（DailyEntry）を、コードが枠・件数・出典・定型文と組み合わせて本文にする（0.2）。
-AI のテキストの無害化（0.3）と本文の文字数の検査は、後の Issue で足す。
+AI のテキストは sanitize_text で無害化する（0.3）。本文の文字数の検査は、後の Issue で足す。
 """
 
 from collections.abc import Mapping, Sequence
@@ -11,6 +11,7 @@ from tech_researcher.collect.period_filter import published_before_period
 from tech_researcher.collect.records import Item
 from tech_researcher.periods import JST, Target
 from tech_researcher.render.common import Report, day_label, identifier, plain_text, source_line
+from tech_researcher.render.sanitize import sanitize_text
 
 CATEGORY_NAMES = dict(
     zip(
@@ -128,15 +129,17 @@ def _entry(
         entry.item_ids, items, names, entry.primary_item_id, entry.primary_link_id
     )
     event = _period_event(entry, target, items)
-    heading = f"#### {number}. {entry.headline}"
+    heading = f"#### {number}. {sanitize_text(entry.headline)}"
+    points = [sanitize_text(p) for p in entry.points]
+    importance = sanitize_text(entry.importance)
     if entry.depth == "full":
-        lines = ["- **要点**", *(f"  - {p}" for p in entry.points)]
-        lines.append(f"- **重要性**：{entry.importance}")
+        lines = ["- **要点**", *(f"  - {p}" for p in points)]
+        lines.append(f"- **重要性**：{importance}")
         if event is not None:
             lines.append(f"- **期間内の出来事**：{event}")
         lines.append(f"- **出典**：{sources}")
     else:
-        lines = [f"{' '.join(entry.points)} **重要性**：{entry.importance}"]
+        lines = [f"{' '.join(points)} **重要性**：{importance}"]
         if event is not None:
             lines.append(f"期間内の出来事：{event}")
         lines.append(f"出典：{sources}")
@@ -158,6 +161,5 @@ def _period_event(entry: DailyEntry, target: Target, items: Mapping[str, Item]) 
         ),
         None,
     )
-    return (
-        entry.period_event if delta is None else f"{entry.period_event}（Star {delta:+,}／24時間）"
-    )
+    text = sanitize_text(entry.period_event)
+    return text if delta is None else f"{text}（Star {delta:+,}／24時間）"

@@ -309,3 +309,34 @@ def test_footer_then_unavailable_sources_at_the_end():
 
 def test_footer_invites_comments():
     assert "コメント" in FOOTER and "項目2 は誤検出" in FOOTER
+
+
+def test_ai_text_is_sanitized_in_every_part():
+    e = DailyEntry(
+        ("i1",),
+        "i1",
+        None,
+        "ai",
+        1,
+        "full",
+        "> 引用\n偽",
+        ("# 見出し化", "@octocat と #12"),
+        "- 理由 abcdef1",
+        None,
+    )
+    body = render([e], collected=1).body
+    assert "#### 1. \\> 引用 偽" in body
+    assert "  - \\# 見出し化" in body
+    assert "  - `@octocat` と `#12`" in body
+    assert "- **重要性**：\\- 理由 `abcdef1`" in body
+
+
+def test_period_event_is_sanitized(monkeypatch):
+    monkeypatch.setattr("tech_researcher.render.daily.published_before_period", lambda i, t: True)
+    body = render([entry(1, period_event="1. @octocat が言及")], collected=1).body
+    assert "- **期間内の出来事**：1\\. `@octocat` が言及" in body
+
+
+def test_brief_form_sanitizes_joined_points():
+    body = render([entry(1, depth="brief", points=("@octocat", "- x"))], collected=1).body
+    assert "`@octocat` \\- x **重要性**：理由1" in body
