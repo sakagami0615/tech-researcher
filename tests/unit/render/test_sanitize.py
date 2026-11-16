@@ -72,7 +72,6 @@ def test_notifications_and_references_are_code_wrapped(raw, expected):
         "1234567",  # 数字だけの列は SHA ではない
         "abcdef",  # 6桁
         "abcdef0123456789abcdef0123456789abcdef012",  # 41桁
-        "mail me@example.com",
         "C# と F#",
         "話題の #タグ",
         "v1.2.3 のリリース",
@@ -81,6 +80,24 @@ def test_notifications_and_references_are_code_wrapped(raw, expected):
 )
 def test_non_references_are_left_alone(text):
     assert sanitize_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("@a@octocat", "`@a``@octocat`"),
+        ("abcdef1@octocat", "`abcdef1``@octocat`"),
+        ("#1#2", "`#1``#2`"),
+        ("_@octocat_ に通知", "\\_`@octocat`_ に通知"),
+        ("_#12_", "\\_`#12`_"),
+        ("_abcdef1_", "\\_`abcdef1`_"),
+        ("me@example.com", "me`@example`.com"),
+        ("___", "\\___"),
+        ("_ _ _", "\\_ _ _"),
+    ],
+)
+def test_adjacent_and_emphasized_references(raw, expected):
+    assert sanitize_text(raw) == expected
 
 
 def test_sha_boundary_lengths():

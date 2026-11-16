@@ -13,7 +13,10 @@ from tech_researcher.validate.ids import Excluded
 # D2：裸の URL も GitHub が自動でリンクにするので、スキームだけでも違反にする（`www.` も同じ）
 _LINK = re.compile(r"(?:https?|ftp)://|(?<![A-Za-z0-9])www\.|\]\(|<http", re.IGNORECASE)
 # D3：画像、`<img`・`<a `、HTML コメント・宣言・処理命令、開始タグ・終了タグ（`<tag …>`・`</tag>`）
-_HTML = re.compile(r"!\[|<img\b|<a\s|<!|<\?|</?[A-Za-z][^<>]*>", re.IGNORECASE)
+_HTML = re.compile(
+    r"!\[|<img\b|<a\s|<!|<\?|</?[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*\s*/?>",
+    re.IGNORECASE,
+)
 
 # 文字数の上限（プロンプトで示す目安。report-templates.md 1.3）。除外するのは、その2倍を超えたとき
 LIMIT_FACTOR = 2

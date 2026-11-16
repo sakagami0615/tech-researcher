@@ -68,7 +68,8 @@ def test_ordinary_text_is_not_a_link(text):
         "<div>",
         "</div>",
         "<script>alert(1)</script>",
-        "Result<T, E> を返す",
+        "Vec<T> を返す",
+        '<span class="x">',
     ],
 )
 @pytest.mark.parametrize("field", FIELDS)
@@ -76,7 +77,19 @@ def test_html_is_excluded_in_every_field(text, field):
     assert only_violation(check_daily_html, **field_kwargs(field, text))
 
 
-@pytest.mark.parametrize("text", ["a < b", "x<3", "a > b", "感嘆！[1]", "<3"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a < b",
+        "x<3",
+        "a > b",
+        "感嘆！[1]",
+        "<3",
+        "性能は A<B かつ C>D",
+        "Node<v20 と Node>v22",
+        "Result<T, E>",
+    ],
+)
 def test_ordinary_text_is_not_html(text):
     kept, _ = check_daily_html([entry(headline=text)])
     assert len(kept) == 1
