@@ -52,3 +52,18 @@ def test_item_with_unreadable_url_is_excluded():
     kept, excluded = check_daily_sources([entry(["i1"]), entry(["i2"])], items)
     assert [e.item_ids for e in kept] == [("i2",)]
     assert len(excluded) == 1
+
+
+def test_link_of_another_item_is_excluded():
+    bad = entry(["i1"], "i2-l1")
+    kept, excluded = check_daily_sources([bad], ITEMS)
+    assert kept == [] and [x.entry for x in excluded] == [bad]
+
+
+def test_bad_url_in_merged_source_is_excluded():
+    merged = item("https://aws.example/post")
+    record = merged.sources[0]
+    bad_record = Record(**{**record.__dict__, "url": "https://u:p@evil.example/"})
+    items = {"i1": Item(merged.url, (record, bad_record), (), (), (), (), None)}
+    kept, excluded = check_daily_sources([entry(["i1"])], items)
+    assert kept == [] and len(excluded) == 1

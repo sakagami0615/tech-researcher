@@ -25,8 +25,10 @@ def check_daily_sources(
     excluded: list[Excluded] = []
     for entry in entries:
         urls = [u for i in entry.item_ids for u in _item_urls(items[i])]
+        own = {c.link_id for i in entry.item_ids for c in candidate_links(items[i], i)}
         if entry.primary_link_id is not None:
-            urls.append(links[entry.primary_link_id])
+            # 一次情報のリンクは自項目の候補リンクに限る（別の記事のリンクは出典にしない）
+            urls.append(links[entry.primary_link_id] if entry.primary_link_id in own else "")
         if all((normalize_url(u) or "") in allowed for u in urls):
             kept.append(entry)
         else:

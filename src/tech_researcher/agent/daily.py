@@ -187,7 +187,7 @@ def _entry(raw: dict) -> DailyEntry:
         primary_item_id=raw["primary_item_id"],
         primary_link_id=raw["primary_link_id"],
         category=raw["category"],
-        rank=raw["rank"],
+        rank=int(raw["rank"]),  # 1.0 もスキーマの整数に入る
         depth=raw["depth"],
         headline=raw["headline"],
         points=tuple(raw["points"]),

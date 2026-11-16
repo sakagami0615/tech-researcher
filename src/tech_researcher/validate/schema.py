@@ -32,7 +32,7 @@ def check_schema(output: object, name: str = DAILY_OUTPUT_SCHEMA) -> None:
     """出力がスキーマに合わなければ ValueError。出力がない（None）場合も違反。"""
     if output is None:
         raise ValueError("出力がない")
-    errors = sorted(_validator(name).iter_errors(output), key=lambda e: list(map(str, e.path)))
+    errors = sorted(_validator(name).iter_errors(output), key=lambda e: list(e.absolute_path))
     if errors:
         first = errors[0]
         where = "/".join(str(p) for p in first.absolute_path) or "(全体)"
