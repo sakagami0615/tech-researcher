@@ -17,7 +17,13 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from tech_researcher.periods import JST, Target
-from tech_researcher.render.common import Report, day_label, period_text, plain_text
+from tech_researcher.render.common import (
+    Report,
+    day_label,
+    period_text,
+    plain_text,
+    run_id_code,
+)
 from tech_researcher.render.sanitize import sanitize_text
 from tech_researcher.validate.text import text_violation
 
@@ -91,16 +97,21 @@ def select_evidence(log: Mapping[str, str], line_ids: Sequence[str]) -> tuple[tu
         if line_id not in chosen:
             previous_picked = False
             continue
-        if not previous_picked or len(blocks[-1]) >= MAX_EVIDENCE_LINES:
-            blocks.append([])
-        blocks[-1].append(line)
-        previous_picked = True
+        for part in _split(line):  # 行の中の改行も行として数える
+            if not previous_picked or len(blocks[-1]) >= MAX_EVIDENCE_LINES:
+                blocks.append([])
+            blocks[-1].append(part)
+            previous_picked = True
     return tuple(tuple(b) for b in blocks[:MAX_EVIDENCE_BLOCKS])
+
+
+def _split(line: str) -> list[str]:
+    return line.splitlines() or [""]
 
 
 def code_fence(lines: Sequence[str]) -> str:
     """中身でフェンスを閉じられないコードブロック。フェンスは中身の最長のバッククォートより長くする。"""
-    text = "\n".join(part for line in lines for part in (line.splitlines() or [""]))
+    text = "\n".join(part for line in lines for part in _split(line))
     longest = max((len(m.group()) for m in _BACKTICKS.finditer(text)), default=0)
     fence = "`" * max(3, longest + 1)
     return f"{fence}text\n{text}\n{fence}"
@@ -124,13 +135,14 @@ def rejected_report(
         f"[不合格]{_cadence(target)} {_target_label(target)}のレポート（{_run_text(run_at)} 実行）"
     )
     labels = ("type:rejected", f"cadence:{target.cadence}")
+    investigation = _usable(investigation)
     failed_text = "、".join(map(plain_text, failed))
     if investigation is None:
         rows = [("対象期間", period_text(target)), ("不合格となった検証項目", failed_text)]
         return Report(title, _unavailable(rows), labels)
     rows = [
         ("対象期間", period_text(target)),
-        ("実行ID", f"`{run_id}`"),
+        ("実行ID", run_id_code(run_id)),
         ("実行日時", f"{run_at.astimezone(JST):%Y-%m-%d %H:%M} JST"),
         ("不合格となった検証項目", failed_text),
         ("件数", _counts(counts)),
@@ -162,6 +174,7 @@ def run_error_report(
         f"（{stage_text}・{_run_text(run_at)} 実行）"
     )
     labels = ("type:run-error", f"cadence:{target.cadence}")
+    investigation = _usable(investigation)
     retry_text = f"{retries[0]} 回（上限 {retries[1]} 回）"
     if investigation is None:
         rows = [
@@ -173,7 +186,7 @@ def run_error_report(
         return Report(title, _unavailable(rows), labels)
     rows = [
         ("対象期間", period_text(target)),
-        ("実行ID", f"`{run_id}`"),
+        ("実行ID", run_id_code(run_id)),
         ("実行日時", f"{run_at.astimezone(JST):%Y-%m-%d %H:%M} JST"),
         ("失敗した処理段階", stage_text),
         ("エラーの概要", plain_text(summary)),
@@ -256,14 +269,17 @@ def _footer(text: str) -> str:
     return f"---\n{text}"
 
 
+def _usable(inv: Investigation | None) -> Investigation | None:
+    """D2・D3・確度の形に違反する ④ の出力は、AI を利用できないときの定型にする（D-07、3.5）。"""
+    if inv is None or inv.confidence not in CONFIDENCES:
+        return None
+    texts = (inv.event, inv.cause, *inv.contents, *inv.measures)
+    return None if any(text_violation(t) for t in texts) else inv
+
+
 def _investigation(inv: Investigation) -> str:
-    if inv.confidence not in CONFIDENCES:
-        raise ValueError(f"確度にない値 {inv.confidence!r}")
-    for text in (inv.event, inv.cause, *inv.contents, *inv.measures):
-        if kind := text_violation(text):
-            raise ValueError(f"④ の文章に{kind}がある")  # ⑤ の前の検査で定型にしているはず
     if len(inv.evidence) > MAX_EVIDENCE_BLOCKS or any(
-        len(b) > MAX_EVIDENCE_LINES for b in inv.evidence
+        sum(len(_split(line)) for line in b) > MAX_EVIDENCE_LINES for b in inv.evidence
     ):
         raise ValueError("根拠の抜粋が上限を超えている")
     cause = [f"確度：{inv.confidence}。{sanitize_text(inv.cause)}"]

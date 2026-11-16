@@ -56,7 +56,7 @@ def test_rejected_title_and_labels():
     assert report.title == "[不合格][日次] 2026-10-23（金）のレポート（2026-10-24 06:00 実行）"
     assert report.labels == ("type:rejected", "cadence:daily")
     weekly = rejected_report(WEEKLY, RUN, RUN_AT, ["x"], COUNTS, [], None)
-    assert weekly.title.startswith("[不合格][週次] 2026-10-26（月）号のレポート")
+    assert weekly.title == "[不合格][週次] 2026-10-26（月）号のレポート（2026-10-24 06:00 実行）"
     assert weekly.labels == ("type:rejected", "cadence:weekly")
 
 
@@ -133,7 +133,7 @@ def test_secret_stop_is_fixed_text_without_run_info():
     daily = secret_stop_report(DAILY, "validate")
     assert daily.title == "[実行エラー][日次] 2026-10-23（金）（公開停止）"
     assert "③ 検証・検査" in daily.body
-    assert "06:00" not in daily.title and "06:00" not in daily.body
+    assert "06:00" not in daily.title and "06:00" not in daily.body and RUN not in daily.body
 
 
 def test_secret_stop_rejects_other_stage():
@@ -165,14 +165,14 @@ def test_investigation_text_is_sanitized():
 @pytest.mark.parametrize(
     "text", ["https://example.com", "www.example.com", "[a](b)", "<img src=x>", "<!-- x -->"]
 )
-def test_investigation_with_link_or_html_is_refused(text):
-    with pytest.raises(ValueError):
-        run_error(Investigation(text, "c", "高", (), ()))
+def test_investigation_with_link_or_html_falls_back_to_fixed_form(text):
+    report = run_error(Investigation(text, "c", "高", (), ()))
+    assert report.body == run_error(None).body
+    assert rejected(Investigation("e", text, "高", (), ())).body == rejected(None).body
 
 
 def test_investigation_confidence_and_evidence_limits():
-    with pytest.raises(ValueError):
-        run_error(Investigation("e", "c", "不明", (), ()))
+    assert run_error(Investigation("e", "c", "不明", (), ())).body == run_error(None).body
     too_long = (tuple(f"l{i}" for i in range(11)),)
     with pytest.raises(ValueError):
         run_error(Investigation("e", "c", "高", (), (), too_long))
@@ -218,3 +218,42 @@ def test_rendered_html_tables_and_details():
     html = cmarkgfm.github_flavored_markdown_to_html(rejected().body, options=unsafe)
     assert html.count("<table>") == 2  # 概要と、<details> の中の表
     assert "<details>" in html and "<h2>概要</h2>" in html
+
+
+def test_evidence_limit_counts_embedded_newlines():
+    with pytest.raises(ValueError):
+        run_error(Investigation("e", "c", "高", (), (), (("a\n" * 15,),)))
+    blocks = select_evidence({"L1": "a\n" * 15}, ["L1"])
+    assert [len(b) for b in blocks] == [10, 5]
+
+
+def test_run_id_must_be_safe():
+    with pytest.raises(ValueError):
+        run_error_report(DAILY, "r|x", RUN_AT, "collect", "x", (0, 1), [], INV)
+
+
+def test_config_derived_values_are_neutralized_in_tables():
+    attack = "@octocat #12|\nGH-3 [x](y)"
+    sources = [SourceResult(attack, False, attack, 1)]
+    report = run_error_report(DAILY, RUN, RUN_AT, "collect", attack, (1, 1), sources, INV)
+    counts = Counts(1, 1, {attack: 1}, 0)
+    rej = rejected_report(DAILY, RUN, RUN_AT, [attack], counts, [(attack, False)], INV)
+    for body in (report.body, rej.body):
+        html = cmarkgfm.github_flavored_markdown_to_html(body)
+        assert "@octocat" not in body.replace("＠octocat", "")
+        assert "<a " not in html
+    assert "| 項目 | 値 |" in report.body
+
+
+def test_sanitized_reference_forms_in_investigation():
+    inv = Investigation(
+        "GH-34 と abcdef1 と owner/repo@abcdef1 と @org/team",
+        "> 引用 | 表",
+        "低",
+        ("1. 番号",),
+        ("x",),
+    )
+    body = run_error(inv).body
+    for ref in ("`GH-34`", "`abcdef1`", "`owner/repo@abcdef1`", "`@org/team`"):
+        assert ref in body
+    assert "\\> 引用 \\| 表" in body and "1\\. 番号" in body

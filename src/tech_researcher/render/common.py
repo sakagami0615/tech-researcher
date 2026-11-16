@@ -48,6 +48,13 @@ def period_text(target: Target) -> str:
     return f"{day_label(start.date())}{start:%H:%M} 〜 {day_label(end.date())}{end:%H:%M}（JST）"
 
 
+def run_id_code(run_id: str) -> str:
+    """実行ID を表のセルに入れる形（インラインコード）にする。英数字と - だけを許す。"""
+    if not _ID_VALUE.fullmatch(run_id):
+        raise ValueError(f"実行ID に使えない値 {run_id!r}")
+    return f"`{run_id}`"
+
+
 def identifier(cadence: str, target: date, run_id: str) -> str:
     """本文の1行目に置く重複防止用の識別子（4.1）。"""
     for value in (cadence, run_id):
