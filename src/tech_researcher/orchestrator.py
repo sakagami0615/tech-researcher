@@ -20,10 +20,11 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 秘匿値をマスクのためにだけ読む。
 
 日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
-とつなぐ。② の出力のスキーマ（schemas/daily_output.json）ができるまでは、② を実行エラー
-（not_implemented）にする。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで終わる。週次は
-① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗したときの ④・⑤ への
-分岐も、それらの Issue で足す。
+とつなぐ。内側のスキル（agent/skills/tr-daily-evaluate/SKILL.md）か出力のスキーマ
+（schemas/daily_output.json）がまだなければ、AI を呼ばずに ② を実行エラー（not_implemented）に
+する。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで終わる。週次は ① の後に終わる
+（ドライランは ① だけ、本番は not_implemented）。段階が失敗したときの ④・⑤ への分岐も、それらの
+Issue で足す。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -64,6 +65,7 @@ from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
 from tech_researcher.stages.collect import collect_failure
 from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
 from tech_researcher.stages.daily import RESULTS as VERIFY_RESULTS
+from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -73,7 +75,7 @@ WORKER = "worker"
 RUN_ID_LABEL = "tech-researcher.run-id"
 SUMMARY = "summary.json"  # ドライランの出力のフォルダに残す要約（structure.md 7.2）
 # ② 日次の出力のスキーマ。`--json-schema` に渡し、③ も同じものを検査に使う（structure.md 2.2）
-DAILY_SCHEMA = resources.files("tech_researcher") / "schemas" / "daily_output.json"
+DAILY_SCHEMA = resources.files("tech_researcher") / "schemas" / DAILY_OUTPUT_SCHEMA
 
 # compose に渡す環境変数（許可リスト）。PATH・HOME は docker の CLI とプラグインを探すため、
 # DOCKER_HOST は Docker のデーモンの指定（rootless など）のため。DOCKER_CONFIG は統括スクリプトが
@@ -588,11 +590,11 @@ def _analyze(job: Job) -> str | None:
                 body,
                 job.limits.analyze * MINUTE,
                 runner=job.compose,
-                prompt=invoke.DAILY_PROMPT,
+                skill=job.repo / invoke.SKILLS_DIR / invoke.DAILY_SKILL,
                 schema=DAILY_SCHEMA,
                 max_turns=job.config.limits.agent_max_turns,
             )
-        except NotImplementedError:  # 出力のスキーマがまだない
+        except NotImplementedError:  # 内側のスキル（#22）か出力のスキーマがまだない
             job.log.write("analyze", "failure", error_category="not_implemented")
             return "not_implemented"
         except invoke.AgentError as e:

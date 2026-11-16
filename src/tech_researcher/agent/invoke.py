@@ -26,7 +26,10 @@ from pathlib import Path
 from typing import Protocol
 
 AGENT_SERVICE = "agent"
-DAILY_PROMPT = "/tr-daily-evaluate"  # 内側のスキル（agent/skills/。structure.md 3.5）
+# 内側のスキル（structure.md 3.5）。リポジトリの agent/skills/ を、agent のイメージの
+# 作業ディレクトリの .claude/skills/ にコピーする（docker/agent.Dockerfile）
+SKILLS_DIR = Path("agent/skills")
+DAILY_SKILL = "tr-daily-evaluate"
 
 # Claude Code が結果の JSON に書く分類（subtype・terminal_reason）。ログに残す前に形を確かめる
 _CODE = re.compile(r"[a-z0-9_]{1,64}")
@@ -123,16 +126,20 @@ def call_agent(
     timeout_s: float,
     *,
     runner: Runner,
-    prompt: str,
+    skill: Path,
     schema: Path | Traversable,
     max_turns: int | None,
 ) -> AgentResult:
     """入力の JSON（標準入力に渡すバイト列）を AI に渡し、構造化出力を返す。
 
-    timeout_s は段階の上限（limits の analyze。D-21）。失敗は AgentError。docker を起動できなければ
-    OSError。返す構造化出力の形は確かめない（③ が D6(a) で検査する）。
+    skill はリポジトリの内側のスキルのフォルダ（agent/skills/<名前>）。プロンプトは `/<名前>`。
+    SKILL.md かスキーマのファイルがまだなければ NotImplementedError（それを作る Issue の前。
+    AI を呼ばない）。timeout_s は段階の上限（limits の analyze。D-21）。失敗は AgentError。
+    docker を起動できなければ OSError。返す構造化出力の形は確かめない（③ が D6(a) で検査する）。
     """
-    command = claude_command(prompt, load_schema(schema), max_turns)
+    if not (skill / "SKILL.md").is_file():
+        raise NotImplementedError("内側のスキルがまだない")
+    command = claude_command(f"/{skill.name}", load_schema(schema), max_turns)
     result = runner.run(AGENT_SERVICE, command, timeout_s, stdin=body)
     if result.returncode is None:
         raise AgentError("timeout", result.stderr, remove_failed=result.remove_failed)

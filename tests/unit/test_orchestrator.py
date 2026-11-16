@@ -671,11 +671,19 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
     assert host.calls()[0]["locked"]
 
 
-@pytest.mark.parametrize("dry_run", [False, True])
-def test_daily_stops_at_analyze_until_schema_exists(host, capfd, monkeypatch, tmp_path, dry_run):
-    """② の出力のスキーマ（#19）がまだなければ、AI も ③ も起動せずに実行エラーにする。"""
+@pytest.mark.parametrize(
+    ("dry_run", "missing"), [(False, "skill"), (True, "skill"), (True, "schema")]
+)
+def test_daily_stops_at_analyze_until_skill_and_schema_exist(
+    host, capfd, monkeypatch, tmp_path, dry_run, missing
+):
+    """内側のスキル（#22）か出力のスキーマがまだなければ、AI も ③ も起動せずに実行エラーにする。"""
     monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
-    monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", tmp_path / "missing.json")
+    if missing == "schema":
+        skill = host.repo / "agent" / "skills" / "tr-daily-evaluate"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: tr-daily-evaluate\n---\n")
+        monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", tmp_path / "missing.json")
     host.behave("ok", lock="daily-dry-run" if dry_run else "daily")
     assert orchestrator.main(["daily", *(["--dry-run"] if dry_run else [])], host.environ) == 1
     summary = summary_of(capfd)
@@ -707,6 +715,9 @@ AGENT_OK = json.dumps(
 def agent(host, monkeypatch, tmp_path) -> Host:
     """製品の call_agent を使い、偽の docker の agent サービスに答えさせる。"""
     monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)
+    skill = host.repo / "agent" / "skills" / "tr-daily-evaluate"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: tr-daily-evaluate\n---\n")
     schema = tmp_path / "daily_output.json"
     schema.write_text('{\n  "type": "object"\n}\n')
     monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", schema)
@@ -1050,6 +1061,9 @@ def test_job_timeout_in_production_removes_work_and_releases_lock(
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]
     monkeypatch.undo()
     monkeypatch.setattr(orchestrator, "MINUTE", 0.05)
+    monkeypatch.setattr(
+        invoke, "call_agent", lambda body, timeout_s, **_: invoke.AgentResult({"items": []})
+    )
     host.behave("ok", lock="daily")
     assert orchestrator.main(["daily"], host.environ) == 1  # ロックは外れている
     assert summary_of(capfd)["error_category"] == "not_implemented"

@@ -61,12 +61,25 @@ def schema(tmp_path) -> Path:
     return path
 
 
+@pytest.fixture
+def skill(tmp_path) -> Path:
+    path = tmp_path / "agent" / "skills" / "tr-daily-evaluate"
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text("---\nname: tr-daily-evaluate\n---\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _skill_for_call(skill, monkeypatch):
+    monkeypatch.setattr(invoke, "SKILLS_DIR", skill.parent)
+
+
 def call(runner, schema, max_turns=None):
     return invoke.call_agent(
         b'{"task": "daily"}',
         1200.0,
         runner=runner,
-        prompt=invoke.DAILY_PROMPT,
+        skill=invoke.SKILLS_DIR / invoke.DAILY_SKILL,
         schema=schema,
         max_turns=max_turns,
     )
@@ -117,6 +130,22 @@ def test_call_passes_input_on_stdin_to_agent_service(schema):
         '{"type":"object","properties":{"items":{"type":"array"}},"required":["items"]}',
         4,
     )
+
+
+def test_missing_skill_is_not_implemented(schema, skill):
+    (skill / "SKILL.md").unlink()
+    runner = FakeRunner(Done(0, result()))
+    with pytest.raises(NotImplementedError):
+        call(runner, schema)
+    assert runner.calls == []  # AI を呼ばない
+
+
+def test_packaged_daily_schema_is_passed_on_one_line():
+    from tech_researcher.orchestrator import DAILY_SCHEMA
+
+    text = invoke.load_schema(DAILY_SCHEMA)
+    assert "\n" not in text
+    assert json.loads(text) == json.loads(DAILY_SCHEMA.read_text(encoding="utf-8"))
 
 
 def test_missing_schema_is_not_implemented(tmp_path):
