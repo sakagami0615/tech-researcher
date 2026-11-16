@@ -351,6 +351,28 @@ def test_missing_period_event_is_excluded_and_logged(host, monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("override", "category"),
+    [
+        ({"importance": "詳しくは https://example.net/x"}, "forbidden_link"),
+        ({"headline": "<!-- 隠す -->見出し"}, "forbidden_html"),
+        ({"points": ["要"] * 7}, "too_long"),
+    ],
+)
+def test_text_violations_are_excluded_and_logged(host, override, category):
+    """D2・D3・長さの検査が ③ につながっている。違反した項目だけを除外する。"""
+    host.ai = lambda data: {"items": [entry("d1", 1, **override), entry("d2", 2)]}
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    out_dir = Path(summary["output_dir"])
+    validation = json.loads((out_dir / "validation.json").read_text())
+    assert validation["entries"] == 1
+    assert [x["item_ids"] for x in validation["excluded"]] == [["d1"]]
+    records = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    assert [r["error_category"] for r in records if r["event"] == "excluded"] == [category]
+
+
 def test_unreadable_source_url_is_excluded(host, monkeypatch):
     """出典の URL を許可集合と照らす検査（D1）が、③ につながっている。"""
     monkeypatch.setattr("tech_researcher.validate.sources.normalize_url", lambda u: None)

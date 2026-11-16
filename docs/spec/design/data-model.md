@@ -316,7 +316,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `run_id`・`entry_no` | TEXT・INTEGER | PK。`entry_no` は AI の出力の順 |
 | `section` | TEXT | `daily_item`・`theme`・`tech_change`・`comparison`・`watch` |
 | `status` | TEXT | `published`（本文に入れた）・`excluded` |
-| `exclusion_reasons` | TEXT | `D1`・`D2`・`D3`・`D4`・`D6b`・`missing_period_event`・`too_long` など |
+| `exclusion_reasons` | TEXT | `invalid_id`（D6b）・`invalid_source`（D1）・`missing_period_event`・`forbidden_link`（D2）・`forbidden_html`（D3）・`too_long`（文字数・要点数）・`duplicate_id`（D6b）など。D4 の分類名は実装で決める |
 | `display_no` | INTEGER | 日次の通し番号（`published` のときだけ） |
 | `theme_id` | TEXT | 週次のテーマだけ（3.6） |
 | `item_ids_json`・`past_ids_json` | TEXT | AI が選んだ ID |
@@ -507,13 +507,13 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | 検査 | 出力のどこを見るか | 判定に使う入力・DB |
 |---|---|---|
 | D1 出典の許可集合 | `item_ids`・`primary_item_id`・`primary_link_id` | ID から引いた items の `canonical_url`・`sources_json` の URL・`links_json`（その実行で更新した行だけ）。`primary_link_id` は、その項目の `item_ids` の項目の候補リンクに限る（別の記事のリンクを一次情報にしない） |
-| D2 URL・リンク | `headline`・`points[]`・`importance`・`period_event` | — |
+| D2 URL・リンク | `headline`・`points[]`・`importance`・`period_event` | —（検出する形は report-templates.md 0.3） |
 | D3 画像・HTML | 同上 | — |
 | D4 長い引用 | 同上 | `item_ids` の各項目の `title`・`excerpt`・AI に渡した `primary_text`。除外する語句は `meta_terms_json` |
 | D6(a) 形式 | 出力全体 | スキーマ |
 | D6(b) ID | `item_ids`（入力にある、項目間で重複しない。重複は、ほかの検査を通った項目の中で最後に判定し、先に出た項目を残す）、`primary_item_id`（自項目の `item_ids` にある）、`primary_link_id`（入力の候補リンクにある） | AI に渡した ID の集合 |
 | 期間内の出来事の欠落 | `period_event` | `item_ids` のどれかが `needs_period_event` のとき必須（report-templates.md 1.3） |
-| 文字数 | 各文 | 上限の2倍を超えたら除外（report-templates.md 0.3） |
+| 文字数・要点数 | 各文、`points` の要素数 | 文は目安の2倍を超えたら除外（見出し 40・要点 80・重要性 標準形 100／簡潔形 60・期間内の出来事 60 字）。`points` は目安 3 の2倍の6つを超えたら除外。値はコードの固定値（report-templates.md 0.3・1.3） |
 
 - `primary_item_id` と `primary_link_id` の両方に値がある場合の扱いは実装で決める。初期案は、スキルで「片方だけ」と指示し、両方あれば `primary_link_id` を先頭にする
 
@@ -636,7 +636,6 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 
 ### 4.5 実装で決める細部
 
-- 要点の数の上限（最大3つ）を超えたときの扱い。文字数と同じ考え方で「上限の2倍（6つ）を超えたら除外」とする案
 - 入力にスキーマの版（`schema_version`）を持たせるか
 - 週次の「今週の観測」の件数を、items の行で数えるか、正規化 URL の重複を除いて数えるか
 - スキーマに書ける JSON Schema の範囲（`--json-schema` が受け付けない書き方がないか）

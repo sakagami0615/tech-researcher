@@ -73,8 +73,8 @@
 │       ├── collect/                  # last30days-skill のアダプタ、RSS、Qiita、GitHub Releases、GitHub の急上昇（D-03・D-13）
 │       ├── agent/                    # ② ④ の呼び出しの境界（claude の引数・入出力。AI の差し替えの境界）
 │       ├── schemas/                  # ② ④ の出力の JSON Schema（--json-schema に渡し、③ の検査にも使う）
-│       ├── validate/                 # D1〜D4・D6、無害化、秘匿情報の検査
-│       ├── render/                   # Issue 本文のテンプレート（report-templates.md）
+│       ├── validate/                 # D1〜D4・D6、文字数・要点数、秘匿情報の検査
+│       ├── render/                   # Issue 本文のテンプレートと AI の文章の無害化（report-templates.md 0.3）
 │       ├── publish/                  # Issue の作成、重複判定、Projects への登録
 │       ├── db/                       # SQLite（data-model.md）
 │       └── logging.py                # ログと秘匿情報のマスク（7章）

@@ -3,8 +3,8 @@
 - ① の後に、collected.json から ② の入力（agent-input.json）を作る。統括スクリプトがそれを
   agent に標準入力で渡し、構造化出力を agent-output.json に保存する
 - ③ は、agent に渡したコピーではなく、worker の collected.json から同じ入力を作り直して照合する
-  （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落を検査する。
-  D2・D3・文字数は #20、D4 は #21 で足す
+  （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落、D2・D3、
+  文字数と要点数を検査する。D4 は #21 で足す
 - 秘匿情報を検出したら Issue の本文を残さない（US-E7-05）。⑤ の直前の検査は ⑤ の Issue で足す
 - 不合格・実行エラーの本文（とその秘匿情報の検査）は #38 で足す。いまは不合格のとき issue.md・
   secret-scan.json を書かない
@@ -37,6 +37,7 @@ from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check
 from tech_researcher.validate.period_event import check_period_events
 from tech_researcher.validate.secret_scan import SecretScanner
 from tech_researcher.validate.sources import check_daily_sources
+from tech_researcher.validate.text import check_daily_html, check_daily_lengths, check_daily_links
 
 AGENT_INPUT = "agent-input.json"
 AGENT_OUTPUT = "agent-output.json"
@@ -116,6 +117,9 @@ def _check_entries(
         ("invalid_id", lambda e: check_daily_ids(e, data)),
         ("invalid_source", lambda e: check_daily_sources(e, items)),
         ("missing_period_event", lambda e: check_period_events(e, data)),
+        ("forbidden_link", check_daily_links),  # D2
+        ("forbidden_html", check_daily_html),  # D3
+        ("too_long", check_daily_lengths),
         # 重複は最後に、ほかの検査をすべて通った項目の中で判定する（後の検査もこの前に足す）
         ("duplicate_id", check_daily_duplicates),
     ):
