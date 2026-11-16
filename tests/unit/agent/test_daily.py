@@ -224,3 +224,8 @@ def test_output_is_split_into_entries():
 def test_broken_output_is_rejected(output):
     with pytest.raises(ValueError):
         parse_daily_output(output)
+
+
+def test_float_rank_is_taken_as_int():
+    (entry,) = parse_daily_output({"items": [{**OUTPUT_ITEM, "rank": 1.0}]})
+    assert entry.rank == 1 and type(entry.rank) is int

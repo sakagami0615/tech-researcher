@@ -3,8 +3,8 @@
 - ① の後に、collected.json から ② の入力（agent-input.json）を作る。統括スクリプトがそれを
   agent に標準入力で渡し、構造化出力を agent-output.json に保存する
 - ③ は、agent に渡したコピーではなく、worker の collected.json から同じ入力を作り直して照合する
-  （D-04）。いまは D6(a) の最小の形と D6(b) の ID だけを検査する。正式なスキーマ・D1・期間内の
-  出来事の欠落は #19、D2・D3・文字数は #20、D4 は #21 で足す
+  （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落を検査する。
+  D2・D3・文字数は #20、D4 は #21 で足す
 - 秘匿情報を検出したら Issue の本文を残さない（US-E7-05）。⑤ の直前の検査は ⑤ の Issue で足す
 - 不合格・実行エラーの本文（とその秘匿情報の検査）は #38 で足す。いまは不合格のとき issue.md・
   secret-scan.json を書かない
@@ -18,7 +18,12 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from tech_researcher.agent.daily import InputItem, build_daily_input, parse_daily_output
+from tech_researcher.agent.daily import (
+    DailyEntry,
+    InputItem,
+    build_daily_input,
+    parse_daily_output,
+)
 from tech_researcher.collect.records import Item
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config
@@ -28,8 +33,10 @@ from tech_researcher.periods import Target
 from tech_researcher.render.common import Report
 from tech_researcher.render.daily import render_daily
 from tech_researcher.stages.collect import COLLECTED, load_collected
-from tech_researcher.validate.ids import check_daily_ids
+from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check_daily_ids
+from tech_researcher.validate.period_event import check_period_events
 from tech_researcher.validate.secret_scan import SecretScanner
+from tech_researcher.validate.sources import check_daily_sources
 
 AGENT_INPUT = "agent-input.json"
 AGENT_OUTPUT = "agent-output.json"
@@ -70,16 +77,16 @@ def run_verify(
     try:
         entries = parse_daily_output(output)
     except ValueError as e:
-        # D6(a)：出力全体が不合格（US-E7-02）。不合格の後に再生成はしない
+        # D6(a)：スキーマに合わない出力全体が不合格（US-E7-02）。不合格の後に再生成はしない
         log.write("verify", "failure", error_category="invalid_output", detail=str(e))
         return _finish(run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[])
-    kept, excluded = check_daily_ids(entries, data)
-    for x in excluded:
-        log.write("verify", "excluded", error_category="invalid_id", detail=x.reason)
+    kept, excluded = _check_entries(entries, data, items)
+    for category, x in excluded:
+        log.write("verify", "excluded", error_category=category, detail=x.reason)
     # ID と理由には AI が返した文字列が入るので、マスクしてから残す（ログは RunLog がマスクする）
     reasons = [
         {"item_ids": [scanner.mask(i) for i in x.entry.item_ids], "reason": scanner.mask(x.reason)}
-        for x in excluded
+        for _, x in excluded
     ]
     if entries and not kept:  # 除外で0件（US-E7-02）。AI が0件を選んだときはレポートにする
         log.write("verify", "failure", error_category="all_excluded")
@@ -94,6 +101,27 @@ def run_verify(
         return _finish(run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons)
     _write(run_dir / ISSUE, _issue_text(report))
     return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons)
+
+
+def _check_entries(
+    entries: list[DailyEntry], data: dict, items: Mapping[str, Item]
+) -> tuple[list[DailyEntry], list[tuple[str, Excluded]]]:
+    """項目単位の検査を順に行う。違反した項目は除外し、検査の分類と一緒に返す。
+
+    ID の存在（D6(b)）を先に確かめる。後ろの検査は ID から値を引くので、存在する ID だけを渡す。
+    ID の重複は最後に判定する。
+    """
+    excluded: list[tuple[str, Excluded]] = []
+    for category, check in (
+        ("invalid_id", lambda e: check_daily_ids(e, data)),
+        ("invalid_source", lambda e: check_daily_sources(e, items)),
+        ("missing_period_event", lambda e: check_period_events(e, data)),
+        # 重複は最後に、ほかの検査をすべて通った項目の中で判定する（後の検査もこの前に足す）
+        ("duplicate_id", check_daily_duplicates),
+    ):
+        entries, rejected = check(entries)
+        excluded += [(category, x) for x in rejected]
+    return entries, excluded
 
 
 def _numbered(run_dir: Path) -> dict[str, Item]:

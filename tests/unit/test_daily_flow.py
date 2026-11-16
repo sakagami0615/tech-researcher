@@ -329,6 +329,37 @@ def test_invalid_id_is_excluded_and_others_are_reported(host):
     assert ("verify", "excluded") in stages_of(out_dir / "log.jsonl")
 
 
+def test_missing_period_event_is_excluded_and_logged(host, monkeypatch):
+    """期間より前に公開された項目は period_event が必須。欠けた項目だけを除外する。"""
+    monkeypatch.setattr("tech_researcher.agent.daily.published_before_period", lambda i, t: True)
+    host.ai = lambda data: {
+        "items": [entry("d1", 1, period_event="Star が急増した"), entry("d2", 2)]
+    }
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    out_dir = Path(summary["output_dir"])
+    validation = json.loads((out_dir / "validation.json").read_text())
+    assert validation["entries"] == 1 and [x["item_ids"] for x in validation["excluded"]] == [
+        ["d2"]
+    ]
+    records = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    assert [r["error_category"] for r in records if r["event"] == "excluded"] == [
+        "missing_period_event"
+    ]
+
+
+def test_unreadable_source_url_is_excluded(host, monkeypatch):
+    """出典の URL を許可集合と照らす検査（D1）が、③ につながっている。"""
+    monkeypatch.setattr("tech_researcher.validate.sources.normalize_url", lambda u: None)
+    host.ai = lambda data: {"items": [entry("d1", 1)]}
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 1 and summary["result"] == "rejected"
+    out_dir = Path(summary["output_dir"])
+    assert json.loads((out_dir / "validation.json").read_text())["reason"] == "all_excluded"
+
+
 @pytest.mark.parametrize(
     ("output", "reason"),
     [
@@ -336,6 +367,9 @@ def test_invalid_id_is_excluded_and_others_are_reported(host):
         ({"items": "x"}, "invalid_output"),
         ({"items": [entry("d1", 1, category="security")]}, "invalid_output"),
         (["not", "object"], "invalid_output"),  # 形の誤りは D6(a) で全体を不合格（D-07）
+        ({"items": [entry("d1", 1, url="https://evil.example")]}, "invalid_output"),
+        ({"items": [{k: v for k, v in entry("d1", 1).items() if k != "depth"}]}, "invalid_output"),
+        (None, "invalid_output"),  # 出力がない場合も違反
     ],
 )
 def test_rejected_output_makes_no_report(host, output, reason):
