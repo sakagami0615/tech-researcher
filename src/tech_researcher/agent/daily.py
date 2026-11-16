@@ -2,8 +2,7 @@
 
 外部由来の自由文は各項目の untrusted の中にだけ入れ、出典は ID で受け取る。
 AI の呼び出しは agent/invoke.py の call_agent に閉じ（テストでは偽の実装に差し替える）、ここでは
-入力を作ることと、受け取った構造化出力を項目に分けることだけを行う。正式なスキーマの検査は
-後の Issue で足す。
+入力を作ることと、受け取った構造化出力をスキーマで検査して項目に分けることだけを行う。
 """
 
 import json
@@ -16,6 +15,7 @@ from tech_researcher.collect.period_filter import event_in_window, published_bef
 from tech_researcher.collect.records import Attention, Event, Item, Record
 from tech_researcher.collect.urls import normalize_url
 from tech_researcher.periods import JST, Target, spike_window
+from tech_researcher.validate.schema import check_schema
 
 CATEGORIES = ("ai", "devtools", "cloud", "oss", "other")  # report-templates.md 1.2 の固定順
 DEPTHS = ("full", "brief")
@@ -176,47 +176,21 @@ def _iso(moment: datetime | None) -> str | None:
 
 
 def parse_daily_output(output: object) -> list[DailyEntry]:
-    """AI の構造化出力を項目に分ける。形が崩れていれば ValueError（D6(a) の最小の形）。"""
-    if not isinstance(output, dict) or not isinstance(output.get("items"), list):
-        raise ValueError("出力に items の配列がない")
+    """AI の構造化出力を、スキーマで検査してから項目に分ける。合わなければ ValueError（D6(a)）。"""
+    check_schema(output)
     return [_entry(raw) for raw in output["items"]]
 
 
-def _entry(raw: object) -> DailyEntry:
-    if not isinstance(raw, dict):
-        raise ValueError("items の要素がオブジェクトでない")
-    entry = DailyEntry(
-        item_ids=tuple(dict.fromkeys(_strings(raw, "item_ids"))),  # 項目の中の重複は1つにする
-        primary_item_id=_optional_str(raw, "primary_item_id"),
-        primary_link_id=_optional_str(raw, "primary_link_id"),
-        category=_str(raw, "category"),
-        rank=raw.get("rank"),
-        depth=_str(raw, "depth"),
-        headline=_str(raw, "headline"),
-        points=tuple(_strings(raw, "points")),
-        importance=_str(raw, "importance"),
-        period_event=_optional_str(raw, "period_event"),
+def _entry(raw: dict) -> DailyEntry:
+    return DailyEntry(
+        item_ids=tuple(dict.fromkeys(raw["item_ids"])),  # 項目の中の重複は1つにする
+        primary_item_id=raw["primary_item_id"],
+        primary_link_id=raw["primary_link_id"],
+        category=raw["category"],
+        rank=raw["rank"],
+        depth=raw["depth"],
+        headline=raw["headline"],
+        points=tuple(raw["points"]),
+        importance=raw["importance"],
+        period_event=raw["period_event"],
     )
-    if entry.category not in CATEGORIES or entry.depth not in DEPTHS:
-        raise ValueError("category か depth が決めた値でない")
-    if type(entry.rank) is not int:
-        raise ValueError("rank が整数でない")
-    return entry
-
-
-def _str(raw: dict, key: str) -> str:
-    value = raw.get(key)
-    if not isinstance(value, str):
-        raise ValueError(f"{key} が文字列でない")
-    return value
-
-
-def _optional_str(raw: dict, key: str) -> str | None:
-    return None if raw.get(key) is None else _str(raw, key)
-
-
-def _strings(raw: dict, key: str) -> list[str]:
-    value = raw.get(key)
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise ValueError(f"{key} が文字列の配列でない")
-    return value

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "日次 ② 評価・要約の出力（data-model.md 4.2）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item_ids",
+          "primary_item_id",
+          "primary_link_id",
+          "category",
+          "rank",
+          "depth",
+          "headline",
+          "points",
+          "importance",
+          "period_event"
+        ],
+        "properties": {
+          "item_ids": {"type": "array", "items": {"type": "string"}},
+          "primary_item_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+          "primary_link_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+          "category": {"type": "string", "enum": ["ai", "devtools", "cloud", "oss", "other"]},
+          "rank": {"type": "integer"},
+          "depth": {"type": "string", "enum": ["full", "brief"]},
+          "headline": {"type": "string"},
+          "points": {"type": "array", "items": {"type": "string"}},
+          "importance": {"type": "string"},
+          "period_event": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+        }
+      }
+    }
+  }
+}
