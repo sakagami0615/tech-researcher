@@ -32,5 +32,7 @@ ENV HOME=/tmp/home \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 WORKDIR /app
 COPY agent/skills/ /app/.claude/skills/
+# 手元の umask によらず、動かす人（65534）がスキルを読めるようにする
+RUN chmod -R a+rX /app/.claude
 # root で動かさない。データ用フォルダをマウントしないので、運用者の UID に合わせる必要もない
 USER 65534:65534

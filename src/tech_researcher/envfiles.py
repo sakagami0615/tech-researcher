@@ -35,6 +35,8 @@ ENV_FILES = (WORKER_ENV, AGENT_ENV)
 # イメージの設定を上書きする（env_file はイメージの ENV より優先される）ので、入れさせない
 AGENT_NAMES = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
 _ALLOWED_NAMES = {AGENT_ENV: AGENT_NAMES}  # 書かれていないファイルは、名前を限らない
+# worker.env に書けない名前の先頭。Claude の認証情報は agent にだけ渡す（D-05）
+_DENIED_PREFIXES = {WORKER_ENV: ("CLAUDE_", "ANTHROPIC_")}
 
 
 def original_label(name: str) -> str:
@@ -187,12 +189,14 @@ def secret_values(path: Path, label: str | None = None) -> list[str]:
     返す。
 
     書式は `名前=値` を1行に1つ。空行と、空白・タブで字下げしてもよい `#` の行は読み飛ばす。
-    agent.env は AGENT_NAMES の変数だけを書ける。違う行があれば ValueError（行の番号だけを出し、
+    agent.env は AGENT_NAMES の変数だけを書ける。worker.env には CLAUDE_・ANTHROPIC_ で始まる
+    変数を書けない。違う行があれば ValueError（行の番号だけを出し、
     パスも値も出さない）。読めなくても ValueError。label はエラー文での呼び方（既定は元の
     ファイル）。
     """
     label = label or original_label(path.name)
     allowed = _ALLOWED_NAMES.get(path.name)
+    denied = _DENIED_PREFIXES.get(path.name, ())
     try:
         text = _read_private(path, label).decode("utf-8")
     except OSError:
@@ -215,6 +219,11 @@ def secret_values(path: Path, label: str | None = None) -> list[str]:
         if allowed is not None and m["name"] not in allowed:
             names = "・".join(sorted(allowed))
             raise ValueError(f"{label} の {number} 行目の変数は使えない（使えるのは {names}）")
+        if m["name"].upper().startswith(denied):
+            raise ValueError(
+                f"{label} の {number} 行目の変数は使えない"
+                f"（Claude の認証情報は {AGENT_ENV} に書く）"
+            )
         if is_secret_name(m["name"]):
             values.append(m["value"])
     return values

@@ -191,6 +191,17 @@ def test_agent_env_rejects_other_names(tmp_path, name):
     assert "fake" not in message and name not in message
 
 
+@pytest.mark.parametrize("name", ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "anthropic_x"])
+def test_worker_env_rejects_claude_credentials(tmp_path, name):
+    path = tmp_path / "worker.env"
+    path.write_text(f"GITHUB_TOKEN=fake-collect\n{name}=fake-claude\n", encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        secret_values(path)
+    message = str(e.value)
+    assert "worker.env の 2 行目の変数は使えない（Claude の認証情報は agent.env に書く）" in message
+    assert "fake" not in message
+
+
 def test_worker_env_names_are_not_limited(tmp_path):
     path = tmp_path / "worker.env"
     path.write_text("TR_ANY_NEW_TOKEN=fake-new\n", encoding="utf-8")

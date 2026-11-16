@@ -58,7 +58,7 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 認証情報は、リポジトリの外の `${TR_SECRETS_DIR}` に2つのファイルで置きます。compose が `worker.env` は worker のコンテナにだけ、`agent.env` は agent のコンテナにだけ環境変数として渡します（フォルダはどちらにもマウントしません）。変数名は `deploy/env/worker.env.example`・`deploy/env/agent.env.example` にあります。作り方は上の「worker コンテナ」の手順のとおりです。compose.yaml の読み込みに両方が要るので、収集だけを動かすとき（観測など）も `agent.env` を置きます（値は空でかまいません）。
 
 - `worker.env` のいまの変数は収集用トークン `GITHUB_TOKEN`（GitHub の読み取り専用の権限だけのトークン）だけです。空なら認証なしで動き、GitHub Search と Star 数は失敗（`auth` など）になります
-- `agent.env` に書けるのは、Claude Code のサブスクリプションのトークン `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で発行）だけです。`ANTHROPIC_API_KEY` など、ほかの変数を書くと起動の前に止まります（従量課金のキーが先に使われたり、イメージの設定を上書きしたりするため）。空なら ② は認証の失敗（`agent_failed`）になります
+- `agent.env` に書けるのは、Claude Code のサブスクリプションのトークン `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で発行）だけです。`ANTHROPIC_API_KEY` など、ほかの変数を書くと起動の前に止まります（従量課金のキーが先に使われたり、イメージの設定を上書きしたりするため）。逆に `worker.env` に `CLAUDE_`・`ANTHROPIC_` で始まる変数を書いても止まります（Claude の認証情報は agent にだけ渡す）。空なら ② は認証の失敗（`agent_failed`）になります
 - `TR_SECRETS_DIR` は絶対パスで、リポジトリと `TR_DATA_DIR` の外に置きます。フォルダは権限 700、`worker.env`・`agent.env` は 600（または 400）で、どれも `bin/tr-run` を動かす人（root 以外）が持ち主です。ファイルはシンボリックリンクにしません。書き方は `名前=値` を1行に1つで、値は引用符で囲まず、空白・引用符・`$`・`\` を含めません（空行と `#` のコメント行は可）。満たさないと `bin/tr-run` は起動の前に終了コード 2 で止まります（書き方の誤りは行の番号だけを出します）
 - 統括スクリプトは worker.env・agent.env を環境変数として読み込みません。実行の始めに同じフォルダの `.run-<実行ID>/` に写しを作って compose に読ませ、実行が終わったら消します（実行の途中で書き換えても、その実行には効きません）。`bin/tr-run` が強制終了されると `${TR_SECRETS_DIR}/.run-*` が残ることがあります。実行していないときに消してください（トークンを差し替えたときも）。ログに書く前に伏せるため、名前に `TOKEN`・`KEY` などを含む変数の値だけを読みます
 
@@ -79,6 +79,7 @@ docker compose build agent
 docker compose run --rm -T agent claude --version   # 固定した版が出る
 # /app などは書けず（Read-only file system）、/claude と /tmp だけに書ける
 docker compose run --rm -T agent sh -c 'touch /app/x; touch /claude/x /tmp/x && echo ok'
+echo '{"x":1}' | docker compose run --rm -T agent cat   # 標準入力がコンテナに届く
 ```
 
 ## 実行（bin/tr-run）
@@ -95,7 +96,7 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 - compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません。`TR_SECRETS_DIR` は worker.env・agent.env の場所を compose に教えるだけで、コンテナには入りません
 - `DOCKER_CONFIG` は `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`（権限 700）です。`~/.docker/config.json` の `proxies` などはコンテナに入りません。このため Docker のコンテキスト（`DOCKER_CONTEXT`・`docker context use`）は使えず、デーモンは `DOCKER_HOST` で指定します。compose のプラグインは、`~/.docker/cli-plugins` ではなく、システムの場所（`/usr/libexec/docker/cli-plugins` など）に入れておきます
 - 標準出力には、実行 ID・種類・対象日・結果の種別・件数・取得できなかった情報源の名前・ドライランの出力先だけを JSON 1行で出します。ドライランでは同じものを出力のフォルダの `summary.json` に残します
-- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。② は agent コンテナの Claude Code を呼びます（上の「agent コンテナ」）。ただし出力のスキーマ（`schemas/daily_output.json`）と内側のスキル（`tr-daily-evaluate`）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。② が失敗したときは、`agent_failed`（終了コードが0でない、または構造化出力がない。認証の失敗を含む）・`timeout`・`bad_output` などの分類を要約とログに出します。ログには Claude Code の分類（`subtype` など）だけを残し、AI の応答の文は残しません。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
+- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。② は agent コンテナの Claude Code を呼びます（上の「agent コンテナ」）。ただし出力のスキーマ（`schemas/daily_output.json`）と内側のスキル（`tr-daily-evaluate`）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。② が失敗したときは、`agent_failed`（終了コードが0でない、または構造化出力がない。認証の失敗を含む）・`timeout`・`bad_output` などの分類を要約とログに出します。ログには compose・Claude Code の stderr の末尾（秘匿値を伏せたもの）と Claude Code の分類（`subtype` など）を残し、AI の応答の文（`result`）は残しません。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
 - ① は、本番では DB（`$TR_DATA_DIR/db/tech-researcher.sqlite3`）を開き、runs の開始・取得結果（source_fetches）・収集項目（items。日次だけ）・Star 数と人気型フィードの記録（日次だけ）を書きます。① で実行エラーになった本番の実行（すべての情報源の取得に失敗した日など）は runs を `failed` で閉じます。② 以降の終わりは、それぞれの失敗の分岐と ⑤ で書くので、それまで本番の runs は `running` のまま残ります。ドライランは DB を読み取り専用で開き、何も書きません（DB がなければ前日の記録がないものとして動きます）
 - 週次は ① 収集だけです。ドライランは ① の後に終わり、本番は ① の後に実行エラー（`not_implemented`）で終わります
 

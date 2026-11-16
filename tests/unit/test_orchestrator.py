@@ -787,6 +787,48 @@ def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
 
 
+def test_agent_container_remove_failure_is_logged(agent, capfd, monkeypatch):
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "exit": 1})
+
+    def fail(self):
+        raise subprocess.CalledProcessError(1, ["docker", "ps"])
+
+    monkeypatch.setattr(orchestrator.Compose, "remove_containers", fail)
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
+    categories = [r.get("error_category") for r in agent.log(summary["run_id"])]
+    assert "container_remove_failed" in categories
+
+
+def test_agent_launch_failure(agent, capfd, monkeypatch):
+    def no_docker(self, *args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(orchestrator.Compose, "run", no_docker)
+    monkeypatch.setattr(orchestrator, "_worker", _collected)
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "launch_failed")
+
+
+def test_broken_schema_is_analyze_error_without_ai(agent, capfd, monkeypatch, tmp_path):
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json")
+    monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", broken)
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": AGENT_OK})
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "bad_schema")
+    assert [_service(c) for c in agent.calls()] == ["worker"]  # AI を呼ばない
+
+
+def _collected(job, stage, minutes, parse):
+    """① の代わり。② の入力（1項目）を書き、成功の要約を返す。"""
+    (job.files.dir / "agent-input.json").write_text(json.dumps({"task": "daily", "items": [{}]}))
+    return {"items": 1, "sources": 1, "failed_sources": []}, None
+
+
 def test_agent_timeout_stops_and_removes_container(agent, capfd):
     agent.behave("ok", lock="daily-dry-run", agent="sleep")
     started = time.monotonic()

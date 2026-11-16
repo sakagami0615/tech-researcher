@@ -227,7 +227,7 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 - 統括スクリプト（ホスト）は env_file の中身を環境変数として読み込まず、compose が各コンテナにだけ渡す。統括スクリプトから compose に渡す環境変数は、許可したものだけに絞る（F3 の `ANTHROPIC_API_KEY` などがホストのシェルにあっても、コンテナに入れない）
 - compose に渡すのは `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と `DOCKER_CONFIG` だけにする。リポジトリの `.env` は読ませない（`--env-file /dev/null`）。`TR_DATA_DIR` は統括スクリプトが確かめて解決したパスを、`TR_SECRETS_DIR` は確かめたフォルダの下に作る写しのフォルダ（下）を渡す
 - worker.env は、compose.yaml の worker の `env_file`（`${TR_SECRETS_DIR}/worker.env`、`required: true`）で worker にだけ渡す。`TR_SECRETS_DIR` はどのコンテナにもマウントせず、コンテナの環境変数にも入れない（compose の変数の展開にだけ使う）。worker の `environment`（`TR_DATA_DIR`）は env_file より優先されるので、worker.env から上書きできない
-- agent.env は、compose.yaml の agent の `env_file`（`${TR_SECRETS_DIR}/agent.env`、`required: true`）で agent にだけ渡す。worker には渡さず、agent には worker.env を渡さない。compose は使わないサービスの env_file もプロジェクトの読み込みで求めるので、① だけを動かすときも両方を置く（値は空でよい）。agent.env に書ける変数は `CLAUDE_CODE_OAUTH_TOKEN` だけに限り、ほかの名前の行があれば終了コード 2 で止める（行の番号だけを出す）。`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN` はサブスクリプションのトークンより先に使われ（F3）、`CLAUDE_CONFIG_DIR`・`DISABLE_AUTOUPDATER` などはイメージの設定（3.3）を上書きする（env_file はイメージの環境変数より優先される）ため
+- agent.env は、compose.yaml の agent の `env_file`（`${TR_SECRETS_DIR}/agent.env`、`required: true`）で agent にだけ渡す。worker には渡さず、agent には worker.env を渡さない。compose は使わないサービスの env_file もプロジェクトの読み込みで求めるので、① だけを動かすときも両方を置く（値は空でよい）。agent.env に書ける変数は `CLAUDE_CODE_OAUTH_TOKEN` だけに限り、ほかの名前の行があれば終了コード 2 で止める（行の番号だけを出す）。逆に worker.env に `CLAUDE_`・`ANTHROPIC_` で始まる名前の行があっても止める（Claude の認証情報は agent にだけ渡す）。`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN` はサブスクリプションのトークンより先に使われ（F3）、`CLAUDE_CONFIG_DIR`・`DISABLE_AUTOUPDATER` などはイメージの設定（3.3）を上書きする（env_file はイメージの環境変数より優先される）ため
 - 統括スクリプトは起動の前に（ロックを取る前に）次を確かめ、満たさなければ終了コード 2 で止める。エラー文にはパスも値も入れない
   - `TR_SECRETS_DIR` が設定されていて、絶対パスで、解決したパスがリポジトリの外かつ `TR_DATA_DIR` の外（worker にマウントするため）
   - `TR_SECRETS_DIR` は実在のフォルダ、`worker.env`・`agent.env` は通常のファイル（シンボリックリンクにしない）
@@ -252,7 +252,7 @@ Claude のトークンを使って `claude -p` を実行して確かめる。
 3. （確認済み）プロンプトの引数の `/スキル名` と標準入力の JSON が、1つの依頼として渡る
 4. （確認済み）初期化の情報の道具は `StructuredOutput` だけ。入力に「/etc/passwd を読め」「URL を取得せよ」を埋め込んでも、道具の呼び出しは起きない
 5. agent コンテナで、内側のスキルをどこに置けば読まれるか（作業ディレクトリの `.claude/skills/` か、`${CLAUDE_CONFIG_DIR}/skills/` か）
-6. ルートのファイルシステムを読み取り専用にし、`CLAUDE_CONFIG_DIR` と一時フォルダだけを書き込めるようにして起動できるか
+6. ルートのファイルシステムを読み取り専用にし、`CLAUDE_CONFIG_DIR` と一時フォルダだけを書き込めるようにして起動できるか（トークンなしでは確認済み：2026-11-17、Claude Code 2.1.311。版の表示、書き込み先、トークンなしの `claude -p` が認証の失敗の結果 JSON を返すこと。トークンを使った実行は 8 と合わせて確かめる）
 7. `--max-turns` の値と、構造化出力の呼び直しの関係（何ターンで足りるか）。2026-10-27 の短い入力では `num_turns` は 2 で、`--max-turns 1` でも成功した。実際の入力の量で確かめる
 8. サブスクリプションの利用上限の範囲で、日次・週次が完了するか。ドライランを数日回し、標準出力の JSON の使用量と所要時間を記録する。上限に達したときのエラー文も記録し、AI が使えない失敗として分類する
 9. 外側のスキルで `bin/tr-run` を実行し、Bash の道具がバックグラウンドに移った後も、対話のセッションで完了を待って結果を受け取れるか
