@@ -151,7 +151,7 @@ def test_published_at_without_timezone_fails_the_repo(limits):
     assert result.error is not None  # 追跡先がこれだけなので、情報源は失敗
 
 
-@pytest.mark.parametrize("tag", ["v" * 51, "あ" * 10, "v1 2"])
+@pytest.mark.parametrize("tag", ["v" * 51, "あ" * 10, "v1 2", "latest", "the"])
 def test_unusual_tag_is_not_a_meta_term(limits, tag):
     """長い・版の表記らしくないタグで D4 の一致の判定を外せないよう、meta_terms に入れない。"""
     body = json.dumps([release_json(tag_name=tag)]).encode()

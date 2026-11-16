@@ -711,3 +711,19 @@ def test_observation_counts_as_previous_day_record_for_feeds(host):
     assert host.observe()[0] == 0
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         assert fetch_recorded(conn, "rss:example", datetime(2026, 10, 23).date())
+
+
+def test_long_quote_is_excluded_by_the_configured_limit(host):
+    host.write_config(LIMITS + "\n[quote]\nmax_en = 5\n")  # しきい値を設定で下げる（D4）
+    host.ai = lambda data: {
+        "items": [entry("d1", 1, headline="新しいモデルの公開"), entry("d2", 2)]
+    }
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    out_dir = Path(summary["output_dir"])
+    validation = json.loads((out_dir / "validation.json").read_text())
+    assert validation["entries"] == 1
+    assert [x["item_ids"] for x in validation["excluded"]] == [["d1"]]
+    assert "上限 5" in validation["excluded"][0]["reason"]
+    assert ("verify", "excluded") in stages_of(out_dir / "log.jsonl")

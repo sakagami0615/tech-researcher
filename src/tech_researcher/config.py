@@ -1,6 +1,6 @@
 """設定ファイル（TOML）の読み込みと検証（D-20、structure.md 4章）。
 
-置くのは期間・情報源・急上昇のしきい値・last30days-skill の計画・上限値だけ。
+置くのは期間・情報源・急上昇のしきい値・last30days-skill の計画・上限値・D4 の N だけ。
 知らない項目や型の誤りはエラーにする。
 投稿先・Projects の指定・認証情報は worker.env に置くので、ここでは受け付けない。
 """
@@ -168,6 +168,19 @@ class Limits:
 
 
 @dataclass(frozen=True)
+class QuoteLimits:
+    """D4（長い引用の禁止）の、最長の共通部分文字列の長さの上限（D-07）。これを超えたら違反。
+
+    長さは、日本語の文字を2、それ以外を1と数える（初期値 200 は、日本語 100 文字・英語 200 文字）。
+    一次情報の本文と比べるときの値（primary_max_en）は、タイトル・抜粋のものと別に調整する。
+    初期値は PoC で調整する。
+    """
+
+    max_en: int = 200
+    primary_max_en: int = 200
+
+
+@dataclass(frozen=True)
 class Config:
     daily_period_days: int
     weekly_period_days: int
@@ -184,6 +197,7 @@ class Config:
     # 注目度の基準（metric → この値以上で急上昇。D-13）。書かなかった metric では判定しない
     attention_thresholds: dict[str, int]
     limits: Limits
+    quote: QuoteLimits = QuoteLimits()
 
 
 def load_config(path: Path) -> Config:
@@ -203,6 +217,7 @@ def parse_config(data: dict[str, Any]) -> Config:
     last30days = top.table("last30days", required=False)
     limits = top.table("limits")
     thresholds = top.table("attention_thresholds", required=False)
+    quote = top.table("quote", required=False)
     feeds = top.array_of_tables("feeds")
     top.done()
     topic, subqueries = _last30days(last30days)
@@ -220,6 +235,7 @@ def parse_config(data: dict[str, Any]) -> Config:
         subqueries=subqueries,
         attention_thresholds=_attention_thresholds(thresholds),
         limits=_limits(limits),
+        quote=_quote(quote),
     )
     if sources is not None:
         sources.done()
@@ -562,4 +578,18 @@ def _limits(t: _Table) -> Limits:
             f"limits.github_graphql_batch: {GRAPHQL_BATCH_MAX} 以下にする"
             f"（{result.github_graphql_batch}）"
         )
+    return result
+
+
+def _quote(t: _Table | None) -> QuoteLimits:
+    if t is None:
+        return QuoteLimits()
+    defaults = QuoteLimits()
+    result = QuoteLimits(
+        **{
+            name: t.int_at_least(name) if name in t.names() else getattr(defaults, name)
+            for name in ("max_en", "primary_max_en")
+        }
+    )
+    t.done()
     return result

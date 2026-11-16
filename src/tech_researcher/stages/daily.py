@@ -4,7 +4,7 @@
   agent に標準入力で渡し、構造化出力を agent-output.json に保存する
 - ③ は、agent に渡したコピーではなく、worker の collected.json から同じ入力を作り直して照合する
   （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落、D2・D3、
-  文字数と要点数を検査する。D4 は #21 で足す
+  文字数と要点数、D4 を検査する
 - 秘匿情報を検出したら Issue の本文を残さない（US-E7-05）。⑤ の直前の検査は ⑤ の Issue で足す
 - 不合格・実行エラーの本文（とその秘匿情報の検査）は #38 で足す。いまは不合格のとき issue.md・
   secret-scan.json を書かない
@@ -26,7 +26,7 @@ from tech_researcher.agent.daily import (
 )
 from tech_researcher.collect.records import Item
 from tech_researcher.collect.sources import source_names
-from tech_researcher.config import Config
+from tech_researcher.config import Config, QuoteLimits
 from tech_researcher.db.readonly import tentative_ids
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
@@ -35,6 +35,7 @@ from tech_researcher.render.daily import render_daily
 from tech_researcher.stages.collect import COLLECTED, load_collected
 from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check_daily_ids
 from tech_researcher.validate.period_event import check_period_events
+from tech_researcher.validate.quote import check_daily_quotes, meta_terms_by_id
 from tech_researcher.validate.secret_scan import SecretScanner
 from tech_researcher.validate.sources import check_daily_sources
 from tech_researcher.validate.text import check_daily_html, check_daily_lengths, check_daily_links
@@ -93,7 +94,7 @@ def run_verify(
         # D6(a)：スキーマに合わない出力全体が不合格（US-E7-02）。不合格の後に再生成はしない
         log.write("verify", "failure", error_category="invalid_output", detail=str(e))
         return _finish(run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[])
-    kept, excluded = _check_entries(entries, data, items)
+    kept, excluded = _check_entries(entries, data, items, config.quote)
     for category, x in excluded:
         log.write("verify", "excluded", error_category=category, detail=x.reason)
     # ID と理由には AI が返した文字列が入るので、マスクしてから残す（ログは RunLog がマスクする）
@@ -117,7 +118,10 @@ def run_verify(
 
 
 def _check_entries(
-    entries: list[DailyEntry], data: dict, items: Mapping[str, Item]
+    entries: list[DailyEntry],
+    data: dict,
+    items: Mapping[str, Item],
+    quote: QuoteLimits,
 ) -> tuple[list[DailyEntry], list[tuple[str, Excluded]]]:
     """項目単位の検査を順に行う。違反した項目は除外し、検査の分類と一緒に返す。
 
@@ -132,6 +136,7 @@ def _check_entries(
         ("forbidden_link", check_daily_links),  # D2
         ("forbidden_html", check_daily_html),  # D3
         ("too_long", check_daily_lengths),
+        ("long_quote", lambda e: check_daily_quotes(e, data, meta_terms_by_id(items), quote)),
         # 重複は最後に、ほかの検査をすべて通った項目の中で判定する（後の検査もこの前に足す）
         ("duplicate_id", check_daily_duplicates),
     ):
