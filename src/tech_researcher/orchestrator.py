@@ -619,7 +619,8 @@ def _analyze(job: Job) -> str | None:
     if result is not None:
         # 使われたモデル（structure.md 3.3）。runs への記録と前回との比較は #22 で足す
         models = ",".join(result.models) or "unknown"
-        job.log.write("analyze", "end", detail=f"model={models} turns={result.num_turns}")
+        turns = "unknown" if result.num_turns is None else result.num_turns
+        job.log.write("analyze", "end", detail=f"model={models} turns={turns}")
     else:
         job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
     return None
