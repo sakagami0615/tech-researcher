@@ -7,8 +7,8 @@
   実行ID・日時・検出の内容は出さない
 
 不合格の本文には、AI の出力の全文も、除外した項目の中身も出さない（件数だけを理由別に出す）。
-④ の文章は信頼できない入力として扱う。D2・D3 の検査は ⑤ の前に済んでいる前提だが、多重防御として
-違反があれば例外にし、本文には sanitize_text を通して入れる。識別子は付けない（3.2）。
+④ の文章は信頼できない入力として扱う。D2・D3・確度・発生した事象の文字数・空の欄に違反するときは、
+3.5 の定型にする（D-07）。本文には sanitize_text を通して入れる。識別子は付けない（3.2）。
 """
 
 import re
@@ -36,6 +36,13 @@ STAGES = {
 }
 SECRET_STAGES = ("validate", "post")  # 秘匿情報を検出しうる段階（3.6）
 CONFIDENCES = ("高", "中", "低")
+EVENT_LIMIT = 200  # 発生した事象の文字数の上限（3.3）。超えたら定型にする
+TARGETS = {  # 対策案の修正対象（data-model.md 4.4 の enum）
+    "prompt": "プロンプト",
+    "collect_config": "収集設定",
+    "code": "コード",
+    "environment": "環境",
+}
 MAX_EVIDENCE_LINES = 10  # 1ブロックの行数の上限（3.2）
 MAX_EVIDENCE_BLOCKS = 3
 _BACKTICKS = re.compile(r"`+")
@@ -53,6 +60,14 @@ SECRET_NOTICE = "秘匿情報の可能性がある文字列を検出したため
 
 
 @dataclass(frozen=True)
+class Countermeasure:
+    """対策案。target は TARGETS のキー（修正対象）。"""
+
+    target: str
+    text: str
+
+
+@dataclass(frozen=True)
 class Investigation:
     """④ の調査結果（D2・D3・D6(a) の検査を通ったもの）。evidence は select_evidence の結果。"""
 
@@ -60,7 +75,7 @@ class Investigation:
     cause: str
     confidence: str  # CONFIDENCES のどれか
     contents: Sequence[str]
-    measures: Sequence[str]
+    measures: Sequence[Countermeasure]
     evidence: Sequence[Sequence[str]] = ()
 
 
@@ -135,6 +150,7 @@ def rejected_report(
         f"[不合格]{_cadence(target)} {_target_label(target)}のレポート（{_run_text(run_at)} 実行）"
     )
     labels = ("type:rejected", f"cadence:{target.cadence}")
+    _check_aware(run_at)
     investigation = _usable(investigation)
     failed_text = "、".join(map(plain_text, failed))
     if investigation is None:
@@ -225,7 +241,13 @@ def _target_label(target: Target) -> str:
 
 
 def _run_text(run_at: datetime) -> str:
+    _check_aware(run_at)
     return f"{run_at.astimezone(JST):%Y-%m-%d %H:%M}"
+
+
+def _check_aware(run_at: datetime) -> None:
+    if run_at.tzinfo is None:
+        raise ValueError("run_at にタイムゾーンがない")
 
 
 def _stage(stage: str) -> str:
@@ -271,9 +293,13 @@ def _footer(text: str) -> str:
 
 def _usable(inv: Investigation | None) -> Investigation | None:
     """D2・D3・確度の形に違反する ④ の出力は、AI を利用できないときの定型にする（D-07、3.5）。"""
-    if inv is None or inv.confidence not in CONFIDENCES:
+    if inv is None or inv.confidence not in CONFIDENCES or len(inv.event) > EVENT_LIMIT:
         return None
-    texts = (inv.event, inv.cause, *inv.contents, *inv.measures)
+    if not (inv.event.strip() and inv.cause.strip() and inv.contents and inv.measures):
+        return None
+    if any(m.target not in TARGETS for m in inv.measures):
+        return None
+    texts = (inv.event, inv.cause, *inv.contents, *(m.text for m in inv.measures))
     return None if any(text_violation(t) for t in texts) else inv
 
 
@@ -289,9 +315,13 @@ def _investigation(inv: Investigation) -> str:
         "### 発生した事象\n\n" + sanitize_text(inv.event),
         "### 推定される原因と根拠\n\n" + "\n\n".join(cause),
         "### 調査内容\n\n" + _bullets(inv.contents),
-        "### 対策案\n\n" + _bullets(inv.measures),
+        "### 対策案\n\n" + _measures(inv.measures),
     ]
     return "\n\n".join(parts)
+
+
+def _measures(measures: Sequence[Countermeasure]) -> str:
+    return "\n".join(f"- **{TARGETS[m.target]}**：{sanitize_text(m.text)}" for m in measures)
 
 
 def _bullets(texts: Sequence[str]) -> str:

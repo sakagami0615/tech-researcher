@@ -8,6 +8,7 @@ from tech_researcher.render.failure import (
     FOOTER_ERROR,
     FOOTER_REJECTED,
     NO_INVESTIGATION,
+    Countermeasure,
     Counts,
     Investigation,
     SourceResult,
@@ -29,7 +30,7 @@ INV = Investigation(
     "DNS の不具合の可能性が高い。",
     "高",
     ("収集段階のログ", "直近7日の履歴"),
-    ("DNS 設定を確認する",),
+    (Countermeasure("environment", "DNS 設定を確認する"),),
     (("06:00:12 collect error=dns",),),
 )
 
@@ -154,12 +155,12 @@ def test_investigation_text_is_sanitized():
         "# 見出し\n**偽**",
         "中",
         ("owner/repo#5",),
-        ("- 項目",),
+        (Countermeasure("code", "- 項目"),),
     )
     body = run_error(inv).body
     assert "`@octocat`" in body and "`#12`" in body and "`owner/repo#5`" in body
     assert "\\# 見出し" in body and "\\*\\*偽\\*\\*" in body
-    assert "- \\- 項目" in body
+    assert "- **コード**：\\- 項目" in body
 
 
 @pytest.mark.parametrize(
@@ -175,9 +176,9 @@ def test_investigation_confidence_and_evidence_limits():
     assert run_error(Investigation("e", "c", "不明", (), ())).body == run_error(None).body
     too_long = (tuple(f"l{i}" for i in range(11)),)
     with pytest.raises(ValueError):
-        run_error(Investigation("e", "c", "高", (), (), too_long))
+        run_error(_inv(evidence=too_long))
     with pytest.raises(ValueError):
-        run_error(Investigation("e", "c", "高", (), (), (("a",),) * 4))
+        run_error(_inv(evidence=(("a",),) * 4))
 
 
 def test_code_fence_longer_than_longest_backtick_run():
@@ -193,7 +194,12 @@ def test_code_fence_splits_embedded_newlines():
 
 def test_evidence_cannot_close_fence_when_rendered():
     inv = Investigation(
-        "e", "c", "高", ("x",), ("y",), (("ok", "``` # 見出し", "<b>@octocat</b>"),)
+        "e",
+        "c",
+        "高",
+        ("x",),
+        (Countermeasure("code", "y"),),
+        (("ok", "``` # 見出し", "<b>@octocat</b>"),),
     )
     html = cmarkgfm.github_flavored_markdown_to_html(run_error(inv).body)
     assert '<pre lang="text"><code>' in html
@@ -222,7 +228,7 @@ def test_rendered_html_tables_and_details():
 
 def test_evidence_limit_counts_embedded_newlines():
     with pytest.raises(ValueError):
-        run_error(Investigation("e", "c", "高", (), (), (("a\n" * 15,),)))
+        run_error(_inv(evidence=(("a\n" * 15,),)))
     blocks = select_evidence({"L1": "a\n" * 15}, ["L1"])
     assert [len(b) for b in blocks] == [10, 5]
 
@@ -251,9 +257,66 @@ def test_sanitized_reference_forms_in_investigation():
         "> 引用 | 表",
         "低",
         ("1. 番号",),
-        ("x",),
+        (Countermeasure("prompt", "x"),),
     )
     body = run_error(inv).body
     for ref in ("`GH-34`", "`abcdef1`", "`owner/repo@abcdef1`", "`@org/team`"):
         assert ref in body
     assert "\\> 引用 \\| 表" in body and "1\\. 番号" in body
+
+
+def test_countermeasure_shows_target():
+    inv = Investigation(
+        "e",
+        "c",
+        "高",
+        ("x",),
+        (
+            Countermeasure("prompt", "a"),
+            Countermeasure("collect_config", "b"),
+            Countermeasure("code", "c"),
+            Countermeasure("environment", "d"),
+        ),
+    )
+    body = run_error(inv).body
+    for line in ("- **プロンプト**：a", "- **収集設定**：b", "- **コード**：c", "- **環境**：d"):
+        assert line in body
+
+
+def _inv(**kw):
+    base = {
+        "event": "e",
+        "cause": "c",
+        "confidence": "高",
+        "contents": ("x",),
+        "measures": (Countermeasure("code", "y"),),
+    }
+    return Investigation(**{**base, **kw})
+
+
+def test_event_length_boundary():
+    assert run_error(_inv(event="あ" * 200)).body != run_error(None).body
+    assert run_error(_inv(event="あ" * 201)).body == run_error(None).body
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"contents": ()},
+        {"measures": ()},
+        {"event": " "},
+        {"cause": ""},
+        {"measures": (Countermeasure("unknown", "y"),)},
+    ],
+)
+def test_incomplete_investigation_falls_back(kw):
+    assert run_error(_inv(**kw)).body == run_error(None).body
+    assert rejected(_inv(**kw)).body == rejected(None).body
+
+
+def test_naive_run_at_is_refused():
+    naive = datetime(2026, 10, 24, 6, 0)
+    with pytest.raises(ValueError):
+        run_error_report(DAILY, RUN, naive, "collect", "x", (0, 1), [], None)
+    with pytest.raises(ValueError):
+        rejected_report(DAILY, RUN, naive, ["x"], COUNTS, [], None)
