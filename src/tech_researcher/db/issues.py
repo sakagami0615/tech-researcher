@@ -56,7 +56,7 @@ def record_issue(
 
     created は repo・number が要り、Projects の登録待ち（pending）で始める。それ以外は持たない。
     作った Issue（created）の行は、止めた・失敗した記録に戻さない（作った後の再試行で
-    上書きしないため）。同じ番号を書き直したときは Projects の登録の状態を保つ。
+    上書きしないため）。同じ番号を書き直したときは、作成時刻と Projects の登録の状態を保つ。
 
     レポート Issue（report）の created は、同じ（cadence, target）の記録が別の実行にあれば、
     その行の番号を置き換える（転送先の番号、410・404 の後に作り直した番号。
@@ -78,11 +78,12 @@ def record_issue(
     with transaction(conn):
         if kind == "report" and state == "created":
             cursor = conn.execute(
-                "UPDATE issues SET repo = ?, number = ?, created_at = ?,"
+                "UPDATE issues SET repo = ?, number = ?,"
+                " created_at = CASE WHEN repo IS ? AND number IS ? THEN created_at ELSE ? END,"
                 " projects_state = CASE WHEN repo IS ? AND number IS ? THEN projects_state"
                 " ELSE 'pending' END WHERE kind = 'report' AND state = 'created'"
                 " AND cadence = ? AND target = ? AND run_id != ?",
-                (repo, number, created_at, repo, number, cadence, day, run_id),
+                (repo, number, repo, number, created_at, repo, number, cadence, day, run_id),
             )
             if cursor.rowcount:
                 return
@@ -91,7 +92,10 @@ def record_issue(
             " projects_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (run_id, kind) DO UPDATE SET cadence = excluded.cadence,"
             " target = excluded.target, state = excluded.state, repo = excluded.repo,"
-            " number = excluded.number, created_at = excluded.created_at,"
+            " number = excluded.number,"
+            " created_at = CASE WHEN issues.state = 'created' AND issues.repo IS excluded.repo"
+            " AND issues.number IS excluded.number THEN issues.created_at"
+            " ELSE excluded.created_at END,"
             " projects_state = CASE WHEN excluded.state != 'created' THEN NULL"
             " WHEN issues.state = 'created' AND issues.repo IS excluded.repo"
             " AND issues.number IS excluded.number THEN issues.projects_state"
@@ -151,11 +155,12 @@ def _finish_projects(conn: sqlite3.Connection, issue_id: int, run_id: str, state
     check_writable_run_id(run_id)
     cursor = conn.execute(
         "UPDATE issues SET projects_state = ?, projects_attempts = projects_attempts + 1,"
-        " projects_last_run_id = ? WHERE id = ? AND state = 'created'",
+        " projects_last_run_id = ? WHERE id = ? AND state = 'created'"
+        " AND projects_state = 'pending'",
         (state, run_id, issue_id),
     )
     if cursor.rowcount != 1:
-        raise LookupError(f"作成済みの Issue の記録がない: {issue_id}")
+        raise LookupError(f"登録待ちの Issue の記録がない: {issue_id}")
 
 
 def record_projects_failure(

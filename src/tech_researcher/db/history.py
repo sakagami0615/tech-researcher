@@ -10,13 +10,15 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-# 作成済みの日次レポート Issue に掲載した項目（issues i、report_entries e、items it）
+# 作成済みの日次レポート Issue に掲載した項目（issues i、report_entries e、items it）。
+# items は主キーで引く（'i' || item_id と比べると全件を走査し、履歴が増えると遅くなる）。
+# 掲載した項目の ID は `i[1-9]\d*` の形に限るので、先頭の i を除いた数が主キーになる
 _PUBLISHED_DAILY = (
     "FROM issues i"
     " JOIN report_entries e ON e.run_id = i.run_id AND e.section = 'daily_item'"
     " AND e.status = 'published'"
     " JOIN json_each(e.item_ids_json) j"
-    " JOIN items it ON 'i' || it.item_id = j.value"
+    " JOIN items it ON it.item_id = CAST(substr(j.value, 2) AS INTEGER)"
     " WHERE i.kind = 'report' AND i.state = 'created' AND i.cadence = 'daily'"
 )
 SPIKE_EVENTS = ("attention_spike", "new_repo")

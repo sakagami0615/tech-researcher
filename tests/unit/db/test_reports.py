@@ -4,8 +4,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from tech_researcher.db import history
 from tech_researcher.db.history import featured_urls, next_theme_id, past_themes, shown_urls
 from tech_researcher.db.issues import record_issue
+from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.reports import EntryRow, ReportRow, save_report
 from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import open_db
@@ -172,6 +174,15 @@ def weekly_report(*entries):
         lambda: EntryRow("watch", "published", ("i1",), theme_id="T0001"),
         lambda: EntryRow("other", "excluded", exclusion_reasons=("x",)),
         lambda: ReportRow("daily", DAY, "passed", {}, {}),  # 本文がない
+        lambda: ReportRow(  # 不合格（秘匿情報の検出を含む）の本文は保存しない
+            "daily",
+            DAY,
+            "rejected",
+            {},
+            {},
+            rejected_checks=("secret_detected",),
+            body_markdown="b",
+        ),
         lambda: ReportRow("daily", DAY, "rejected", {}, {}),  # 検査の名前がない
         lambda: ReportRow(
             "daily", DAY, "passed", {}, {}, rejected_checks=("x",), body_markdown="b"
@@ -291,3 +302,31 @@ def test_next_theme_id_counts_unpublished_weeks_too(conn):
         conn, "20261012-070000-0001", date(2026, 10, 12), "T0007", "a", "rising", state="failed"
     )
     assert next_theme_id(conn) == "T0008"
+
+
+def test_history_join_uses_the_items_primary_key(conn):
+    sql = f"EXPLAIN QUERY PLAN SELECT it.canonical_url {history._PUBLISHED_DAILY}"
+    plan = " ".join(row[3] for row in conn.execute(sql))
+    assert "SCAN it" not in plan
+
+
+def test_leading_zero_id_is_not_published(conn):
+    a = add_item(conn, "https://e.com/a")
+    with pytest.raises(LookupError, match="形でない"):
+        save_report(conn, RUN, passed(daily_entry("i0" + a[1:])))
+
+
+def test_history_queries_work_on_a_readonly_connection(conn, tmp_path):
+    publish(conn, RUN, DAY, "https://e.com/spike", SPIKE)
+    ro = open_readonly(tmp_path / "tech-researcher.sqlite3")
+    assert featured_urls(ro) == {"https://e.com/spike"}
+    assert shown_urls(ro, DAY) == {"https://e.com/spike"}
+    assert past_themes(ro, date(2026, 11, 9), 4) == []
+    assert next_theme_id(ro) == "T0001"
+    ro.close()
+
+
+def test_json_array_columns_are_checked(conn):
+    save_report(conn, RUN, passed())
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE reports SET rejected_checks = '{}' WHERE run_id = ?", (RUN,))

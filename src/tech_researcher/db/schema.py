@@ -117,7 +117,8 @@ MIGRATIONS: tuple[str, ...] = (
         cadence TEXT NOT NULL,
         target TEXT NOT NULL,
         status TEXT NOT NULL,
-        rejected_checks TEXT NOT NULL CHECK (json_valid(rejected_checks)),
+        rejected_checks TEXT NOT NULL
+            CHECK (json_valid(rejected_checks) AND json_type(rejected_checks) = 'array'),
         counts_json TEXT NOT NULL CHECK (json_valid(counts_json)),
         verification_json TEXT NOT NULL CHECK (json_valid(verification_json)),
         ai_output_json TEXT,
@@ -129,7 +130,8 @@ MIGRATIONS: tuple[str, ...] = (
         entry_no INTEGER NOT NULL,
         section TEXT NOT NULL,
         status TEXT NOT NULL,
-        exclusion_reasons TEXT NOT NULL CHECK (json_valid(exclusion_reasons)),
+        exclusion_reasons TEXT NOT NULL
+            CHECK (json_valid(exclusion_reasons) AND json_type(exclusion_reasons) = 'array'),
         display_no INTEGER,
         theme_id TEXT,
         item_ids_json TEXT NOT NULL

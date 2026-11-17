@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -190,3 +190,41 @@ def test_no_github_state_is_stored(conn):
         "projects_last_run_id",
     }
     assert issues.STATES == {"created", "blocked_secret", "failed"}
+
+
+def test_same_run_new_number_requeues_and_keeps_one_row(conn):
+    created(conn)
+    (row,) = pending_projects(conn)
+    mark_projects_issue_missing(conn, row.id, RUN)
+    later = AT + timedelta(hours=1)
+    record_issue(conn, RUN, "report", "daily", DAY, "created", later, repo="o/r", number=12)
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.number, row.projects_state, count(conn)) == (12, "pending", 1)
+
+
+def test_rewriting_same_number_keeps_created_at(conn):
+    created(conn)
+    first = find_report_issue(conn, "daily", DAY).created_at
+    for run, hours in ((RETRY, 1), (RUN, 2)):
+        at = AT + timedelta(hours=hours)
+        record_issue(conn, run, "report", "daily", DAY, "created", at, repo="o/r", number=11)
+    assert find_report_issue(conn, "daily", DAY).created_at == first
+
+
+def test_created_is_not_downgraded_to_blocked_secret(conn):
+    created(conn)
+    record_issue(conn, RUN, "report", "daily", DAY, "blocked_secret", AT)
+    assert find_report_issue(conn, "daily", DAY).state == "created"
+
+
+def test_projects_marks_need_pending_and_writable_run(conn):
+    created(conn)
+    (row,) = pending_projects(conn)
+    mark_projects_issue_missing(conn, row.id, RUN)
+    with pytest.raises(LookupError):
+        mark_projects_done(conn, row.id, NEXT)  # 済んだ行を書き換えない
+    for call in (mark_projects_done, mark_projects_issue_missing):
+        with pytest.raises(ValueError, match="ドライラン"):
+            call(conn, row.id, "dry-x")
+    with pytest.raises(ValueError, match="ドライラン"):
+        record_projects_failure(conn, row.id, "dry-x", "e")

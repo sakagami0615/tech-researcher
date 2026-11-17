@@ -24,7 +24,7 @@ ENTRY_STATUSES = frozenset({"published", "excluded"})
 # invalid_source・missing_period_event・duplicate_id・invalid_output・all_excluded など）。
 # 検査が増えるたびにここを直さなくてよいよう、名前の形だけを確かめる
 _NAME = re.compile(r"[a-z][a-z0-9_]*")
-_ITEM_ID = re.compile(r"i(\d+)")
+_ITEM_ID = re.compile(r"i([1-9]\d*)")
 _THEME_ID = re.compile(r"T\d{4,}")
 
 
@@ -98,8 +98,8 @@ class ReportRow:
             raise ValueError("rejected_checks は不合格（rejected）のときだけ付ける")
         for check in self.rejected_checks:
             _check_name(check)
-        if self.status == "passed" and not self.body_markdown:
-            raise ValueError("合格には本文（body_markdown）が要る")
+        if (self.status == "passed") != bool(self.body_markdown):
+            raise ValueError("本文（body_markdown）は合格のときだけ、必ず付ける")
         allowed = DAILY_SECTIONS if self.cadence == "daily" else WEEKLY_SECTIONS
         if any(e.section not in allowed for e in self.entries):
             raise ValueError(f"{self.cadence} に使えない section がある")
