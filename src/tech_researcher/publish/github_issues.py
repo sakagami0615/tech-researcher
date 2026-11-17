@@ -178,6 +178,7 @@ class IssueReader:
             match is None
             or not GITHUB_REPO_NAME.fullmatch(new_repo)
             or not (int(match[2]) == data["number"] == int(url.rsplit("/", 1)[1]))
+            or not _same_repo(url, new_repo, data.get("repository_url"))
         ):
             raise _error(url, "invalid_response", None)
         return IssueLookup(IssueRef(new_repo, data["number"]), transferred=True)
@@ -213,7 +214,7 @@ class IssueReader:
                 names = _label_names(item.get("labels"))
                 if names is None:
                     raise _error(url, "invalid_response", None)
-                if not {"type:report", f"cadence:{cadence}"} <= names:
+                if not {"type:report", f"cadence:{cadence}".casefold()} <= names:
                     continue  # ラベルが付いていない（外された）ものは候補にしない
                 body = item.get("body")
                 marker = parse_marker(body if isinstance(body, str) else None)
@@ -226,6 +227,20 @@ class IssueReader:
         return self._fetch(url, self._limits, headers=self._headers, follow_redirects=False)
 
 
+def _same_repo(url: str, repo: str, repository_url) -> bool:
+    """html_url の repo が、Location（`/repos/{repo}/issues/N` の形のとき）と応答の repository_url
+    （あるとき）の repo と一致するか。大文字・小文字は区別しない。"""
+    path = url.removeprefix(API_ROOT)
+    if path.startswith("/repos/") and "/".join(path.split("/")[2:4]).casefold() != repo.casefold():
+        return False
+    if repository_url is not None and (
+        not isinstance(repository_url, str)
+        or repository_url.casefold() != f"{API_ROOT}/repos/{repo}".casefold()
+    ):
+        return False
+    return True
+
+
 def _label_names(labels) -> set[str] | None:
     """応答の labels のラベル名。形が壊れていれば None。"""
     if not isinstance(labels, list):
@@ -234,7 +249,7 @@ def _label_names(labels) -> set[str] | None:
     for label in labels:
         if not isinstance(label, dict) or not isinstance(label.get("name"), str):
             return None
-        names.add(label["name"])
+        names.add(label["name"].casefold())
     return names
 
 

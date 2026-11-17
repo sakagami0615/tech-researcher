@@ -42,6 +42,9 @@ class Existing:
 
 @dataclass(frozen=True)
 class Create:
+    """作る。作った後は、呼び出し側が record_issue（replaces はこの値）と record_issue_repo
+    （投稿先の記録。db/meta.py）を呼ぶ。"""
+
     replaces: str | None = None
 
 
