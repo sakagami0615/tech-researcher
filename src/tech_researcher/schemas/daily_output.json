@@ -1,5 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "日次 ② 評価・要約の出力（data-model.md 4.2）",
   "type": "object",
   "additionalProperties": false,

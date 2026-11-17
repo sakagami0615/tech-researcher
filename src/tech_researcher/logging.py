@@ -18,8 +18,20 @@ from tech_researcher.validate.secret_scan import SecretScanner
 CADENCES = frozenset({"daily", "weekly"})
 # job は実行全体の開始・終了に使う。ほかは D-04 の ① 〜 ⑤（data-model.md の failed_stage と同じ）
 STAGES = frozenset({"job", "collect", "analyze", "verify", "investigate", "post"})
+# usage は ② ④ の AI の1回の呼び出しの使用量・所要時間（agent/invoke.py の AgentUsage）、warning は
+# 失敗ではないが運用者に知らせること（使われたモデルが前回の本番から変わったなど）
 EVENTS = frozenset(
-    {"start", "end", "retry", "failure", "source_result", "excluded", "secret_detected"}
+    {
+        "start",
+        "end",
+        "retry",
+        "failure",
+        "source_result",
+        "excluded",
+        "secret_detected",
+        "usage",
+        "warning",
+    }
 )
 # Issue や ④ の入力に使ってよい項目（許可リスト）。detail・exception は外部由来の文を含みうる
 ISSUE_FIELDS = frozenset(

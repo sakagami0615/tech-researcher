@@ -19,9 +19,10 @@ ITEM = {
 }
 
 # スキーマに使ってよいキーワード（型・必須・enum・null の可否・追加プロパティの禁止）。
-# ほかのキーワード（minLength・pattern・format など）が入ったら失敗する
+# ほかのキーワード（minLength・pattern・format など）が入ったら失敗する。`$schema` も入れない
+# （Claude Code 2.1.311 の --json-schema は draft 2020-12 の `$schema` を受け付けず、起動の時点で
+# 止まる。トークンなしの実行で確認。検査の側は Draft202012Validator を名指しで使う）
 ALLOWED_KEYWORDS = {
-    "$schema",
     "title",
     "type",
     "properties",

@@ -2,7 +2,7 @@
 # 統括スクリプトが `docker compose run --rm -T agent agent-run <スキル名> -p …` で起動する
 # （agent/invoke.py）。agent-run はスキルがイメージにあることを確かめてから claude を動かす。
 # イメージに入れるのは Claude Code 本体と内側のスキルだけ。src/・config/・third_party/ と実行データは
-# 入れない。内側のスキル（agent/skills/。中身は #22 で足す）は、作業ディレクトリの .claude/skills/ に
+# 入れない。内側のスキル（agent/skills/）は、作業ディレクトリの .claude/skills/ に
 # 置く（プロンプトの先頭の /スキル名 で展開される。F15。コンテナでの読まれ方は 3.8 の5で確かめる）。
 #
 # ベースイメージはダイジェストで固定する（タグの付け替えで中身が変わらないように）。版を上げるときは
