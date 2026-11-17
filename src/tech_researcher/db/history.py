@@ -93,9 +93,12 @@ def past_themes(conn: sqlite3.Connection, target: date, weeks: int) -> list[Past
 
 
 def next_theme_id(conn: sqlite3.Connection) -> str:
-    """新しいテーマの番号（T0001 から。3.6）。保存した最大の番号の次（不合格の週も数える）。"""
+    """新しいテーマの番号（T0001 から。3.6）。掲載したテーマの最大の番号の次。
+
+    不合格の週の番号も数える。除外した項目で AI が返した値は数えない。
+    """
     (last,) = conn.execute(
         "SELECT max(CAST(substr(theme_id, 2) AS INTEGER)) FROM report_entries"
-        " WHERE theme_id IS NOT NULL"
+        " WHERE theme_id IS NOT NULL AND status = 'published'"
     ).fetchone()
     return f"T{(last or 0) + 1:04d}"

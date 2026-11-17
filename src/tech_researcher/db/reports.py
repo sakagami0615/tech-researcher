@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 
-from tech_researcher.db.runs import CADENCES, check_writable_run_id
+from tech_researcher.db.runs import CADENCES, check_run_target, check_writable_run_id
 from tech_researcher.db.schema import transaction
 
 REPORT_STATUSES = frozenset({"passed", "rejected"})
@@ -34,6 +34,8 @@ class EntryRow:
 
     item_ids・past_ids は AI が選んだ ID。掲載した項目（published）は items にある ID に限る。
     除外した項目は、存在しない ID を返したことが理由でありうるので、そのまま残す。
+    theme_id は掲載したテーマの、コードが確かめた番号だけ。除外したテーマで AI が返した
+    値は形が不正でありうるので、payload（例：ai_theme_id）に入れる。
     """
 
     section: str
@@ -60,13 +62,16 @@ class EntryRow:
         if self.display_no is not None and self.display_no < 1:
             raise ValueError("display_no は 1 以上にする")
         if self.theme_id is not None and (
-            self.section != "theme" or not _THEME_ID.fullmatch(self.theme_id)
+            not published or self.section != "theme" or not _THEME_ID.fullmatch(self.theme_id)
         ):
-            raise ValueError(f"theme_id はテーマに T0007 の形で付ける: {self.theme_id}")
+            raise ValueError(
+                "theme_id は、掲載したテーマに T0007 の形で付ける"
+                f"（除外した項目の AI の値は payload に入れる）: {self.theme_id}"
+            )
         if published and self.section == "theme" and self.theme_id is None:
             raise ValueError("掲載したテーマには theme_id が要る")
-        if published and not self.item_ids:
-            raise ValueError("掲載した項目には item_ids が要る")
+        if published and not (self.item_ids or self.past_ids):
+            raise ValueError("掲載した項目には item_ids か past_ids が要る")
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,7 @@ def save_report(conn: sqlite3.Connection, run_id: str, report: ReportRow) -> Non
     """
     check_writable_run_id(run_id)
     with transaction(conn):
+        check_run_target(conn, run_id, report.cadence, report.target)
         _check_published_items(conn, report.entries)
         # 子から消す。reports は REPLACE にせず UPDATE にして、行を消し入れしない
         conn.execute("DELETE FROM report_entries WHERE run_id = ?", (run_id,))

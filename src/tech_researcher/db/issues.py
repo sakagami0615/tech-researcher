@@ -9,7 +9,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from tech_researcher.db.runs import CADENCES, check_writable_run_id, utc_text
+from tech_researcher.db.runs import CADENCES, check_run_target, check_writable_run_id, utc_text
 from tech_researcher.db.schema import transaction
 
 KINDS = frozenset({"report", "rejected", "run_error", "run_error_secret"})
@@ -51,16 +51,22 @@ def record_issue(
     *,
     repo: str | None = None,
     number: int | None = None,
+    replaces: str | None = None,
 ) -> None:
     """（実行、種別）の Issue の記録を書く。同じ（実行、種別）の行があれば更新する。
 
     created は repo・number が要り、Projects の登録待ち（pending）で始める。それ以外は持たない。
     作った Issue（created）の行は、止めた・失敗した記録に戻さない（作った後の再試行で
     上書きしないため）。同じ番号を書き直したときは、作成時刻と Projects の登録の状態を保つ。
+    番号が変わったときは、Projects の登録を pending に戻し、試行回数・失敗の記録も消す。
 
-    レポート Issue（report）の created は、同じ（cadence, target）の記録が別の実行にあれば、
-    その行の番号を置き換える（転送先の番号、410・404 の後に作り直した番号。
-    report-templates.md 4.3）。番号が変わったときは Projects の登録を pending に戻す。
+    レポート Issue（report）の created で、同じ（cadence, target）の作成済みの記録が別の実行に
+    あるときは、replaces で扱いを指定する（なければ一意制約のエラー。report-templates.md 4.3）。
+    - "transfer"：転送先の番号（301）。行の run_id は掲載した実行のまま、番号だけ置き換える
+    - "recreate"：410・404 の後に、この実行で作り直した番号。行の run_id をこの実行に付け替える
+      （「載せた」の導出が、本文を投稿した実行の項目を指すようにするため）
+
+    runs の行の cadence・target と一致しなければ書かない。
     中でトランザクションを始めるので、`transaction` の中からは呼べない。
     """
     check_writable_run_id(run_id)
@@ -74,32 +80,29 @@ def record_issue(
         raise ValueError("repo・number は created のときだけ、両方を付ける")
     if (repo is None) != (number is None):
         raise ValueError("repo と number は両方付けるか、両方付けない")
+    if replaces not in (None, "transfer", "recreate"):
+        raise ValueError(f"知らない replaces {replaces}")
+    if replaces and (kind != "report" or state != "created"):
+        raise ValueError("replaces は作成済みのレポート Issue だけに使う")
     day, created_at = target.isoformat(), utc_text(at)
     with transaction(conn):
-        if kind == "report" and state == "created":
-            cursor = conn.execute(
-                "UPDATE issues SET repo = ?, number = ?,"
-                " created_at = CASE WHEN repo IS ? AND number IS ? THEN created_at ELSE ? END,"
-                " projects_state = CASE WHEN repo IS ? AND number IS ? THEN projects_state"
-                " ELSE 'pending' END WHERE kind = 'report' AND state = 'created'"
-                " AND cadence = ? AND target = ? AND run_id != ?",
-                (repo, number, repo, number, created_at, repo, number, cadence, day, run_id),
-            )
-            if cursor.rowcount:
-                return
+        check_run_target(conn, run_id, cadence, target)
+        if replaces and _replace(conn, run_id, cadence, day, repo, number, created_at, replaces):
+            return
         conn.execute(
             "INSERT INTO issues (run_id, kind, cadence, target, state, repo, number, created_at,"
             " projects_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (run_id, kind) DO UPDATE SET cadence = excluded.cadence,"
             " target = excluded.target, state = excluded.state, repo = excluded.repo,"
             " number = excluded.number,"
-            " created_at = CASE WHEN issues.state = 'created' AND issues.repo IS excluded.repo"
-            " AND issues.number IS excluded.number THEN issues.created_at"
-            " ELSE excluded.created_at END,"
-            " projects_state = CASE WHEN excluded.state != 'created' THEN NULL"
-            " WHEN issues.state = 'created' AND issues.repo IS excluded.repo"
-            " AND issues.number IS excluded.number THEN issues.projects_state"
-            " ELSE 'pending' END"
+            f" created_at = CASE WHEN {_SAME} THEN issues.created_at ELSE excluded.created_at END,"
+            f" projects_state = CASE WHEN excluded.state != 'created' THEN NULL"
+            f" WHEN {_SAME} THEN issues.projects_state ELSE 'pending' END,"
+            f" projects_attempts = CASE WHEN {_SAME} THEN issues.projects_attempts ELSE 0 END,"
+            f" projects_last_error = CASE WHEN {_SAME} THEN issues.projects_last_error"
+            " ELSE NULL END,"
+            f" projects_last_run_id = CASE WHEN {_SAME} THEN issues.projects_last_run_id"
+            " ELSE NULL END"
             " WHERE NOT (issues.state = 'created' AND excluded.state != 'created')",
             (
                 run_id,
@@ -113,6 +116,51 @@ def record_issue(
                 "pending" if state == "created" else None,
             ),
         )
+
+
+# upsert で、書き直す番号が今の行と同じか（作成済みの行に同じ番号を書き直すとき）
+_SAME = (
+    "(issues.state = 'created' AND excluded.state = 'created'"
+    " AND issues.repo IS excluded.repo AND issues.number IS excluded.number)"
+)
+
+
+def _replace(
+    conn: sqlite3.Connection,
+    run_id: str,
+    cadence: str,
+    day: str,
+    repo: str | None,
+    number: int | None,
+    created_at: str,
+    replaces: str,
+) -> bool:
+    """別の実行にある、同じ対象の作成済みレポート Issue の行を置き換える。なければ False。"""
+    old = conn.execute(
+        "SELECT id, run_id, repo, number FROM issues WHERE kind = 'report' AND state = 'created'"
+        " AND cadence = ? AND target = ? AND run_id != ?",
+        (cadence, day, run_id),
+    ).fetchone()
+    if old is None:
+        return False
+    old_id, old_run, old_repo, old_number = old
+    new_run = run_id if replaces == "recreate" else old_run
+    if new_run != old_run:
+        # この実行の止めた・失敗した記録は、付け替える行に置き換える
+        conn.execute(
+            "DELETE FROM issues WHERE run_id = ? AND kind = 'report' AND state != 'created'",
+            (run_id,),
+        )
+    if (old_repo, old_number) == (repo, number):
+        conn.execute("UPDATE issues SET run_id = ? WHERE id = ?", (new_run, old_id))
+    else:
+        conn.execute(
+            "UPDATE issues SET run_id = ?, repo = ?, number = ?, created_at = ?,"
+            " projects_state = 'pending', projects_attempts = 0, projects_last_error = NULL,"
+            " projects_last_run_id = NULL WHERE id = ?",
+            (new_run, repo, number, created_at, old_id),
+        )
+    return True
 
 
 def find_issue(conn: sqlite3.Connection, run_id: str, kind: str) -> IssueRow | None:

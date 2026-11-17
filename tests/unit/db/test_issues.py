@@ -33,8 +33,10 @@ def conn(tmp_path):
     conn.close()
 
 
-def created(conn, run=RUN, number=11, kind="report"):
-    record_issue(conn, run, kind, "daily", DAY, "created", AT, repo="o/r", number=number)
+def created(conn, run=RUN, number=11, kind="report", replaces=None):
+    record_issue(
+        conn, run, kind, "daily", DAY, "created", AT, repo="o/r", number=number, replaces=replaces
+    )
 
 
 def count(conn):
@@ -72,9 +74,9 @@ def test_record_in_other_run_replaces_number_and_requeues_projects(conn):
     created(conn)
     (row,) = pending_projects(conn)
     mark_projects_done(conn, row.id, RUN)
-    created(conn, RETRY, number=11)  # 番号が同じなら登録の状態を保つ
+    created(conn, RETRY, number=11, replaces="transfer")  # 番号が同じなら登録の状態を保つ
     assert find_report_issue(conn, "daily", DAY).projects_state == "done"
-    created(conn, RETRY, number=99)
+    created(conn, RETRY, number=99, replaces="transfer")
     row = find_report_issue(conn, "daily", DAY)
     assert (row.run_id, row.number, row.projects_state) == (RUN, 99, "pending")
     assert count(conn) == 1
@@ -207,7 +209,18 @@ def test_rewriting_same_number_keeps_created_at(conn):
     first = find_report_issue(conn, "daily", DAY).created_at
     for run, hours in ((RETRY, 1), (RUN, 2)):
         at = AT + timedelta(hours=hours)
-        record_issue(conn, run, "report", "daily", DAY, "created", at, repo="o/r", number=11)
+        record_issue(
+            conn,
+            run,
+            "report",
+            "daily",
+            DAY,
+            "created",
+            at,
+            repo="o/r",
+            number=11,
+            replaces="transfer" if run == RETRY else None,
+        )
     assert find_report_issue(conn, "daily", DAY).created_at == first
 
 
@@ -228,3 +241,49 @@ def test_projects_marks_need_pending_and_writable_run(conn):
             call(conn, row.id, "dry-x")
     with pytest.raises(ValueError, match="ドライラン"):
         record_projects_failure(conn, row.id, "dry-x", "e")
+
+
+def test_recreate_moves_the_row_to_the_new_run_and_resets_projects(conn):
+    created(conn)
+    (row,) = pending_projects(conn)
+    record_projects_failure(conn, row.id, RUN, "rate_limited")
+    record_issue(conn, RETRY, "report", "daily", DAY, "failed", AT)  # この実行の先の失敗の記録
+    created(conn, RETRY, number=50, replaces="recreate")
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.run_id, row.number, row.projects_state) == (RETRY, 50, "pending")
+    assert (row.projects_attempts, row.projects_last_error, row.projects_last_run_id) == (
+        0,
+        None,
+        None,
+    )
+    assert count(conn) == 1
+
+
+def test_changing_the_number_in_the_same_run_clears_projects_records(conn):
+    created(conn)
+    (row,) = pending_projects(conn)
+    record_projects_failure(conn, row.id, RUN, "rate_limited")
+    created(conn, number=12)
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.number, row.projects_attempts, row.projects_last_error) == (12, 0, None)
+    created(conn, number=12)  # 同じ番号の書き直しでは消さない
+    record_projects_failure(conn, row.id, RUN, "x")
+    created(conn, number=12)
+    assert find_report_issue(conn, "daily", DAY).projects_attempts == 1
+
+
+def test_replaces_is_checked(conn):
+    with pytest.raises(ValueError):
+        created(conn, replaces="other")
+    with pytest.raises(ValueError):
+        record_issue(conn, RUN, "report", "daily", DAY, "failed", AT, replaces="transfer")
+
+
+def test_issue_must_match_the_run_target(conn):
+    with pytest.raises(ValueError, match="と違う"):
+        record_issue(conn, RUN, "report", "daily", date(2026, 10, 22), "failed", AT)
+    with pytest.raises(ValueError, match="と違う"):
+        record_issue(conn, RUN, "report", "weekly", DAY, "failed", AT)
+    with pytest.raises(LookupError):
+        record_issue(conn, "20261024-090000-ffff", "report", "daily", DAY, "failed", AT)
+    assert count(conn) == 0

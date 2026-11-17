@@ -8,7 +8,7 @@ runs は実行ごとに1行足し、同じ実行の中では同じ行を更新�
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from tech_researcher.logging import CADENCES
 from tech_researcher.logging import STAGES as LOG_STAGES
@@ -31,6 +31,18 @@ def utc_text(moment: datetime) -> str:
 def check_writable_run_id(run_id: str) -> None:
     if run_id.startswith(DRY_RUN_PREFIX):
         raise ValueError(f"ドライランは DB に書かない: {run_id}")
+
+
+def check_run_target(conn: sqlite3.Connection, run_id: str, cadence: str, target: date) -> None:
+    """runs の行の cadence・target が、書こうとする値と一致することを確かめる。
+
+    別の対象の実行に、レポートや Issue の記録を結び付けないため。トランザクションの中で呼ぶ。
+    """
+    row = conn.execute("SELECT cadence, target FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"runs に開始の記録がない: {run_id}")
+    if row != (cadence, target.isoformat()):
+        raise ValueError(f"実行 {run_id} の対象 {row} と違う: {(cadence, target.isoformat())}")
 
 
 def start_run(conn: sqlite3.Connection, run_id: str, target: Target, started_at: datetime) -> None:

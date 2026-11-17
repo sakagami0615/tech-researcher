@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -150,9 +150,44 @@ def test_dry_run_id_is_not_written(conn):
     assert rows(conn, "reports", "run_id") == []
 
 
-def test_report_requires_existing_run(conn):
-    with pytest.raises(sqlite3.IntegrityError):
+def test_report_requires_existing_run_with_the_same_target(conn):
+    with pytest.raises(LookupError):
         save_report(conn, "20261024-090000-ffff", passed())
+    other = ReportRow("daily", date(2026, 10, 22), "passed", {}, {}, body_markdown="b")
+    with pytest.raises(ValueError, match="と違う"):
+        save_report(conn, RUN, other)
+    with pytest.raises(ValueError, match="と違う"):
+        save_report(conn, RUN, ReportRow("weekly", DAY, "passed", {}, {}, body_markdown="b"))
+    assert rows(conn, "reports", "run_id") == []
+
+
+def test_excluded_theme_keeps_the_ai_value_in_payload_only(conn):
+    """形式外の theme_id を返した除外テーマも、保存できる。列には入れない。"""
+    start_run(conn, "20261026-070000-0001", weekly_target(date(2026, 10, 26), 1), AT)
+    excluded = EntryRow(
+        "theme",
+        "excluded",
+        ("i999",),
+        payload={"ai_theme_id": "T-奇妙な値"},
+        exclusion_reasons=("invalid_theme_id",),
+    )
+    report = ReportRow(
+        "weekly", date(2026, 10, 26), "rejected", {}, {}, [excluded], ("all_excluded",)
+    )
+    save_report(conn, "20261026-070000-0001", report)
+    (entry,) = rows(conn, "report_entries", "entry_no")
+    assert entry["theme_id"] is None
+    assert json.loads(entry["payload_json"]) == {"ai_theme_id": "T-奇妙な値"}
+    assert next_theme_id(conn) == "T0001"  # 架空の番号で採番が飛ばない
+    with pytest.raises(ValueError, match="theme_id"):
+        EntryRow("theme", "excluded", exclusion_reasons=("x",), theme_id="T0099")
+
+
+def test_published_theme_may_have_only_past_ids():
+    entry = EntryRow("theme", "published", past_ids=("i1",), theme_id="T0001")
+    assert entry.item_ids == ()
+    with pytest.raises(ValueError, match="item_ids か past_ids"):
+        EntryRow("theme", "published", theme_id="T0001")
 
 
 def weekly_report(*entries):
@@ -202,18 +237,32 @@ def test_display_no_is_unique_in_a_run(conn):
     assert rows(conn, "reports", "run_id") == []
 
 
-def publish(conn, run, day, url, events):
+def publish(conn, run, day, url, events, *, replaces=None):
+    if conn.execute("SELECT 1 FROM runs WHERE run_id = ?", (run,)).fetchone() is None:
+        start_run(conn, run, daily_target(day + timedelta(days=1), 1), AT)
     item = add_item(conn, url, events, target=day.isoformat())
     save_report(
         conn, run, ReportRow("daily", day, "passed", {}, {}, [daily_entry(item)], body_markdown="b")
     )
-    record_issue(conn, run, "report", "daily", day, "created", AT, repo="o/r", number=1)
+    number = 1 if replaces is None else 2
+    record_issue(
+        conn,
+        run,
+        "report",
+        "daily",
+        day,
+        "created",
+        AT,
+        repo="o/r",
+        number=number,
+        replaces=replaces,
+    )
     return item
 
 
 def test_featured_urls_come_from_created_report_issues_only(conn):
     publish(conn, RUN, DAY, "https://e.com/spike", SPIKE + PUBLISHED)
-    publish(conn, RETRY, date(2026, 10, 22), "https://e.com/plain", PUBLISHED)
+    publish(conn, "20261023-060000-0022", date(2026, 10, 22), "https://e.com/plain", PUBLISHED)
     assert featured_urls(conn) == {"https://e.com/spike"}
 
 
@@ -238,16 +287,40 @@ def test_featured_urls_exclude_unpublished_states(conn):
 
 def test_featured_urls_ignore_weekly_reports(conn):
     item = add_item(conn, "https://e.com/w", SPIKE, cadence="weekly")
-    save_report(conn, RUN, weekly_report(EntryRow("watch", "published", (item,))))
-    record_issue(conn, RUN, "report", "weekly", DAY, "created", AT, repo="o/r", number=1)
+    week, run = date(2026, 10, 19), "20261019-070000-0001"
+    start_run(conn, run, weekly_target(week, 1), AT)
+    report = ReportRow(
+        "weekly",
+        week,
+        "passed",
+        {},
+        {},
+        [EntryRow("watch", "published", (item,))],
+        body_markdown="b",
+    )
+    save_report(conn, run, report)
+    record_issue(conn, run, "report", "weekly", week, "created", AT, repo="o/r", number=1)
     assert featured_urls(conn) == set()
 
 
 def test_shown_urls_is_for_the_given_day(conn):
     publish(conn, RUN, DAY, "https://e.com/yesterday", PUBLISHED)
-    publish(conn, RETRY, date(2026, 10, 22), "https://e.com/older", PUBLISHED)
+    publish(conn, "20261023-060000-0022", date(2026, 10, 22), "https://e.com/older", PUBLISHED)
     assert shown_urls(conn, DAY) == {"https://e.com/yesterday"}
     assert shown_urls(conn, date(2026, 10, 21)) == set()
+
+
+def test_recreated_issue_follows_the_new_run_items(conn):
+    """410・404 の後に別の実行で作り直したら、履歴は新しい実行の項目から導く。"""
+    publish(conn, RUN, DAY, "https://e.com/old", PUBLISHED)
+    publish(conn, RETRY, DAY, "https://e.com/new", PUBLISHED, replaces="recreate")
+    assert shown_urls(conn, DAY) == {"https://e.com/new"}
+
+
+def test_transferred_issue_keeps_the_original_run_items(conn):
+    publish(conn, RUN, DAY, "https://e.com/old", PUBLISHED)
+    publish(conn, RETRY, DAY, "https://e.com/new", PUBLISHED, replaces="transfer")
+    assert shown_urls(conn, DAY) == {"https://e.com/old"}
 
 
 def weekly_run(
