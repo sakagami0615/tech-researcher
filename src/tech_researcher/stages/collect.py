@@ -9,8 +9,12 @@
 → Star 数の測定（GraphQL）。last30days-skill と候補集めはどちらも同じ収集用トークンで GitHub の
 Search を使うので、並行させずに順に動かす（候補集めの言及の経路は、それより前の情報源のレコードを
 使う）。GitHub Releases の接続は #40 で足す。
+Star 数の測定の後に、急上昇・新規のリポジトリを判定し（github_spikes）、載せる分の README を取る。
+まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
+に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
 外部由来の文（タイトル・本文）はファイルにだけ書き、戻り値（標準出力に出す要約）には件数と
 情報源の ID だけを入れる（structure.md 3.2）。
+前日の記録がなく判定しなかった急上昇は unjudged.json に書き、③ がヘッダの定型文にする。
 collected.json は load_collected で収集項目に戻せる（② の入力の用意と ③ の照合に使う）。
 """
 
@@ -18,13 +22,16 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.github_api import GitHubClient, GitHubError, collect_token
 from tech_researcher.collect.github_candidates import collect_candidates
+from tech_researcher.collect.github_releases import fetch_readmes, with_readme
+from tech_researcher.collect.github_spikes import judge_star_spikes, repo_url
 from tech_researcher.collect.github_stars import measure_stars
+from tech_researcher.collect.holds import hold_reasons
 from tech_researcher.collect.last30days import collect_last30days
 from tech_researcher.collect.period_filter import in_period
 from tech_researcher.collect.popularity import judge_feed_entries, mark_thresholds
@@ -39,8 +46,11 @@ from tech_researcher.collect.records import (
     SourceResult,
 )
 from tech_researcher.collect.rss import collect_feed, feed_source_id
+from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, Feed, Limits, Qiita
+from tech_researcher.db.history import featured_urls, shown_urls
 from tech_researcher.db.runs import record_source_fetch
+from tech_researcher.db.star_snapshots import load_star_snapshot
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Period, Target
 from tech_researcher.stages.collect_store import (
@@ -52,6 +62,9 @@ from tech_researcher.stages.collect_store import (
 )
 
 COLLECTED = "collected.json"
+UNJUDGED = "unjudged.json"  # 前日の記録がなく判定しなかった急上昇（ヘッダの定型文の元。1.6）
+FEED_JUDGMENT = "人気型フィードへの初登場"
+STAR_JUDGMENT = "GitHub の Star の急増"
 # last30days-skill を置いた場所（作業ディレクトリから。worker では /app、ホストではリポジトリ）
 LAST30DAYS_ROOT = Path("third_party/last30days")
 
@@ -78,6 +91,16 @@ class Collectors:
 
 
 DEFAULT_COLLECTORS = Collectors()
+
+
+@dataclass(frozen=True)
+class GitHubOutcome:
+    """候補集め・Star 数の測定・急上昇の判定の結果。records は急上昇・新規のレコード。"""
+
+    fetch: GitHubFetch
+    at: datetime
+    records: tuple[Record, ...] = ()
+    star_unjudged: bool = False
 
 
 def collect_failure(sources: int, failed: int) -> str | None:
@@ -114,6 +137,7 @@ def run_collect(
     if db is not None and write_db is None:
         raise ValueError("db を渡すときは write_db も渡す")
     write = bool(write_db) and db is not None
+    featured, shown = _history(db, target)
     log.write("collect", "start")
     limits = config.limits
     fetched: list[tuple[SourceResult, datetime]] = []
@@ -150,21 +174,25 @@ def run_collect(
     token = _token(collectors, log) if uses_github else None
     keep(*_collect_last30days(config, target, token, log, collectors))
     results = [r for r, _ in fetched]
-    github = _collect_github(config, target, results, token, db, write, log, collectors)
+    github = _collect_github(config, target, results, token, db, write, featured, log, collectors)
     if github is not None and write:
         assert db is not None
-        record_source_fetch(db, log.run_id, github[0].to_fetch(github[1]))
+        record_source_fetch(db, log.run_id, github.fetch.to_fetch(github.at))
     popular = {feed_source_id(f) for f in feeds if f.kind == "popular"}
     judged = judge_feed_entries(results, popular, target, db, write=write)
     records = mark_thresholds(judged.records, config.attention_thresholds)
-    items = [i for i in aggregate(records) if in_period(i, target)]
+    if github is not None:
+        records += github.records
+    observed = [i for i in aggregate(records) if in_period(i, target)]
+    holds = hold_reasons(observed, target, featured, shown)
+    items = [i for i in observed if i.url not in holds]
     if write:
         assert db is not None
-        counts = in_period_counts(items)
+        counts = in_period_counts(observed)
         fetches = [source_fetch(r, at, counts[r.source_id]) for r, at in fetched]
         if github is not None:
-            fetches.append(github[0].to_fetch(github[1]))
-        save_collect(db, log.run_id, target, fetches, items)
+            fetches.append(github.fetch.to_fetch(github.at, counts[GITHUB_REPOS_SOURCE_ID]))
+        save_collect(db, log.run_id, target, fetches, observed, holds)
     # 途中で止まっても壊れたファイルを残さないよう、一時ファイルに書いてから置き換える
     partial = run_dir / f"{COLLECTED}.partial"
     partial.write_text(
@@ -172,19 +200,58 @@ def run_collect(
         encoding="utf-8",
     )
     partial.replace(run_dir / COLLECTED)
+    unjudged_star = github is not None and github.star_unjudged
+    if target.cadence == "daily":
+        _write_unjudged(run_dir, judged.unjudged, unjudged_star)
     log.write("collect", "end", count=len(items))
     failed = [r.source_id for r in results if r.error]
     sources = len(results)
-    if github is not None and not github[0].skipped:
+    if github is not None and not github.fetch.skipped:
         sources += 1
-        if github[0].failed:
+        if github.fetch.failed:
             failed.append(GITHUB_REPOS_SOURCE_ID)
     return {
         "items": len(items),
         "sources": sources,
         "failed_sources": failed,
         "unjudged_feed_sources": list(judged.unjudged),
+        "unjudged_star": unjudged_star,
+        "held_items": len(holds),
     }
+
+
+def _history(db: sqlite3.Connection | None, target: Target) -> tuple[set[str], set[str]]:
+    """掲載の履歴（D-13・D-16）：（載せた急上昇・新規の URL、前日の日次レポートに載せた URL）。
+
+    日次だけで読む。DB がなければ（開発機のドライラン）、どちらもないものとして扱う。
+    featured は対象日より前の日次レポートだけを数える（同じ対象の再実行・ドライランで、その日に
+    載せた項目で自分を除外しないため）。
+    """
+    if db is None or target.cadence != "daily":
+        return set(), set()
+    return featured_urls(db, target.key), shown_urls(db, target.key - timedelta(days=1))
+
+
+def _write_unjudged(run_dir: Path, feeds: tuple[str, ...], star: bool) -> None:
+    text = json.dumps({"feed_sources": list(feeds), "github_stars": star})
+    partial = run_dir / f"{UNJUDGED}.partial"
+    partial.write_text(text, encoding="utf-8")
+    partial.replace(run_dir / UNJUDGED)
+
+
+def unjudged_notes(run_dir: Path, config: Config) -> list[tuple[str, list[str]]]:
+    """ヘッダの定型文の元：（判定の名前、記録がなかった情報源の表示名）。なければ空。"""
+    path = run_dir / UNJUDGED
+    if not path.is_file():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    names = source_names(config)
+    notes: list[tuple[str, list[str]]] = []
+    if data["feed_sources"]:
+        notes.append((FEED_JUDGMENT, [names.get(s, s) for s in data["feed_sources"]]))
+    if data["github_stars"]:
+        notes.append((STAR_JUDGMENT, []))
+    return notes
 
 
 def _token(collectors: Collectors, log: RunLog) -> str | None:
@@ -262,10 +329,11 @@ def _collect_github(
     token: str | None,
     db: sqlite3.Connection | None,
     write: bool,
+    featured: set[str],
     log: RunLog,
     collectors: Collectors,
-) -> tuple[GitHubFetch, datetime] | None:
-    """GitHub の候補を集め、Star 数を測る（D-13）。設定にないか無効なら None。
+) -> GitHubOutcome | None:
+    """GitHub の候補を集め、Star 数を測って急上昇・新規を判定する（D-13）。無効なら None。
 
     日次だけで行う（Star 数は日次だけ測る。週次は日次の増分を合計する。data-model.md 3.4）。
     言及の経路は、取得に成功した情報源のレコードから拾う。
@@ -273,6 +341,8 @@ def _collect_github(
     settings = config.github_repos
     if settings is None or not settings.enabled:
         return None
+    records: tuple[Record, ...] = ()
+    star_unjudged = False
     if target.cadence != "daily":
         github = GitHubFetch(0, 0, skipped=True)
     else:
@@ -288,11 +358,15 @@ def _collect_github(
                 write=write,
                 batch_size=config.limits.github_graphql_batch,
             )
+            previous = load_star_snapshot(db, target.key - timedelta(days=1)) if db else {}
+            spikes = judge_star_spikes(settings, target, stars, previous, featured)
+            records, readme_calls = _with_readmes(spikes.records, client, featured, log)
+            star_unjudged = spikes.star_unjudged
             # 最初の失敗は Search を先に見る
             failure = found if found.error is not None else stars
             github = GitHubFetch(
                 len(stars.snapshots),
-                found.search_attempts + stars.calls,
+                found.search_attempts + stars.calls + readme_calls,
                 failure.error,
                 failure.error_category,
             )
@@ -314,7 +388,34 @@ def _collect_github(
         attempt=github.attempts,
         detail="skipped" if github.skipped else github.error,
     )
-    return github, at
+    return GitHubOutcome(github, at, records, star_unjudged)
+
+
+def _with_readmes(
+    records: tuple[Record, ...], client: GitHubClient, featured: set[str], log: RunLog
+) -> tuple[tuple[Record, ...], int]:
+    """載せるリポジトリ（すでに載せたものを除く）の README を、一次情報の本文にする。
+
+    README の失敗は項目の補足が欠けるだけなので、止めずに続ける（失敗の分類は fetch_readmes が
+    ログに残す）。（README を足したレコード、使った要求の回数）を返す。
+    """
+    wanted = [
+        r for r in records if r.github is not None and repo_url(r.github.full_name) not in featured
+    ]
+    if not wanted:
+        return records, 0
+    try:
+        found = fetch_readmes([r.github.full_name for r in wanted if r.github], client)
+    except Exception as e:  # README は補足。想定外でも急上昇の判定は残す
+        log.write(
+            "collect", "failure", source=GITHUB_REPOS_SOURCE_ID, error_category=type(e).__name__
+        )
+        return records, 0
+    kept = []
+    for record in records:
+        readme = found.readmes.get(record.github.full_name) if record.github else None
+        kept.append(with_readme(record, readme) if readme is not None else record)
+    return tuple(kept), found.attempts
 
 
 def _json_value(value: object) -> str:

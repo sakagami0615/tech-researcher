@@ -121,6 +121,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
   - 日付だけの `published`（last30days-skill の HN は投稿の日付を公開日時として持つ。2.8）は、時刻まで分かる公開日時がほかの出典にあれば使わない。古い記事への新しい HN の投稿が、急上昇の条件を満たさずに残るのを防ぐ（D-13）
   - `threshold` の日時が日付だけの投稿（last30days-skill の HN）のものなら、`published` と同じく UTC の日付で判定する
   - `feed_entry` は、前日の取得記録と比べて判定した時点でその対象日の出来事なので、時刻で窓を判定しない。初登場を観測した取得（翌日 6:00 の実行）の時刻は、窓（対象日 6:00〜翌日 6:00）の終わりより後になるため（2.4 の表）
+  - `star_growth` と `new_repo` も、判定した時点でその対象日の出来事なので、時刻で窓を判定しない。測定の時刻（翌日 6:00 の実行）は、窓（対象日 6:00〜翌日 6:00）の終わりより後になるため（`feed_entry` と同じ）
   - `threshold` の日時は投稿日時（`posted_at`）とする。投稿日時のないレコードは判定しない。ただし last30days-skill の HN の日付だけの公開日時は投稿の日付なので使う
 
 ### 2.6 記事 ID・候補リンク（D-06）
@@ -261,7 +262,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
   - 書くのは期間で絞った後の収集項目。日次だけ書く。週次の items は、日次の items と合わせて作る週次の材料（3.8）を実装するときに書く
   - 代表のタイトル・抜粋・公開日時：時刻まで分かる公開日時を持つ出典、なければ日付だけの公開日時を持つ出典、なければ最初の出典から取る（期間の判定と同じ順。2.5）。代表のタイトル・抜粋が空なら、ほかの出典の最初の空でない値を使う。`posted_at` は出典の中で最も早い投稿日時。一次情報の本文のハッシュ・文字数は、本文を持つ最初の出典から作る
   - `kind`：`repo`（`github` を持つか、URL が `https://github.com/{owner}/{repo}` そのもの）→ `release`（出来事 `released` を持つか、GitHub のリリースのページ）→ `post`（GitHub の Issue・PR などの活動のページと、HN の投稿のページ）→ `article`（ほか）の順に当てる
-  - `hold_reason` は、急上昇・新規の掲載済みと前日の記事の除外（3.5）を足すまで空
+  - `hold_reason`（`src/tech_researcher/collect/holds.py`）：日次だけ、期間で絞った後の項目に付ける。`already_featured` は、判定の窓に入る出来事がすべて `attention_spike`・`new_repo` で、`canonical_url` が `featured_urls`（対象日より前の日次レポートだけを数える）にある項目。`shown_previous_day` は、窓に入る出来事がすべて日付だけの公開か日付だけの投稿での基準超え（last30days-skill の UTC の日付の近似）で、`canonical_url` が `shown_urls`（T−1）にある項目。両方に当たれば `already_featured`。この項目は collected.json に入れず（AI に渡さない）、items には `hold_reason` 付きで書く。週次は付けない
 
 #### feed_snapshots
 
@@ -368,6 +369,8 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 
 - 「載せた」は専用のテーブルに持たず、公開したレポートの項目から導く。D-13 の「数えない」場合（上限に入らない・AI が選ばない・項目の除外・不合格・ドライラン）が、`status='published'` かつ `state='created'` の条件で外れる。同じ事実を二重に持たないので食い違いが起きない
 - 実装での対応（`src/tech_researcher/db/history.py`）：「載せた」は `featured_urls`、前日の記事は `shown_urls`（T−1 を渡す）が、`canonical_url` の集合を返す。読むだけで、ドライランでも使える
+- 実装での対応（`collect/github_spikes.py`）：今日の測定（`star_snapshots` の T）と T−1 の行を比べる。新規（`new_repo`）は、作成日時が判定の窓の終わり（T+1 6:00）の `new_repo_days` 日以内で累計が `new_repo_stars` 以上のリポジトリ。前日の行はいらず、同じリポジトリに急上昇は足さない。急上昇（`star_growth`）は、新規でなく、T−1 の行があり、増分が `threshold_increase` 以上のもののうち、増分の大きい順に上位 `report_top_n` 件。すでに載せたリポジトリ（`featured_urls`）は上位の数に入れないが、観測として残すためレコードは足す（`hold_reason` で除外する）。レコードは `github_repos` の出典で、`published_at` に作成日時、`attention` に `stars_total`・`star_delta_24h`、`links` にリポジトリの URL、`meta_terms` に `owner/repo` を入れる。T−1 の行が1件もない日は、レポートのヘッダに定型文を出す（report-templates.md 1.6。`unjudged.json` を ① が書き、③ が読む）
+- 実装での対応（`stages/collect.py`）：急上昇・新規のリポジトリのうち、載せるもの（すでに載せたものを除く）の README を取り、そのレコードの `primary_text` に入れる。README の失敗は収集全体の失敗にしない
 - リポジトリを扱う記事と GitHub の項目は、どちらも `https://github.com/{owner}/{repo}` の正規化 URL で同じものとみなす。リポジトリ名の変更をまたいで同じものとはみなさない（変更後は別のものとして1回載りうる）
 
 ### 3.6 週次のテーマ

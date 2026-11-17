@@ -24,18 +24,22 @@ _PUBLISHED_DAILY = (
 SPIKE_EVENTS = ("attention_spike", "new_repo")
 
 
-def featured_urls(conn: sqlite3.Connection) -> set[str]:
+def featured_urls(conn: sqlite3.Connection, before: date | None = None) -> set[str]:
     """急上昇・新規として載せた項目の canonical_url（D-13 の「載せた」）。
 
     掲載の根拠の順位によらず、events に attention_spike・new_repo を持つ項目を数える。
     今日の項目の canonical_url がこの集合にあれば、急上昇・新規として再び載せない。
+    before を渡すと、対象日がそれより前の日次レポートだけを数える（同じ対象の再実行・ドライランで、
+    その日に載せた項目で自分を除外しないため）。
     """
     marks = ", ".join("?" * len(SPIKE_EVENTS))
+    limit = "" if before is None else " AND i.target < ?"
+    args = (*(() if before is None else (before.isoformat(),)), *SPIKE_EVENTS)
     rows = conn.execute(
-        f"SELECT DISTINCT it.canonical_url {_PUBLISHED_DAILY}"
+        f"SELECT DISTINCT it.canonical_url {_PUBLISHED_DAILY}{limit}"
         " AND EXISTS (SELECT 1 FROM json_each(it.events_json) ev"
         f" WHERE json_extract(ev.value, '$.type') IN ({marks}))",
-        SPIKE_EVENTS,
+        args,
     )
     return {r[0] for r in rows}
 

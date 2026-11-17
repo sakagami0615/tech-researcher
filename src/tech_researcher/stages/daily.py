@@ -10,8 +10,9 @@
   secret-scan.json を書かない
 
 項目の ID は、DB への保存（items）を実装するまで、本番も仮の ID（d1, d2, …）にする。
-取得できなかった情報源と、急上昇を判定しなかった情報源の本文への記載は、③ の保存と全情報源の
-接続（#40）または部分失敗の分岐（#41）で足す（① の要約にはすでにある）。
+取得できなかった情報源の本文への記載は、③ の保存と全情報源の接続（#40）または部分失敗の分岐
+（#41）で足す（① の要約にはすでにある）。急上昇を判定しなかった情報源は、① が書く unjudged.json
+から本文のヘッダに入れる（report-templates.md 1.6）。
 """
 
 import json
@@ -32,7 +33,7 @@ from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
 from tech_researcher.render.common import Report
 from tech_researcher.render.daily import render_daily
-from tech_researcher.stages.collect import COLLECTED, load_collected
+from tech_researcher.stages.collect import COLLECTED, load_collected, unjudged_notes
 from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check_daily_ids
 from tech_researcher.validate.period_event import check_period_events
 from tech_researcher.validate.quote import check_daily_quotes, meta_terms_by_id
@@ -105,7 +106,10 @@ def run_verify(
     if entries and not kept:  # 除外で0件（US-E7-02）。AI が0件を選んだときはレポートにする
         log.write("verify", "failure", error_category="all_excluded")
         return _finish(run_dir, log, REJECTED, "all_excluded", entries=0, excluded=reasons)
-    report = render_daily(target, run_id, kept, items, source_names(config), collected=len(items))
+    unjudged = unjudged_notes(run_dir, config)
+    report = render_daily(
+        target, run_id, kept, items, source_names(config), collected=len(items), unjudged=unjudged
+    )
     kinds = sorted({f.kind for f in scanner.find(_issue_text(report))})
     _write(run_dir / SECRET_SCAN, json.dumps({"detected": bool(kinds), "kinds": kinds}))
     if kinds:

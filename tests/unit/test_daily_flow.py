@@ -87,11 +87,11 @@ class Host:
         self.feed = FEED
         self.ai = select_all
 
-    def write_config(self, limits: str = LIMITS) -> None:
+    def write_config(self, limits: str = LIMITS, kind: str = "new") -> None:
         (self.repo / "config" / "tech-researcher.toml").write_text(
             "[daily]\nperiod_days = 1\n[weekly]\nperiod_days = 7\n"
             '[[feeds]]\nid = "example"\ndisplay_name = "Example"\n'
-            'url = "https://blog.example.com/feed.xml"\nkind = "new"\nenabled = true\n'
+            f'url = "https://blog.example.com/feed.xml"\nkind = "{kind}"\nenabled = true\n'
             f"[limits]{limits}",
             encoding="utf-8",
         )
@@ -202,6 +202,7 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "agent-output.json",
         "validation.json",
         "secret-scan.json",
+        "unjudged.json",
         "issue.md",
         "log.jsonl",
     }
@@ -275,6 +276,18 @@ def test_zero_items_is_a_report_saying_so(host):
     assert "> **掲載**：0 件" in issue
     assert "**該当なし**：" in issue and "（収集 0 件）" in issue
     assert "## 目次" not in issue
+
+
+def test_unjudged_popular_feed_is_noted_in_the_header(host):
+    """DB のない開発機のドライランは、前日の記録がない日として、人気型フィードの判定をしない。"""
+    host.write_config(kind="popular")
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 0
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert (
+        "> ℹ️ 人気型フィードへの初登場（Example）は、前日の記録がないため判定していません。" in issue
+    )
 
 
 def test_ai_choosing_nothing_is_a_report_saying_so(host):
