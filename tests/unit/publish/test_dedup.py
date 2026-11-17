@@ -193,3 +193,13 @@ def test_retry_after_crash_before_db_record_does_not_duplicate(conn):
     assert check(conn, reader).via == "labels"
     assert check(conn, FakeReader({30: IssueLookup(IssueRef(REPO, 30))})).via == "db"
     assert conn.execute("SELECT count(*) FROM issues").fetchone()[0] == 1
+
+
+def test_transfer_in_same_run_keeps_created_at(conn):
+    seed(conn)
+    before = find_report_issue(conn, "daily", DAY).created_at
+    later = datetime(2026, 10, 24, 5, 0, tzinfo=UTC)
+    reader = FakeReader({11: IssueLookup(IssueRef("new/repo", 7), transferred=True)})
+    check_duplicate(conn, reader, REPO, RUN, "daily", DAY, later)
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.run_id, row.number, row.created_at) == (RUN, 7, before)
