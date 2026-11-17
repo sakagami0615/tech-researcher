@@ -369,8 +369,8 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 
 - 「載せた」は専用のテーブルに持たず、公開したレポートの項目から導く。D-13 の「数えない」場合（上限に入らない・AI が選ばない・項目の除外・不合格・ドライラン）が、`status='published'` かつ `state='created'` の条件で外れる。同じ事実を二重に持たないので食い違いが起きない
 - 実装での対応（`src/tech_researcher/db/history.py`）：「載せた」は `featured_urls`、前日の記事は `shown_urls`（T−1 を渡す）が、`canonical_url` の集合を返す。読むだけで、ドライランでも使える
-- 実装での対応（`collect/github_spikes.py`）：今日の測定（`star_snapshots` の T）と T−1 の行を比べる。新規（`new_repo`）は、作成日時が判定の窓の終わり（T+1 6:00）の `new_repo_days` 日以内で累計が `new_repo_stars` 以上のリポジトリ。前日の行はいらず、同じリポジトリに急上昇は足さない。急上昇（`star_growth`）は、新規でなく、T−1 の行があり、増分が `threshold_increase` 以上のもののうち、増分の大きい順に上位 `report_top_n` 件。すでに載せたリポジトリ（`featured_urls`）は上位の数に入れないが、観測として残すためレコードは足す（`hold_reason` で除外する）。レコードは `github_repos` の出典で、`published_at` に作成日時、`attention` に `stars_total`・`star_delta_24h`、`links` にリポジトリの URL、`meta_terms` に `owner/repo` を入れる。T−1 の行が1件もない日は、レポートのヘッダに定型文を出す（report-templates.md 1.6。`unjudged.json` を ① が書き、③ が読む）
-- 実装での対応（`stages/collect.py`）：急上昇・新規のリポジトリのうち、載せるもの（すでに載せたものを除く）の README を取り、そのレコードの `primary_text` に入れる。README の失敗は収集全体の失敗にしない
+- 実装での対応（`collect/github_spikes.py`）：今日の測定（`star_snapshots` の T）と T−1 の行を比べる。新規（`new_repo`）は、作成日時が判定の窓の終わり（T+1 6:00）の `new_repo_days` 日以内で累計が `new_repo_stars` 以上のリポジトリのうち、累計の多い順に上位 `new_repo_top_n` 件。前日の行はいらず、同じリポジトリに急上昇は足さない。急上昇（`star_growth`）は、新規でなく、T−1 の行があり、増分が `threshold_increase` 以上のもののうち、増分の大きい順に上位 `report_top_n` 件。すでに載せたリポジトリ（`featured_urls`）は、急上昇も新規も上位の数に入れないが、観測として残すためレコードは足す（`hold_reason` で除外する）。レコードは `github_repos` の出典で、`published_at` に作成日時、`attention` に `stars_total`・`star_delta_24h`、`links` にリポジトリの URL、`meta_terms` に `owner/repo` を入れる。T−1 の行が1件もない日は、レポートのヘッダに定型文を出す（report-templates.md 1.6。`unjudged.json` を ① が書き、③ が読む）
+- 実装での対応（`stages/collect.py`）：急上昇・新規のリポジトリのうち、載せるもの（すでに載せたものを除く）の README を取り（上位に入った分だけ）、そのレコードの `primary_text` に入れる。README の失敗は収集全体の失敗にしない
 - リポジトリを扱う記事と GitHub の項目は、どちらも `https://github.com/{owner}/{repo}` の正規化 URL で同じものとみなす。リポジトリ名の変更をまたいで同じものとはみなさない（変更後は別のものとして1回載りうる）
 
 ### 3.6 週次のテーマ

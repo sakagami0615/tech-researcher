@@ -36,6 +36,7 @@ SETTINGS = GitHubRepos(
     report_top_n=10,
     new_repo_days=14,
     new_repo_stars=200,
+    new_repo_top_n=10,
     search_days=14,
     search_min_stars=200,
 )

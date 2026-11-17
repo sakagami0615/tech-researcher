@@ -3,14 +3,16 @@
 測った Star 数（今日の測定）を前日の測定と比べ、次の2つを判定して、リポジトリの項目の収集
 レコードに出来事を足す。コードだけで判定し、AI には重要度の評価と要約だけを任せる。
 
-- 新規（new_repo）：作成から new_repo_days 日以内で、累計が new_repo_stars 以上。前日の記録は
-  使わない。急上昇ではなく「新しい OSS」として出来事の種類を分け、同じリポジトリに急上昇は足さない
+- 新規（new_repo）：作成から new_repo_days 日以内で、累計が new_repo_stars 以上のもののうち、
+  累計の多い順に上位 new_repo_top_n 件。前日の記録は使わない。急上昇ではなく「新しい OSS」として
+  出来事の種類を分け、同じリポジトリに急上昇は足さない
 - 急上昇（attention_spike、basis = star_growth）：新規でないリポジトリのうち、前日比の増分が
   threshold_increase 以上のものを、増分の大きい順に上位 report_top_n 件
   - 前日の測定がないリポジトリ（初めて見るもの）は判定しない
   - 前日の測定が1件もない日は、判定しなかったことを star_unjudged で返す（ヘッダの定型文。1.6）
 
-すでに急上昇・新規として載せたリポジトリ（featured。D-13）は、上位 report_top_n 件の数に入れない。
+すでに急上昇・新規として載せたリポジトリ（featured。D-13）は、上位の数（report_top_n・
+new_repo_top_n）に入れない。
 レコードは足す（観測として残し、除外は項目の hold_reason で行う）。
 レコードの links には、候補リンクとしてリポジトリの URL を入れる（D-13）。
 """
@@ -66,8 +68,10 @@ def judge_star_spikes(
     # 載せたものは上位の数に入れず、観測のために残す
     shown = [g for g in growth if repo_url(g[1].repo) not in featured]
     top = {g[1].repo for g in shown[: settings.report_top_n]}
+    new.sort(key=lambda s: (-s.stars_total, s.repo))
+    new_shown = [s for s in new if repo_url(s.repo) not in featured][: settings.new_repo_top_n]
     chosen = [
-        *((s, "new_repo") for s in new),
+        *((s, "new_repo") for s in new if s in new_shown or repo_url(s.repo) in featured),
         *((s, "star_growth") for _, s in growth if s.repo in top or repo_url(s.repo) in featured),
     ]
     records = [

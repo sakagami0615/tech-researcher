@@ -14,6 +14,7 @@ SETTINGS = replace(
     report_top_n=2,
     new_repo_days=14,
     new_repo_stars=200,
+    new_repo_top_n=2,
 )
 TARGET = daily_target(date(2026, 10, 24), 1)  # 対象日 10-23。窓の終わりは 10-24 6:00（JST）
 MEASURED = datetime(2026, 10, 23, 21, 0, 30, tzinfo=UTC)  # 10-24 6:00:30（JST）
@@ -119,3 +120,16 @@ def test_weekly_is_not_judged():
 def test_decreasing_stars_are_not_spikes():
     result = judge([snap("a/x", 500)], [snap("a/x", 1000)])
     assert result.records == ()
+
+
+def test_new_repos_are_limited_to_top_n_by_total_stars():
+    today = [snap("n/a", 300, NEW), snap("n/b", 900, NEW), snap("n/c", 500, NEW)]
+    result = judge(today)
+    assert sorted(by_repo(result)) == ["n/b", "n/c"]  # 累計の多い上位2件
+
+
+def test_featured_new_repo_does_not_use_a_top_n_slot():
+    today = [snap("n/a", 300, NEW), snap("n/b", 900, NEW), snap("n/c", 500, NEW)]
+    result = judge(today, featured={"https://github.com/n/b"})
+    # n/b は観測として残り（hold で除外）、上位2件は n/c と n/a
+    assert sorted(by_repo(result)) == ["n/a", "n/b", "n/c"]
