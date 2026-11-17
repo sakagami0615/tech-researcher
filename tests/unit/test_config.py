@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher.config import ConfigError, load_config, parse_config
+from tech_researcher.config import ConfigError, QuoteLimits, load_config, parse_config
 
 CONFIG_PATH = Path(__file__).parents[2] / "config" / "tech-researcher.toml"
 
@@ -439,3 +439,22 @@ def test_broken_toml_is_reported(tmp_path):
     path.write_text("[daily\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="TOML"):
         load_config(path)
+
+
+def test_quote_limits_default_to_the_initial_values_and_can_be_set(base):
+    data = copy.deepcopy(base)
+    data.pop("quote", None)
+    assert parse_config(data).quote == QuoteLimits(200, 200)
+    data["quote"] = {"max_en": 300}
+    assert parse_config(data).quote == QuoteLimits(300, 200)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [{"max_en": 0}, {"max_ja": 100}, {"primary_max_en": "200"}, {"primary_max_en": True}, {"x": 1}],
+)
+def test_invalid_quote_limits_are_rejected(base, quote):
+    data = copy.deepcopy(base)
+    data["quote"] = quote
+    with pytest.raises(ConfigError):
+        parse_config(data)

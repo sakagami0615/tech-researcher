@@ -38,7 +38,8 @@ MAX_PAGES = 5  # 1リポジトリあたりのページの上限。設定の誤�
 # OverflowError は範囲外の日時（0001-01-01T00:00+14:00 など）を UTC にしたとき
 _SHAPE_ERRORS = (KeyError, TypeError, ValueError, RecursionError, OverflowError)
 # meta_terms（D-07 の D4 で一致の判定から外す語句）に入れるタグ名の形。版の表記らしい ASCII で
-# 50 字までに限る。長い語句や日本語のタグで、長い引用の検査を外せないようにする
+# 数字を含み（`the`・`latest` のような一般語を除く）、50 字までに限る。長い語句や一般語、日本語の
+# タグで、長い引用の検査を外せないようにする
 _META_TAG = re.compile(r"[A-Za-z0-9._+\-/@]{1,50}")
 # ページの上限に達し、期間内のリリースを取りこぼしたおそれがあるリポジトリの理由の分類
 TRUNCATED = "truncated"
@@ -179,7 +180,10 @@ def _release(full_name: str, release: dict, fetched_at: datetime) -> Record | No
         primary_text_origin="github_release" if body else None,
         published_at=published_at,
         links=markdown_links(body),
-        meta_terms=(_display_repo(full_name, url), *([tag] if _META_TAG.fullmatch(tag) else [])),
+        meta_terms=(
+            _display_repo(full_name, url),
+            *([tag] if _META_TAG.fullmatch(tag) and any(c.isdigit() for c in tag) else []),
+        ),
     )
 
 

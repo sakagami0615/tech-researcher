@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from tech_researcher.agent.daily import DailyEntry
 from tech_researcher.collect.records import Item, Record
+from tech_researcher.config import QuoteLimits
 from tech_researcher.validate.sources import check_daily_sources
 
 NOW = datetime(2026, 10, 23, tzinfo=UTC)
@@ -86,6 +87,6 @@ def test_duplicate_id_is_judged_after_other_checks():
         )
 
     a, b = make(("i1",), None), make(("i1", "i2"), "出来事")
-    kept, excluded = _check_entries([a, b], data, ITEMS)
+    kept, excluded = _check_entries([a, b], data, ITEMS, QuoteLimits())
     assert kept == [b]
     assert [(c, x.entry) for c, x in excluded] == [("missing_period_event", a)]
