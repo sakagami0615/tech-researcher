@@ -138,8 +138,8 @@ def _replace(
     """別の実行にある、同じ対象の作成済みレポート Issue の行を置き換える。なければ False。"""
     old = conn.execute(
         "SELECT id, run_id, repo, number FROM issues WHERE kind = 'report' AND state = 'created'"
-        " AND cadence = ? AND target = ? AND run_id != ?",
-        (cadence, day, run_id),
+        " AND cadence = ? AND target = ? AND (run_id != ? OR ?)",
+        (cadence, day, run_id, replaces == "transfer"),  # 転送は、同じ実行の行も置き換える
     ).fetchone()
     if old is None:
         return False

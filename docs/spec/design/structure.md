@@ -222,6 +222,8 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 
 - 本番の手動実行を運用サーバーに限るのは、本番の DB（Star 数などの記録）が運用サーバーにしかないため。ほかの場所で本番を実行すると D-13 の判定がずれる
 - 開発機には DB がない前提とする。開発機でのドライランは、D-13・D-16 の判定をすべて前日の記録がない日として行い、週次は比較できる過去の観測がない週として行う
+- 試験用のリポジトリ（D-08）で動かす実行は、別の `TR_DATA_DIR`（別の DB）を使う。DB は投稿先（`GITHUB_ISSUE_REPO`）を1つ記録し（最初に Issue を投稿した、またはラベルから補ったとき）、その後の実行で設定と食い違えば、⑤ の重複判定を始める前に設定のエラーで止める。試験用の記録が本番の DB に残って、本番のレポートが作成済みと判定されないようにするため
+- ドライランで `GITHUB_ISSUE_TOKEN`・`GITHUB_ISSUE_REPO` がなければ、⑤ の重複判定（GitHub の読み取り）は行わず、「判定しなかった」と結果に残す
 - 手動実行の対象期間は、cron と同じく実行の時点から決める（前日・前週）。過去の期間は指定できない（US-E6-05）
 
 ### 3.7 認証情報との関係（D-05）
@@ -240,7 +242,7 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 - worker.env・agent.env の書式は `名前=値` を1行に1つに限る。名前は英数字と `_`（先頭は数字以外）、値は引用符で囲まず、空白・引用符・`$`・`\` を含めない。空行と、空白・タブで字下げしてもよい `#` で始まる行は読み飛ばす（字下げに使えるのは空白とタブだけ）。行末の CRLF は可。統括スクリプトは、ロックを取る前に元のファイルを、実行では写しを確かめ、違う行があれば終了コード 2 で止める（エラー文には行の番号だけを出す）。compose は書式の誤り（閉じていない引用符・名前に使えない文字など）をその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開してエラー文に値の一部を出しうるため、そうなる書き方を compose に渡す前に止める
 - 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env・agent.env の秘匿値（7.3 の名前の規則）を読む。上の書式なら compose のエラー文に値は出ないはずだが、念のため段階の失敗の stderr も伏せる。読んだ値は環境変数にも compose にも渡さない。秘匿値でない値（投稿先のリポジトリ名や Projects の番号。D-20）は伏せない。7.3 と同じく、短い値や一般的な語を伏せるとログが読めなくなり、公開しても害がないため
 - worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
-- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env の変数名は `deploy/env/agent.env.example` に置く
+- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）、Issue 用トークン（`GITHUB_ISSUE_TOKEN`）、投稿先のリポジトリ（`GITHUB_ISSUE_REPO`、`owner/repo`。D-20）で、Projects 用のトークンと指定は ⑤ 投稿の登録を足すときに足す。agent.env の変数名は `deploy/env/agent.env.example` に置く
 - `DOCKER_CONFIG` は、このプロジェクト専用のフォルダ（`${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`、権限 700）にする。利用者の `~/.docker/config.json` の `proxies` は compose がコンテナの環境変数に入れるため。`TR_DATA_DIR` の下には置かない（worker にマウントするので、コンテナの中から次のコンテナの設定を書き換えられる）。Docker のコンテキストは使えず、デーモンは `DOCKER_HOST` で指定する
 - `TR_UID`・`TR_GID` を省略したときは、`bin/tr-run` を動かしている人の ID を渡す。0（root）は拒否する
 

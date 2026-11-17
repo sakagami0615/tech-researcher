@@ -167,6 +167,12 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE UNIQUE INDEX issues_report_target
         ON issues (cadence, target) WHERE kind = 'report' AND state = 'created';
     """,
+    """
+    CREATE TABLE meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    ) STRICT;
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

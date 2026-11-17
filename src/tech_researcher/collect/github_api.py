@@ -37,7 +37,7 @@ _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 MAX_REDIRECTS = 3
 # トークンに使える形。ヘッダに入れたときに要求を壊す文字（改行など）を止める。
 # 不正な値を http.client に渡すと、例外のメッセージに値がそのまま入るため、先に確かめる
-_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+")
+TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_.\-]+")
 # API のパス。`/` で区切った空でない部分だけにし、ホストを差し替えられないようにする
 # （`.`・`..` の部分は別に止める）
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
@@ -82,7 +82,7 @@ def collect_token(environ: Mapping[str, str] = os.environ) -> str | None:
     value = (environ.get(TOKEN_ENV) or "").strip()
     if not value:
         return None
-    if not _TOKEN.fullmatch(value):
+    if not TOKEN_FORMAT.fullmatch(value):
         raise GitHubError(f"{TOKEN_ENV} に使えない文字が含まれる", AUTH, 0)
     return value
 
@@ -103,7 +103,7 @@ class GitHubClient:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
-        if token is not None and not _TOKEN.fullmatch(token):
+        if token is not None and not TOKEN_FORMAT.fullmatch(token):
             raise GitHubError("トークンに使えない文字が含まれる", AUTH, 0)
         self._headers = {
             "Accept": "application/vnd.github+json",
