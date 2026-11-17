@@ -240,7 +240,7 @@ allowed-tools: Bash(${CLAUDE_PROJECT_DIR}/bin/tr-run daily) Bash(${CLAUDE_PROJEC
 - worker.env・agent.env の書式は `名前=値` を1行に1つに限る。名前は英数字と `_`（先頭は数字以外）、値は引用符で囲まず、空白・引用符・`$`・`\` を含めない。空行と、空白・タブで字下げしてもよい `#` で始まる行は読み飛ばす（字下げに使えるのは空白とタブだけ）。行末の CRLF は可。統括スクリプトは、ロックを取る前に元のファイルを、実行では写しを確かめ、違う行があれば終了コード 2 で止める（エラー文には行の番号だけを出す）。compose は書式の誤り（閉じていない引用符・名前に使えない文字など）をその行の値ごとエラー文に出し（実機で確認）、`$` は変数として展開してエラー文に値の一部を出しうるため、そうなる書き方を compose に渡す前に止める
 - 統括スクリプトは、ログに書く前のマスク（7.3）のためにだけ、写しから worker.env・agent.env の秘匿値（7.3 の名前の規則）を読む。上の書式なら compose のエラー文に値は出ないはずだが、念のため段階の失敗の stderr も伏せる。読んだ値は環境変数にも compose にも渡さない。秘匿値でない値（投稿先のリポジトリ名や Projects の番号。D-20）は伏せない。7.3 と同じく、短い値や一般的な語を伏せるとログが読めなくなり、公開しても害がないため
 - worker の中では、worker.env の値は環境変数になるので、worker のログのマスクと秘匿情報の検査（7.3）が既知の秘匿値として使う
-- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）だけで、Issue 用・Projects 用のトークンと投稿先の指定（D-20）は ⑤ 投稿を足すときに足す。agent.env の変数名は `deploy/env/agent.env.example` に置く
+- 変数名は `deploy/env/worker.env.example` に置く（値は書かない）。いまは収集用トークン（`GITHUB_TOKEN`）、Issue 用トークン（`GITHUB_ISSUE_TOKEN`）、投稿先のリポジトリ（`GITHUB_ISSUE_REPO`、`owner/repo`。D-20）で、Projects 用のトークンと指定は ⑤ 投稿の登録を足すときに足す。agent.env の変数名は `deploy/env/agent.env.example` に置く
 - `DOCKER_CONFIG` は、このプロジェクト専用のフォルダ（`${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`、権限 700）にする。利用者の `~/.docker/config.json` の `proxies` は compose がコンテナの環境変数に入れるため。`TR_DATA_DIR` の下には置かない（worker にマウントするので、コンテナの中から次のコンテナの設定を書き換えられる）。Docker のコンテキストは使えず、デーモンは `DOCKER_HOST` で指定する
 - `TR_UID`・`TR_GID` を省略したときは、`bin/tr-run` を動かしている人の ID を渡す。0（root）は拒否する
 
