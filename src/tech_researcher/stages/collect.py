@@ -21,7 +21,7 @@ collected.json は load_collected で収集項目に戻せる（② の入力の
 import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,7 +31,7 @@ from tech_researcher.collect.github_candidates import collect_candidates
 from tech_researcher.collect.github_releases import fetch_readmes, with_readme
 from tech_researcher.collect.github_spikes import judge_star_spikes, repo_url
 from tech_researcher.collect.github_stars import measure_stars
-from tech_researcher.collect.holds import hold_reasons
+from tech_researcher.collect.holds import hold_reasons, strip_featured
 from tech_researcher.collect.last30days import collect_last30days
 from tech_researcher.collect.period_filter import in_period
 from tech_researcher.collect.popularity import judge_feed_entries, mark_thresholds
@@ -185,7 +185,9 @@ def run_collect(
         records += github.records
     observed = [i for i in aggregate(records) if in_period(i, target)]
     holds = hold_reasons(observed, target, featured, shown)
-    items = [i for i in observed if i.url not in holds]
+    # すでに載せたリポジトリが別の出来事（リリースなど）で渡るときは、急上昇・新規の出来事と
+    # 増分を外す（再び急上昇として載せないため。DB の観測には元の値を残す）
+    items = [strip_featured(i) if i.url in featured else i for i in observed if i.url not in holds]
     if write:
         assert db is not None
         counts = in_period_counts(observed)
@@ -348,6 +350,7 @@ def _collect_github(
     else:
         try:
             client = collectors.github(token, config.limits)
+            stored = load_star_snapshot(db, target.key) if db else {}
             mentions = [rec for r in results if r.error is None for rec in r.records]
             found = collect_candidates(settings, target.key, mentions, client, db)
             stars = measure_stars(
@@ -359,7 +362,12 @@ def _collect_github(
                 batch_size=config.limits.github_graphql_batch,
             )
             previous = load_star_snapshot(db, target.key - timedelta(days=1)) if db else {}
-            spikes = judge_star_spikes(settings, target, stars, previous, featured)
+            # 同じ対象日の記録があれば（再実行・ドライラン）、その記録だけで判定する。再実行で候補が
+            # 変わっても、判定の対象が変わらないようにするため（新しい候補は測って記録するだけ）
+            judged = replace(stars, snapshots=tuple(stored[r] for r in sorted(stored)))
+            spikes = judge_star_spikes(
+                settings, target, judged if stored else stars, previous, featured
+            )
             records, readme_calls = _with_readmes(spikes.records, client, featured, log)
             star_unjudged = spikes.star_unjudged
             # 最初の失敗は Search を先に見る
@@ -398,19 +406,22 @@ def _with_readmes(
 
     README の失敗は項目の補足が欠けるだけなので、止めずに続ける（失敗の分類は fetch_readmes が
     ログに残す）。（README を足したレコード、使った要求の回数）を返す。
+    想定外の例外のときも、それまでに使った要求の回数を返す。測定が失敗した日のヘッダの扱いは
+    #41（部分失敗の分岐）で扱う。
     """
     wanted = [
         r for r in records if r.github is not None and repo_url(r.github.full_name) not in featured
     ]
     if not wanted:
         return records, 0
+    before = client.rest_calls
     try:
         found = fetch_readmes([r.github.full_name for r in wanted if r.github], client)
     except Exception as e:  # README は補足。想定外でも急上昇の判定は残す
         log.write(
             "collect", "failure", source=GITHUB_REPOS_SOURCE_ID, error_category=type(e).__name__
         )
-        return records, 0
+        return records, client.rest_calls - before
     kept = []
     for record in records:
         readme = found.readmes.get(record.github.full_name) if record.github else None

@@ -314,7 +314,7 @@ threshold_increase = 100        # A
 report_top_n = 10               # N_report
 new_repo_days = 14              # D
 new_repo_stars = 200            # C
-new_repo_top_n = 10             # 新規の上位件数
+new_repo_top_n = 10             # N_new
 search_days = 14                # D_search。PoC で決める（観測までの仮の値）
 search_min_stars = 200          # C_search。PoC で決める（観測までの仮の値）
 

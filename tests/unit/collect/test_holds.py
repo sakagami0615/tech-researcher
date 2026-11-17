@@ -1,8 +1,13 @@
 from datetime import UTC, date, datetime
 
 from tech_researcher.collect.aggregate import aggregate
-from tech_researcher.collect.holds import ALREADY_FEATURED, SHOWN_PREVIOUS_DAY, hold_reasons
-from tech_researcher.collect.records import Event, Record
+from tech_researcher.collect.holds import (
+    ALREADY_FEATURED,
+    SHOWN_PREVIOUS_DAY,
+    hold_reasons,
+    strip_featured,
+)
+from tech_researcher.collect.records import Attention, Event, GitHubRepo, Record
 from tech_researcher.periods import JST, daily_target, weekly_target
 
 TARGET = daily_target(date(2026, 10, 24), 1)  # JST 10/23 0:00〜10/24 0:00
@@ -88,3 +93,24 @@ def test_weekly_holds_nothing():
     spike = Event("attention_spike", IN, "feed_entry")
     result = hold_reasons([item([spike])], weekly_target(date(2026, 10, 26), 7), {URL}, {URL})
     assert result == {}
+
+
+def test_strip_featured_removes_spike_events_and_star_delta_but_keeps_others():
+    repo = GitHubRepo("a/b", BEFORE, 1000, 300)
+    record = Record(
+        source_id="github_repos",
+        url=URL,
+        title="t",
+        published_precision="datetime",
+        fetched_at=FETCHED,
+        events=(Event("released", IN), Event("attention_spike", IN, "star_growth")),
+        published_at=IN,
+        attention=(Attention("stars_total", 1000, IN), Attention("star_delta_24h", 300, IN)),
+        github=repo,
+    )
+    (stripped,) = [strip_featured(i) for i in aggregate([record])]
+    assert [e.type for e in stripped.events] == ["released"]
+    assert [e.type for e in stripped.sources[0].events] == ["released"]
+    assert [a.metric for a in stripped.attention] == ["stars_total"]
+    assert stripped.github.star_delta_24h is None and stripped.github.stars_total == 1000
+    assert stripped.sources[0].github.star_delta_24h is None

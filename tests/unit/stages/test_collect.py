@@ -643,6 +643,8 @@ def previous_day(conn, hot, featured):
             (f"https://github.com/{repo}", json.dumps(events), run, run),
         ).fetchone()
         ids.append(f"i{item_id}")
+    if not ids:
+        return
     save_report(
         conn,
         run,
@@ -760,6 +762,45 @@ def test_unexpected_error_in_github_does_not_duplicate_other_sources(tmp_path, m
     assert "github_repos" in summary["failed_sources"]
     items = {i.url: i for i in load_collected(tmp_path / COLLECTED)}
     assert len(items["https://a.example.com/1"].sources) == 1  # 出典が二重にならない
+
+
+def test_rerun_judges_only_repos_recorded_on_the_first_run(tmp_path):
+    """同じ対象日の再実行で候補が増えても、判定の対象は最初の記録のままにする。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    previous_day(conn, hot=["hot/repo"], featured=[])
+    seen = []
+    for run_id, repos in (
+        (PROD, ("hot/repo",)),
+        ("20261024-070000-beef", ("hot/repo", "late/new")),
+    ):
+        start_run(conn, run_id, TARGET, FETCHED)
+        github = FakeGitHub(
+            [],
+            search_repos=repos,
+            stars={"hot/repo": 1300, "late/new": 900},
+            created={"hot/repo": OLD_CREATED, "late/new": "2026-10-20T00:00:00Z"},
+        )
+        run_collect(
+            all_sources_config(),
+            TARGET,
+            tmp_path,
+            prod_log(tmp_path, run_id),
+            collectors=all_collectors([], github=github),
+            db=conn,
+            write_db=True,
+        )
+        seen.append(
+            sorted(i.url for i in load_collected(tmp_path / COLLECTED) if "github.com" in i.url)
+        )
+    # 言及の経路の mentioned/repo は初回から候補。late/new だけが再実行で加わった
+    assert seen[0] == seen[1]
+    assert "https://github.com/hot/repo" in seen[0]
+    assert "https://github.com/late/new" not in seen[0]
+    # 新しい候補も測って記録する（翌日の前日比に使う）
+    assert conn.execute(
+        "SELECT count(*) FROM star_snapshots WHERE repo = 'late/new'"
+    ).fetchone() == (1,)
+    conn.close()
 
 
 def test_featured_does_not_exclude_the_same_target_on_rerun(tmp_path):

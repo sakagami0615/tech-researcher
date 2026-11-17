@@ -10,9 +10,10 @@
 """
 
 from collections.abc import Collection, Iterable
+from dataclasses import replace
 
 from tech_researcher.collect.period_filter import date_approximated, window_events
-from tech_researcher.collect.records import Item
+from tech_researcher.collect.records import Item, Record
 from tech_researcher.periods import Target
 
 ALREADY_FEATURED = "already_featured"
@@ -41,3 +42,35 @@ def hold_reasons(
         elif item.url in shown_previous_day and date_approximated(item, target):
             holds[item.url] = SHOWN_PREVIOUS_DAY
     return holds
+
+
+def strip_featured(item: Item) -> Item:
+    """すでに載せたリポジトリの項目から、急上昇・新規の出来事と Star の増分を外す。
+
+    別の出来事（期間内のリリースなど）で AI に渡す項目が、急上昇として再び載らないようにする
+    （D-13。リポジトリ以外の項目の急上昇の出来事も外す）。
+    """
+    return replace(
+        item,
+        sources=tuple(_strip_record(r) for r in item.sources),
+        events=_strip_events(item.events),
+        attention=tuple(a for a in item.attention if a.metric != "star_delta_24h"),
+        github=_strip_github(item.github),
+    )
+
+
+def _strip_record(record: Record) -> Record:
+    return replace(
+        record,
+        events=_strip_events(record.events),
+        attention=tuple(a for a in record.attention if a.metric != "star_delta_24h"),
+        github=_strip_github(record.github),
+    )
+
+
+def _strip_events(events):
+    return tuple(e for e in events if e.type not in _SPIKE_TYPES)
+
+
+def _strip_github(github):
+    return None if github is None else replace(github, star_delta_24h=None)

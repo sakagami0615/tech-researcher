@@ -133,3 +133,10 @@ def test_featured_new_repo_does_not_use_a_top_n_slot():
     result = judge(today, featured={"https://github.com/n/b"})
     # n/b は観測として残り（hold で除外）、上位2件は n/c と n/a
     assert sorted(by_repo(result)) == ["n/a", "n/b", "n/c"]
+
+
+def test_young_repo_below_the_star_floor_is_a_spike_when_it_grows_fast():
+    # 作成から間もないが累計が C 未満（新規ではない）。増分が A 以上なら急上昇として載せる
+    result = judge([snap("n/young", 150, NEW)], [snap("n/young", 20, NEW)])
+    (record,) = result.records
+    assert [(e.type, e.basis) for e in record.events] == [("attention_spike", "star_growth")]
