@@ -45,10 +45,11 @@ _INVISIBLE_RANGES = (
     (0xE0100, 0xE01EF),  # 異体字セレクタ補助
 )
 
-# 幅の狭い空白。NFKC は普通の空白にしてしまい、出力で英単語の途中に挟んで一致を切れるので、
-# 出力では NFKC の前に取り除く
-_NARROW_SPACES = dict.fromkeys(map(ord, "\u2006\u2008\u2009\u200a\u202f\u205f"))
-_NARROW = re.compile("[\u2006\u2008-\u200a\u202f\u205f]")
+# 幅の狭い空白（U+2006・U+2008〜200A・U+202F・U+205F）は、NFKC の前に目印（_NARROW）に置き換えて、
+# どの空白が幅の狭い空白だったかを残す。目印は、語句を伏せるときは空白と同じに（英数字ではない文字
+# として）扱い、そのあと、取り除いた形と、普通の空白にした形の2つを作る（_forms）
+_NARROW = "\U0010fffe"
+_NARROW_SPACES = dict.fromkeys(map(ord, "\u2006\u2008\u2009\u200a\u202f\u205f"), _NARROW)
 
 # メタデータの語句を伏せる印は、語句ごとに私用領域の1文字にする（私用領域の文字は正規化で取り除く
 # ので、元の文字とぶつからない）。同じ語句は出力と元のテキストの両方で同じ印になり、一致を切らない
@@ -118,23 +119,40 @@ class _Prepared:
     terms_key: tuple[str, ...]
 
 
-def normalize(text: str, *, external: bool = False) -> str:
+def normalize(text: str) -> str:
     """NFKC、見えない文字と Markdown 記号の除去、空白・改行の圧縮、大文字・小文字の統一。
 
-    日本語の文字の前後の空白は取り除く（改行の位置で別の文字列にしない）。
-    幅の狭い空白は、AI の出力では取り除く（英単語の途中に挟んで一致を切る回避を防ぐ）。
-    元のテキスト（external）では普通の空白にする。外部のものなので回避は起きず、元の `10 GB`
-    （U+202F）を AI が普通の空白で書き写しても、一致が切れないようにする。
+    日本語の文字の前後の空白は取り除く（改行の位置で別の文字列にしない）。幅の狭い空白は、普通の
+    空白にする（取り除いた形は _forms が作る）。
     """
-    if not external:
-        text = text.translate(_NARROW_SPACES)
-    # U+2800（点字の空白）は空白に見えるので、空白にする
-    text = _strip_invisible(unicodedata.normalize("NFKC", text))
-    text = text.replace("\u2800", " ")
+    return _finish(_base(text), remove=False)
+
+
+def _base(text: str) -> str:
+    """正規化の途中の形。幅の狭い空白は目印のまま、空白類は1つにまとめた形。語句を伏せるのに使う。"""
+    text = _strip_invisible(unicodedata.normalize("NFKC", text.translate(_NARROW_SPACES)))
+    text = text.replace("\u2800", " ")  # 点字の空白は空白に見えるので、空白にする
     text = _LIST_MARKER.sub("", text)
     text = _MARKDOWN.sub("", text)
-    text = _SPACES.sub(" ", text).strip()
-    return _CJK_GAP.sub("", text).casefold()
+    return _SPACES.sub(" ", text).casefold()
+
+
+def _finish(base: str, *, remove: bool) -> str:
+    """目印を、取り除く（remove）か普通の空白にして、空白を整える。"""
+    text = base.replace(_NARROW, "" if remove else " ")
+    return _CJK_GAP.sub("", _SPACES.sub(" ", text).strip())
+
+
+def _forms(base: str, terms: _Terms) -> tuple[str, str]:
+    """語句を伏せ、日本語の文字を2つ並べた、2つの形（幅の狭い空白を取り除いた形、普通の空白にした形）。
+
+    語句は目印を空白と同じに扱う段階で伏せるので、幅の狭い空白で区切られた語句の繰り返しも伏せられる。
+    """
+    masked = _mask(base, terms)
+    spaced = _double(_finish(masked, remove=False))
+    if _NARROW not in masked:
+        return spaced, spaced
+    return _double(_finish(masked, remove=True)), spaced
 
 
 def weighted_length(text: str) -> int:
@@ -148,7 +166,7 @@ def _strip_invisible(text: str) -> str:
 
 
 def _invisible(c: str) -> bool:
-    if c in "\t\n\r\f" or unicodedata.category(c).startswith("Z"):
+    if c == _NARROW or c in "\t\n\r\f" or unicodedata.category(c).startswith("Z"):
         return False  # 空白は取り除かず、後で1つにまとめる
     if unicodedata.category(c) in _INVISIBLE_CATEGORIES:
         return True
@@ -158,62 +176,51 @@ def _invisible(c: str) -> bool:
 def longest_quote(output: str, sources: Sequence[QuoteSource], limits: QuoteLimits) -> Quote | None:
     """出力と各元のテキストの一致のうち、上限を超えたものの最長（違反がなければ、窓が見つかった
     中の最長。窓が見つからなければ空）。調べきれなかったときは、unchecked の印が付く。"""
-    return _compare(_outputs(output), _prepare(sources), limits)
+    return _compare(_base(output), _prepare(sources), limits)
 
 
 def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
     compiled: dict[tuple[str, ...], _Terms] = {}
     prepared = []
     for source in sources:
-        key = tuple(
-            sorted(
-                {normalize(t, external=True) for t in source.meta_terms} - {""},
-                key=len,
-                reverse=True,
-            )
-        )
+        key = tuple(sorted({normalize(t) for t in source.meta_terms} - {""}, key=len, reverse=True))
         if key not in compiled:
             compiled[key] = _terms(key)
-        spaced = _double(_mask(normalize(source.text, external=True), compiled[key]))
-        removed = spaced
-        if _NARROW.search(source.text):
-            removed = _double(_mask(normalize(source.text), compiled[key]))
-        prepared.append(_Prepared((removed, spaced), source.primary, compiled[key], key))
+        texts = _forms(_base(source.text), compiled[key])
+        prepared.append(_Prepared(texts, source.primary, compiled[key], key))
     return prepared
 
 
-def _outputs(text: str) -> tuple[str, str]:
-    """AI の出力の正規化。幅の狭い空白を取り除いた形と、普通の空白にした形。"""
-    spaced = normalize(text, external=True)
-    return (normalize(text) if _NARROW.search(text) else spaced), spaced
+# 出力の形と元のテキストの形の組（0 は幅の狭い空白を取り除いた形、1 は普通の空白にした形）。
+# 取り除いた形どうしは、出力で単語の途中に挟む回避を、普通の空白にした形どうしは、元のテキストの
+# 空白をそのまま書き写したときを、取り除いた形の出力と普通の空白の元のテキストは、普通の空白で
+# 写したうえで単語の途中に挟んだときを、見落とさない
+_PAIRS = ((0, 0), (1, 1), (0, 1))
 
 
-def _compare(
-    outputs: tuple[str, str], sources: Sequence[_Prepared], limits: QuoteLimits
-) -> Quote | None:
-    """正規化した出力を、用意した元のテキストすべてと比べ、最も長く違反した一致を返す。
+def _compare(output: str, sources: Sequence[_Prepared], limits: QuoteLimits) -> Quote | None:
+    """正規化の途中の形（_base）の出力を、用意した元のテキストすべてと比べ、最も長く違反した
+    一致を返す。
 
-    幅の狭い空白を取り除いた形どうし、普通の空白にした形どうしで比べる。取り除いた形は、出力で
-    単語の途中に挟む回避を、普通の空白にした形は、元のテキストの空白をそのまま書き写したときを
-    見落とさない。
-
-    窓の位置を調べる回数の上限は、形をまたいだ合計。上限まで調べてもまだ出現が残っているときは、
+    窓の位置を調べる回数の上限は、組をまたいだ合計。上限まで調べてもまだ出現が残っているときは、
     それまでに違反を見つけていれば、その長さを partial の印を付けて返し、見つけていなければ、
     unchecked を返す（ちょうど上限の回数で出現が尽きたときは、調べ終えているので、通常の判定）。
     """
     worst: Quote | None = None
     budget = [_MAX_HITS]
-    for index, output in enumerate(outputs):
-        masked: dict[tuple[str, ...], str] = {}
-        for source in sources:
-            if index == 1 and outputs[0] == outputs[1] and source.texts[0] == source.texts[1]:
-                continue  # 1つ目の形と同じ比べ方になる
-            if source.terms_key not in masked:
-                masked[source.terms_key] = _double(_mask(output, source.terms))
-            limit = limits.primary_max_en if source.primary else limits.max_en
-            quote = _best_quote(
-                masked[source.terms_key], source.texts[index], source.primary, limit, budget
-            )
+    outputs: dict[tuple[str, ...], tuple[str, str]] = {}
+    for source in sources:
+        if source.terms_key not in outputs:
+            outputs[source.terms_key] = _forms(output, source.terms)
+        forms = outputs[source.terms_key]
+        limit = limits.primary_max_en if source.primary else limits.max_en
+        done: set[tuple[str, str]] = set()
+        for out_index, src_index in _PAIRS:
+            pair = (forms[out_index], source.texts[src_index])
+            if pair in done:
+                continue  # 同じ比べ方は1回だけ
+            done.add(pair)
+            quote = _best_quote(pair[0], pair[1], source.primary, limit, budget)
             if quote.unchecked:  # 上限まで調べても出現が残っている。これ以上は調べない
                 if worst is not None and worst.violates:
                     return replace(worst, partial=True)
@@ -379,7 +386,7 @@ def _violation(entry: DailyEntry, sources: Sequence[_Prepared], limits: QuoteLim
     for text in (entry.headline, *entry.points, entry.importance, entry.period_event):
         if not text:
             continue
-        quote = _compare(_outputs(text), sources, limits)
+        quote = _compare(_base(text), sources, limits)
         if quote is not None and quote.unchecked:
             return "同じ部分が元のテキストに多数あり、調べきれないため除外"
         if quote is not None and quote.violates:

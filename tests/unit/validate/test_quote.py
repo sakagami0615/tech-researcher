@@ -107,7 +107,7 @@ INVISIBLE = [
 def test_narrow_space_inside_words_does_not_cut_a_copy(char):
     text = english_run(250)
     disguised = char.join(text[i : i + 5] for i in range(0, 250, 5))
-    assert normalize(disguised) == text
+    assert quote._forms(quote._base(disguised), ())[0] == text  # 取り除いた形
     assert longest(disguised, text).violates
 
 
@@ -570,7 +570,7 @@ def test_narrow_space_in_the_source_is_a_plain_space():
     spaced = " ".join(text[i : i + 5] for i in range(0, 250, 5))
     source = spaced.replace(" ", "\u202f")  # 元のテキストは 10\u202fGB のような書き方
     assert longest(spaced, source).violates
-    assert normalize(source, external=True) == spaced
+    assert normalize(source) == spaced
 
 
 @pytest.mark.parametrize("char", ["\u202f", "\u2009", "\u2006", "\u200a", "\u205f"])
@@ -615,3 +615,18 @@ def test_source_narrow_spaces_copied_with_more_narrow_spaces_inside_words():
     output = "\u202f".join(w[:2] + "\u200a" + w[2:] for w in words)
     assert longest(output, source).violates
     assert longest(output, source).weight >= 250
+
+
+def test_meta_term_repeated_with_narrow_spaces_is_masked_in_both_forms():
+    term = "v1.2.3"
+    text = "\u202f".join([term] * 40)  # 語句が幅の狭い空白で区切られて並ぶ
+    assert not longest(text, text, terms=[term]).violates
+    assert not longest(" ".join([term] * 40), text, terms=[term]).violates
+    assert longest(text, text).violates  # 語句を伏せなければ違反
+
+
+def test_plain_space_copy_with_a_hair_space_inserted_in_a_word():
+    words = [english_run(250)[i : i + 5] for i in range(0, 250, 5)]
+    source = "\u202f".join(words)  # 元の空白は U+202F
+    output = " ".join(w[:2] + "\u200a" + w[2:] for w in words)  # 普通の空白で写し、単語の途中に挟む
+    assert longest(output, source).violates
