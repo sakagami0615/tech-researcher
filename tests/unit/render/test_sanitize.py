@@ -133,3 +133,8 @@ def test_leftover_at_dollar_and_emphasis_are_escaped(raw, expected):
 
 def test_underscore_inside_a_word_is_kept_even_next_to_a_reference():
     assert sanitize_text("ghp_abcdef1234") == "ghp_`abcdef1234`"
+
+
+def test_bidi_controls_are_removed():
+    text = "a\u202eb\u2066c\u2069d\u200ee\u200ff\u061cg\u202ah\u202di"
+    assert sanitize_text(text) == "abcdefghi"

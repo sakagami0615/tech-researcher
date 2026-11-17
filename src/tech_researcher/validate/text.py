@@ -53,6 +53,14 @@ def check_daily_lengths(entries: Sequence[DailyEntry]) -> tuple[list[DailyEntry]
     return _check(entries, _too_long)
 
 
+def text_violation(text: str) -> str | None:
+    """D2・D3：1つの文章に URL・リンク・画像・HTML があれば、その種類を返す（④ の出力にも使う）。"""
+    for pattern, label in ((_LINK, "URL・リンク"), (_HTML, "画像・HTML")):
+        if pattern.search(text):
+            return label
+    return None
+
+
 def _check(
     entries: Sequence[DailyEntry], violation: Callable[[DailyEntry], str | None]
 ) -> tuple[list[DailyEntry], list[Excluded]]:

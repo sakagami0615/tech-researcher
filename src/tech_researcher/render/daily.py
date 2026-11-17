@@ -9,8 +9,15 @@ from collections.abc import Mapping, Sequence
 from tech_researcher.agent.daily import CATEGORIES, DailyEntry
 from tech_researcher.collect.period_filter import published_before_period
 from tech_researcher.collect.records import Item
-from tech_researcher.periods import JST, Target
-from tech_researcher.render.common import Report, day_label, identifier, plain_text, source_line
+from tech_researcher.periods import Target
+from tech_researcher.render.common import (
+    Report,
+    day_label,
+    identifier,
+    period_text,
+    plain_text,
+    source_line,
+)
 from tech_researcher.render.sanitize import sanitize_text
 
 CATEGORY_NAMES = dict(
@@ -74,11 +81,9 @@ def render_daily(
 def _header(
     target: Target, run_id: str, count: int, unjudged: Sequence[tuple[str, Sequence[str]]]
 ) -> str:
-    start, end = (t.astimezone(JST) for t in (target.period.start, target.period.end))
     lines = [
         identifier("daily", target.key, run_id),
-        f"> **対象期間**：{day_label(start.date())}{start:%H:%M} 〜 "
-        f"{day_label(end.date())}{end:%H:%M}（JST）",
+        f"> **対象期間**：{period_text(target)}",
         f"> **掲載**：{count} 件",
     ]
     if 0 < count < FEW_ITEMS:

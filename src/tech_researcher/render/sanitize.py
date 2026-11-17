@@ -8,6 +8,8 @@ plain_text を使う（0.3 の別の行）。
 import re
 
 _SPACES = re.compile(r"\s+")
+# 表示の向きを変える制御文字（LRM・RLM・ALM、LRE〜RLO、LRI〜PDI）。見た目を入れ替えて偽装できる
+BIDI = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # GitHub が通知・参照にする文字列。インラインコードで囲む（0.3）。先に書いた形を優先する。
 # 直前の文字は見ない（`@a@b`・`_@a_` は描画後に別の文字列になる）。SHA だけは単語の途中を除く
 # コミット SHA は a〜f を1文字以上含む7〜40桁（数字だけの列は対象外）
@@ -43,7 +45,8 @@ _ESCAPES = str.maketrans(
 def sanitize_text(text: str) -> str:
     """AI の文章を、1行の、通知・参照・ブロック・HTML の効かない文字列にする。
 
-    - 改行を含む空白を1つの空白にし、前後を取る（要点は配列の1要素が1行）
+    - 表示の向きを変える制御文字を取る。改行を含む空白を1つの空白にし、前後を取る
+      （要点は配列の1要素が1行）
     - バッククォートは `'` にする（AI の囲みと、無害化の囲みが混ざらないように）
     - `\\`・`<`・`|`・`$`・`*`・`~`・`&`・語の途中でない `_` をエスケープする
       （`&#64;` が `@` になるのを防ぐ。`$` は数式、`*_~` は強調で、ラベルをまねさせない）
@@ -52,7 +55,7 @@ def sanitize_text(text: str) -> str:
       `owner/repo@SHA` をインラインコードで囲む
     - 先頭のブロック記法（`#`・`>`・`-`・`1.` など）をエスケープする
     """
-    text = _SPACES.sub(" ", text).strip().replace("`", "'")
+    text = _SPACES.sub(" ", BIDI.sub("", text)).strip().replace("`", "'")
     # 語の途中かは、囲む前の連結した文字列で判定する（`ghp_abc` の `_` を割らない）
     edges = {m.start() for m in _EDGE_UNDERSCORE.finditer(text)}
     parts: list[str] = []

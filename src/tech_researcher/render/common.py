@@ -14,7 +14,8 @@ from tech_researcher.agent.daily import display_name
 from tech_researcher.collect.aggregate import candidate_links
 from tech_researcher.collect.records import Item, Record
 from tech_researcher.collect.urls import normalize_url
-from tech_researcher.periods import JST
+from tech_researcher.periods import JST, Target
+from tech_researcher.render.sanitize import BIDI
 
 _WEEKDAYS = "月火水木金土日"
 _ID_VALUE = re.compile(r"[A-Za-z0-9]+(-[A-Za-z0-9]+)*")  # HTML コメントの中に -- を作らない（4.1）
@@ -42,6 +43,19 @@ def day_label(day: date) -> str:
     return f"{day.isoformat()}（{_WEEKDAYS[day.weekday()]}）"
 
 
+def period_text(target: Target) -> str:
+    """`YYYY-MM-DD（曜）HH:MM 〜 YYYY-MM-DD（曜）HH:MM（JST）`（0.4）。"""
+    start, end = (t.astimezone(JST) for t in (target.period.start, target.period.end))
+    return f"{day_label(start.date())}{start:%H:%M} 〜 {day_label(end.date())}{end:%H:%M}（JST）"
+
+
+def run_id_code(run_id: str) -> str:
+    """実行ID を表のセルに入れる形（インラインコード）にする。英数字と - だけを許す。"""
+    if not _ID_VALUE.fullmatch(run_id):
+        raise ValueError(f"実行ID に使えない値 {run_id!r}")
+    return f"`{run_id}`"
+
+
 def identifier(cadence: str, target: date, run_id: str) -> str:
     """本文の1行目に置く重複防止用の識別子（4.1）。"""
     for value in (cadence, run_id):
@@ -60,7 +74,7 @@ def plain_text(text: str) -> str:
     @ と # は全角にする。GitHub はメンション（@名前）と参照（#数字）を描画後の文字列から探すので、
     バックスラッシュでエスケープしても @・# として残り、通知・リンクが起きるため。
     """
-    text = _SPACES.sub(" ", text).strip().replace("@", "＠").replace("#", "＃")
+    text = _SPACES.sub(" ", BIDI.sub("", text)).strip().replace("@", "＠").replace("#", "＃")
     return _MARKDOWN.sub(r"\\\1", text)
 
 
