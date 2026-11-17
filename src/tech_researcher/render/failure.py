@@ -24,19 +24,21 @@ from tech_researcher.render.common import (
     plain_text,
     run_id_code,
 )
-from tech_researcher.render.sanitize import sanitize_text
-from tech_researcher.validate.text import text_violation
+from tech_researcher.render.sanitize import BIDI, sanitize_text
+from tech_researcher.validate.text import LIMIT_FACTOR, text_violation
 
 STAGES = {
     "collect": "① 収集",
-    "evaluate": "② 評価・要約",
-    "validate": "③ 検証・検査",
+    "analyze": "② 評価・要約",
+    "verify": "③ 検証・検査",
     "investigate": "④ 失敗時の調査",
     "post": "⑤ 投稿",
 }
-SECRET_STAGES = ("validate", "post")  # 秘匿情報を検出しうる段階（3.6）
+SECRET_STAGES = ("verify", "post")  # 秘匿情報を検出しうる段階（3.6）
 CONFIDENCES = ("高", "中", "低")
-EVENT_LIMIT = 200  # 発生した事象の文字数の上限（3.3）。超えたら定型にする
+EVENT_LIMIT = (
+    200  # 発生した事象の文字数の目安（3.3）。除外するのは LIMIT_FACTOR 倍を超えたとき（0.3）
+)
 TARGETS = {  # 対策案の修正対象（data-model.md 4.4 の enum）
     "prompt": "プロンプト",
     "collect_config": "収集設定",
@@ -126,7 +128,7 @@ def _split(line: str) -> list[str]:
 
 def code_fence(lines: Sequence[str]) -> str:
     """中身でフェンスを閉じられないコードブロック。フェンスは中身の最長のバッククォートより長くする。"""
-    text = "\n".join(part for line in lines for part in _split(line))
+    text = BIDI.sub("", "\n".join(part for line in lines for part in _split(line)))
     longest = max((len(m.group()) for m in _BACKTICKS.finditer(text)), default=0)
     fence = "`" * max(3, longest + 1)
     return f"{fence}text\n{text}\n{fence}"
@@ -246,7 +248,7 @@ def _run_text(run_at: datetime) -> str:
 
 
 def _check_aware(run_at: datetime) -> None:
-    if run_at.tzinfo is None:
+    if run_at.utcoffset() is None:
         raise ValueError("run_at にタイムゾーンがない")
 
 
@@ -293,13 +295,19 @@ def _footer(text: str) -> str:
 
 def _usable(inv: Investigation | None) -> Investigation | None:
     """D2・D3・確度の形に違反する ④ の出力は、AI を利用できないときの定型にする（D-07、3.5）。"""
-    if inv is None or inv.confidence not in CONFIDENCES or len(inv.event) > EVENT_LIMIT:
+    if (
+        inv is None
+        or inv.confidence not in CONFIDENCES
+        or len(inv.event) > EVENT_LIMIT * LIMIT_FACTOR
+    ):
         return None
-    if not (inv.event.strip() and inv.cause.strip() and inv.contents and inv.measures):
+    if not (inv.contents and inv.measures):
+        return None
+    texts = (inv.event, inv.cause, *inv.contents, *(m.text for m in inv.measures))
+    if not all(sanitize_text(t) for t in texts):  # 空・空白だけ・無害化の後に空になるもの
         return None
     if any(m.target not in TARGETS for m in inv.measures):
         return None
-    texts = (inv.event, inv.cause, *inv.contents, *(m.text for m in inv.measures))
     return None if any(text_violation(t) for t in texts) else inv
 
 

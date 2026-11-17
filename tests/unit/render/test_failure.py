@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
 
 import cmarkgfm
 import pytest
@@ -131,7 +131,7 @@ def test_secret_stop_is_fixed_text_without_run_info():
         "| 対象期間 | 2026-10-19（月）00:00 〜 2026-10-26（月）00:00（JST） |\n"
         "| 処理段階 | ⑤ 投稿 |\n"
     )
-    daily = secret_stop_report(DAILY, "validate")
+    daily = secret_stop_report(DAILY, "verify")
     assert daily.title == "[実行エラー][日次] 2026-10-23（金）（公開停止）"
     assert "③ 検証・検査" in daily.body
     assert "06:00" not in daily.title and "06:00" not in daily.body and RUN not in daily.body
@@ -295,8 +295,8 @@ def _inv(**kw):
 
 
 def test_event_length_boundary():
-    assert run_error(_inv(event="あ" * 200)).body != run_error(None).body
-    assert run_error(_inv(event="あ" * 201)).body == run_error(None).body
+    assert run_error(_inv(event="あ" * 400)).body != run_error(None).body
+    assert run_error(_inv(event="あ" * 401)).body == run_error(None).body
 
 
 @pytest.mark.parametrize(
@@ -305,6 +305,9 @@ def test_event_length_boundary():
         {"contents": ()},
         {"measures": ()},
         {"event": " "},
+        {"contents": ("", "x")},
+        {"contents": (" ",)},
+        {"measures": (Countermeasure("code", "\u202e"),)},
         {"cause": ""},
         {"measures": (Countermeasure("unknown", "y"),)},
     ],
@@ -314,9 +317,31 @@ def test_incomplete_investigation_falls_back(kw):
     assert rejected(_inv(**kw)).body == rejected(None).body
 
 
+def test_all_real_stage_names_build_run_errors():
+    for stage in ("collect", "analyze", "verify", "investigate", "post"):
+        assert run_error(stage=stage).title.startswith("[実行エラー]")
+    assert "② 評価・要約" in run_error(stage="analyze").body
+    assert "③ 検証・検査" in secret_stop_report(DAILY, "verify").body
+
+
+def test_bidi_removed_from_fence_and_plain_text():
+    assert code_fence(["a\u202eb"]) == "```text\nab\n```"
+    from tech_researcher.render.common import plain_text
+
+    assert plain_text("a\u202eb") == "ab"
+
+
 def test_naive_run_at_is_refused():
     naive = datetime(2026, 10, 24, 6, 0)
     with pytest.raises(ValueError):
         run_error_report(DAILY, RUN, naive, "collect", "x", (0, 1), [], None)
     with pytest.raises(ValueError):
         rejected_report(DAILY, RUN, naive, ["x"], COUNTS, [], None)
+
+    class NoOffset(tzinfo):
+        def utcoffset(self, dt):
+            return None
+
+    odd = datetime(2026, 10, 24, 6, 0, tzinfo=NoOffset())
+    with pytest.raises(ValueError):
+        run_error_report(DAILY, RUN, odd, "collect", "x", (0, 1), [], None)

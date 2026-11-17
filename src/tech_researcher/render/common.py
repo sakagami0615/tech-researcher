@@ -15,6 +15,7 @@ from tech_researcher.collect.aggregate import candidate_links
 from tech_researcher.collect.records import Item, Record
 from tech_researcher.collect.urls import normalize_url
 from tech_researcher.periods import JST, Target
+from tech_researcher.render.sanitize import BIDI
 
 _WEEKDAYS = "月火水木金土日"
 _ID_VALUE = re.compile(r"[A-Za-z0-9]+(-[A-Za-z0-9]+)*")  # HTML コメントの中に -- を作らない（4.1）
@@ -73,7 +74,7 @@ def plain_text(text: str) -> str:
     @ と # は全角にする。GitHub はメンション（@名前）と参照（#数字）を描画後の文字列から探すので、
     バックスラッシュでエスケープしても @・# として残り、通知・リンクが起きるため。
     """
-    text = _SPACES.sub(" ", text).strip().replace("@", "＠").replace("#", "＃")
+    text = _SPACES.sub(" ", BIDI.sub("", text)).strip().replace("@", "＠").replace("#", "＃")
     return _MARKDOWN.sub(r"\\\1", text)
 
 
