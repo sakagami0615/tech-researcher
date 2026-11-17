@@ -115,7 +115,11 @@ def test_get_issue_follows_301_transfer_to_new_repo(limits):
     r, fake = reader(
         limits,
         http_error(301, loc),
-        {"number": 7, "html_url": "https://github.com/New/Repo/issues/7"},
+        {
+            "number": 7,
+            "html_url": "https://github.com/New/Repo/issues/7",
+            "repository_url": f"{API}/repos/new/repo",
+        },
     )
     got = r.get_issue("o/r", 11)
     assert got == IssueLookup(IssueRef("new/repo", 7), transferred=True)
@@ -271,7 +275,11 @@ def test_get_issue_follows_relative_location(limits):
     r, fake = reader(
         limits,
         http_error(301, "/repositories/123/issues/7"),
-        {"number": 7, "html_url": "https://github.com/n/r/issues/7"},
+        {
+            "number": 7,
+            "html_url": "https://github.com/n/r/issues/7",
+            "repository_url": f"{API}/repos/n/r",
+        },
     )
     assert r.get_issue("o/r", 11).ref == IssueRef("n/r", 7)
     assert fake.calls[1][0] == f"{API}/repositories/123/issues/7"
@@ -360,3 +368,11 @@ def test_list_label_names_are_case_insensitive(limits):
         limits, [item(1, MARK, labels=[{"name": "Type:Report"}, {"name": "CADENCE:daily"}])]
     )
     assert [g.number for g in r.list_report_issues("o/r", "daily")] == [1]
+
+
+def test_transfer_by_repository_id_requires_repository_url(limits):
+    data = {"number": 7, "html_url": "https://github.com/n/r/issues/7"}
+    r, _ = reader(limits, http_error(301, f"{API}/repositories/1/issues/7"), data)
+    with pytest.raises(IssueReadError) as e:
+        r.get_issue("o/r", 11)
+    assert e.value.category == "invalid_response"

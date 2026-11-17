@@ -229,10 +229,13 @@ class IssueReader:
 
 def _same_repo(url: str, repo: str, repository_url) -> bool:
     """html_url の repo が、Location（`/repos/{repo}/issues/N` の形のとき）と応答の repository_url
-    （あるとき）の repo と一致するか。大文字・小文字は区別しない。"""
+    と一致するか。大文字・小文字は区別しない。Location が `/repositories/{id}/...` の形なら
+    repository_url は必須。"""
     path = url.removeprefix(API_ROOT)
     if path.startswith("/repos/") and "/".join(path.split("/")[2:4]).casefold() != repo.casefold():
         return False
+    if repository_url is None and path.startswith("/repositories/"):
+        return False  # Location に repo 名がないので、応答の repository_url で確かめる
     if repository_url is not None and (
         not isinstance(repository_url, str)
         or repository_url.casefold() != f"{API_ROOT}/repos/{repo}".casefold()
