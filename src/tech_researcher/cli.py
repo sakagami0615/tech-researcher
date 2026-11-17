@@ -163,7 +163,7 @@ def _record_model(files: RunFiles, model: str, log: RunLog) -> None:
     try:
         with closing(open_db(files.db)) as conn:
             previous = record_model(conn, files.run_id, model)
-    except (sqlite3.Error, LookupError, ValueError, OSError) as e:
+    except Exception as e:  # DB の誤り（SchemaError を含む）・行がないなど。中身はマスクしてログへ
         log.write("analyze", "warning", error_category="model_record_failed", exc=e)
         return
     if previous is not None and previous != model:

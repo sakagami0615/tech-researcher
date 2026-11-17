@@ -77,7 +77,7 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 - スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキル（AI への指示）は `agent/skills/tr-daily-evaluate/SKILL.md` です
 - ② の入力が `[limits.daily]` の `agent_input_bytes`（2MB）を超えたら、AI を呼ばずに実行エラー（`input_too_large`）にします
 - AI を呼ぶたびに、成否によらず、ログに `usage` の行を1行残します。`count` は渡した項目の数、`detail` は `model=…`（使われたモデル）・`input_bytes=…`（標準入力の大きさ）・`wall_ms=…`（コンテナの起動を含めた所要時間）と、Claude Code の結果の JSON の `duration_ms`・`duration_api_ms`・`num_turns`・トークン数（`input_tokens`・`output_tokens`・`cache_creation_input_tokens`・`cache_read_input_tokens`）・`total_cost_usd`（クライアント側の見積もりで、サブスクリプションの利用量そのものではない）です。値がないものは `unknown` です
-- 本番では、使われたモデルの名前を runs の `model` に記録します（③ の worker が書きます）。前回の本番の実行の値と違えば、ログに `warning`（`model_changed`）を残します。見たら AI の回帰テスト（D-07）を流してください。ドライランは記録せず、比べません
+- 本番では、使われたモデルの名前を runs の `model` に記録します（③ の worker が書きます）。前回の本番の実行の値と違えば、ログに `warning`（`model_changed`）を残します。見たら AI の回帰テスト（D-07）を流してください。`model_unknown`（本番の ② の結果からモデルの名前が取れない）と `model_record_failed`（runs に書けない。③ は続けます）は、モデルの変化を見逃しうるので、原因を調べ、必要なら回帰テストを流してください。ドライランは記録せず、比べません
 - イメージは `docker compose build agent` を実行した時点の `agent/skills/` と Claude Code の版を持ちます。`agent/skills/` や `CLAUDE_CODE_VERSION` を変えたら、`docker compose build agent` をやり直してください（`bin/tr-run` は作り直しません）
 
 ビルドと、トークンを使わない確認（版と、読み取り専用で起動できること）：
