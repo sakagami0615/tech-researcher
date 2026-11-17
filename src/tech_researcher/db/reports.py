@@ -70,8 +70,8 @@ class EntryRow:
             )
         if published and self.section == "theme" and self.theme_id is None:
             raise ValueError("掲載したテーマには theme_id が要る")
-        if published and not (self.item_ids or self.past_ids):
-            raise ValueError("掲載した項目には item_ids か past_ids が要る")
+        if published and not (self.item_ids or (self.section == "theme" and self.past_ids)):
+            raise ValueError("掲載した項目には item_ids が要る（テーマは past_ids だけでもよい）")
 
 
 @dataclass(frozen=True)
@@ -108,6 +108,9 @@ class ReportRow:
         allowed = DAILY_SECTIONS if self.cadence == "daily" else WEEKLY_SECTIONS
         if any(e.section not in allowed for e in self.entries):
             raise ValueError(f"{self.cadence} に使えない section がある")
+        themes = [e.theme_id for e in self.entries if e.status == "published" and e.theme_id]
+        if len(themes) != len(set(themes)):
+            raise ValueError("掲載したテーマの theme_id が重複している（D6(b)）")
 
 
 def save_report(conn: sqlite3.Connection, run_id: str, report: ReportRow) -> None:
@@ -167,7 +170,7 @@ def save_report(conn: sqlite3.Connection, run_id: str, report: ReportRow) -> Non
 def _check_published_items(conn: sqlite3.Connection, entries: Sequence[EntryRow]) -> None:
     numbers = set()
     for e in entries:
-        for ref in e.item_ids if e.status == "published" else ():
+        for ref in (*e.item_ids, *e.past_ids) if e.status == "published" else ():
             match = _ITEM_ID.fullmatch(ref)
             if match is None:
                 raise LookupError(f"掲載した項目の ID が items の形でない: {ref}")

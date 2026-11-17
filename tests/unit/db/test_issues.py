@@ -259,6 +259,40 @@ def test_recreate_moves_the_row_to_the_new_run_and_resets_projects(conn):
     assert count(conn) == 1
 
 
+def test_transfer_keeps_created_at_and_recreate_renews_it(conn):
+    created(conn)
+    first = find_report_issue(conn, "daily", DAY).created_at
+    later = AT + timedelta(hours=3)
+    record_issue(
+        conn,
+        RETRY,
+        "report",
+        "daily",
+        DAY,
+        "created",
+        later,
+        repo="o/r",
+        number=40,
+        replaces="transfer",
+    )
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.number, row.created_at, row.run_id) == (40, first, RUN)
+    record_issue(
+        conn,
+        RETRY,
+        "report",
+        "daily",
+        DAY,
+        "created",
+        later,
+        repo="o/r",
+        number=41,
+        replaces="recreate",
+    )
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.number, row.created_at, row.run_id) == (41, "2026-10-24T01:00:00Z", RETRY)
+
+
 def test_changing_the_number_in_the_same_run_clears_projects_records(conn):
     created(conn)
     (row,) = pending_projects(conn)

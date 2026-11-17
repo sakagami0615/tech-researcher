@@ -62,7 +62,7 @@ def record_issue(
 
     レポート Issue（report）の created で、同じ（cadence, target）の作成済みの記録が別の実行に
     あるときは、replaces で扱いを指定する（なければ一意制約のエラー。report-templates.md 4.3）。
-    - "transfer"：転送先の番号（301）。行の run_id は掲載した実行のまま、番号だけ置き換える
+    - "transfer"：転送先の番号（301）。行の run_id・作成時刻は元のまま、番号だけ置き換える
     - "recreate"：410・404 の後に、この実行で作り直した番号。行の run_id をこの実行に付け替える
       （「載せた」の導出が、本文を投稿した実行の項目を指すようにするため）
 
@@ -155,10 +155,11 @@ def _replace(
         conn.execute("UPDATE issues SET run_id = ? WHERE id = ?", (new_run, old_id))
     else:
         conn.execute(
-            "UPDATE issues SET run_id = ?, repo = ?, number = ?, created_at = ?,"
+            "UPDATE issues SET run_id = ?, repo = ?, number = ?,"
+            " created_at = CASE WHEN ? THEN ? ELSE created_at END,"
             " projects_state = 'pending', projects_attempts = 0, projects_last_error = NULL,"
             " projects_last_run_id = NULL WHERE id = ?",
-            (new_run, repo, number, created_at, old_id),
+            (new_run, repo, number, replaces == "recreate", created_at, old_id),
         )
     return True
 

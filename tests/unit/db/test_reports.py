@@ -183,10 +183,48 @@ def test_excluded_theme_keeps_the_ai_value_in_payload_only(conn):
         EntryRow("theme", "excluded", exclusion_reasons=("x",), theme_id="T0099")
 
 
+def test_duplicate_published_theme_ids_are_refused(conn):
+    start_run(conn, "20261026-070000-0002", weekly_target(date(2026, 10, 26), 1), AT)
+    a, b = add_item(conn, "https://e.com/a"), add_item(conn, "https://e.com/b")
+    themes = [EntryRow("theme", "published", (x,), theme_id="T0001") for x in (a, b)]
+    with pytest.raises(ValueError, match="重複"):
+        ReportRow("weekly", date(2026, 10, 26), "passed", {}, {}, themes, body_markdown="b")
+    # 除外したテーマは theme_id を持たないので、重複の数に入らない
+    ok = ReportRow(
+        "weekly",
+        date(2026, 10, 26),
+        "passed",
+        {},
+        {},
+        [themes[0], EntryRow("theme", "excluded", exclusion_reasons=("x",))],
+        body_markdown="b",
+    )
+    save_report(conn, "20261026-070000-0002", ok)
+    # 部分一意索引が DB でも止める
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO report_entries (run_id, entry_no, section, status, exclusion_reasons,"
+            " theme_id, item_ids_json, past_ids_json, payload_json) VALUES"
+            " ('20261026-070000-0002', 9, 'theme', 'published', '[]', 'T0001', '[]', '[]', '{}')"
+        )
+
+
+def test_past_ids_only_is_for_themes_and_must_exist(conn):
+    with pytest.raises(ValueError, match="item_ids"):
+        EntryRow("watch", "published", past_ids=("i1",))
+    with pytest.raises(ValueError, match="item_ids"):
+        EntryRow("daily_item", "published", past_ids=("i1",), display_no=1)
+    start_run(conn, "20261026-070000-0003", weekly_target(date(2026, 10, 26), 1), AT)
+    entry = EntryRow("theme", "published", past_ids=("i999999",), theme_id="T0001")
+    report = ReportRow("weekly", date(2026, 10, 26), "passed", {}, {}, [entry], body_markdown="b")
+    with pytest.raises(LookupError, match="items にない"):
+        save_report(conn, "20261026-070000-0003", report)
+
+
 def test_published_theme_may_have_only_past_ids():
     entry = EntryRow("theme", "published", past_ids=("i1",), theme_id="T0001")
     assert entry.item_ids == ()
-    with pytest.raises(ValueError, match="item_ids か past_ids"):
+    with pytest.raises(ValueError, match="item_ids が要る"):
         EntryRow("theme", "published", theme_id="T0001")
 
 

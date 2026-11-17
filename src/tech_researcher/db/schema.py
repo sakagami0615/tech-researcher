@@ -145,6 +145,8 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE UNIQUE INDEX report_entries_display_no
         ON report_entries (run_id, display_no) WHERE display_no IS NOT NULL;
     CREATE INDEX report_entries_theme_id ON report_entries (theme_id) WHERE theme_id IS NOT NULL;
+    CREATE UNIQUE INDEX report_entries_published_theme
+        ON report_entries (run_id, theme_id) WHERE section = 'theme' AND status = 'published';
 
     CREATE TABLE issues (
         id INTEGER PRIMARY KEY,
