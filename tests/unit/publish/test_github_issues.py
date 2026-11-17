@@ -123,6 +123,7 @@ def test_get_issue_follows_301_transfer_to_new_repo(limits):
     [
         "https://evil.example/repositories/1/issues/2",
         f"{API}/repositories/1/issues/2/../../x",
+        f"{API}/repos/../../issues/2",
         f"{API}/repos/o/r/pulls/2",
         f"{API}/repositories/1/issues/2?x=1",
         None,
@@ -244,3 +245,29 @@ def test_list_rejects_malformed_items(limits):
     r, _ = reader(limits, [{"body": MARK}])
     with pytest.raises(IssueReadError):
         list(r.list_report_issues("o/r", "daily"))
+
+
+def test_get_issue_rejects_pull_request_or_other_number(limits):
+    r, _ = reader(limits, {"number": 11, "pull_request": {}})
+    with pytest.raises(IssueReadError):
+        r.get_issue("o/r", 11)
+    r, _ = reader(limits, {"number": 12})
+    with pytest.raises(IssueReadError):
+        r.get_issue("o/r", 11)
+
+
+def test_list_redirect_is_a_failure(limits):
+    r, _ = reader(limits, http_error(301, f"{API}/repositories/1/issues"))
+    with pytest.raises(IssueReadError) as e:
+        list(r.list_report_issues("o/r", "daily"))
+    assert e.value.category == "redirect"
+
+
+def test_get_issue_follows_relative_location(limits):
+    r, fake = reader(
+        limits,
+        http_error(301, "/repositories/123/issues/7"),
+        {"number": 7, "html_url": "https://github.com/n/r/issues/7"},
+    )
+    assert r.get_issue("o/r", 11).ref == IssueRef("n/r", 7)
+    assert fake.calls[1][0] == f"{API}/repositories/123/issues/7"

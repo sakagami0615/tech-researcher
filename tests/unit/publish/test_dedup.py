@@ -136,11 +136,31 @@ def test_no_record_and_nothing_found_creates(conn):
     assert check(conn, FakeReader()) == Create(None)
 
 
-def test_record_of_another_repo_is_not_used(conn):
-    seed(conn, repo="other/repo")
-    reader = FakeReader()
-    assert check(conn, reader) == Create("recreate")
-    assert reader.gets == []
+def test_transferred_record_is_read_from_its_own_repo_on_next_check(conn):
+    seed(conn)
+    first = FakeReader({11: IssueLookup(IssueRef("new/repo", 7), transferred=True)})
+    check(conn, first)
+    second = FakeReader({7: IssueLookup(IssueRef("new/repo", 7))})
+    assert check(conn, second) == Existing(IssueRef("new/repo", 7), "db")
+    assert second.gets == [("new/repo", 7)]
+    assert second.lists == 0
+
+
+def test_repo_argument_is_lowercased(conn):
+    reader = FakeReader(listed=[listed(30)])
+    assert check_duplicate(conn, reader, "O/R", RETRY, "daily", DAY, AT).ref.repo == "o/r"
+
+
+def test_weekly_uses_its_own_cadence(conn):
+    monday = date(2026, 10, 19)
+    reader = FakeReader(listed=[listed(3, cadence="weekly", target=monday), listed(4)])
+    got = check_duplicate(conn, reader, REPO, RETRY, "weekly", monday, AT, dry_run=True)
+    assert got == Existing(IssueRef(REPO, 3), "labels")
+
+
+def test_first_matching_issue_is_the_oldest(conn):
+    reader = FakeReader(listed=[listed(30), listed(40)])
+    assert check(conn, reader, dry_run=True).ref.number == 30
 
 
 @pytest.mark.parametrize("category", ["auth", "rate_limited", "http_5xx", "redirect"])

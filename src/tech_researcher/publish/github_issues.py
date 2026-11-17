@@ -158,7 +158,12 @@ class IssueReader:
                 raise _error(url, classify(e), e.status) from e
             break
         data = _json(url, response)
-        if not isinstance(data, dict) or not isinstance(data.get("number"), int):
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("number"), int)
+            or "pull_request" in data
+            or (not transfers and data["number"] != number)
+        ):
             raise _error(url, "invalid_response", None)
         if not transfers:
             return IssueLookup(IssueRef(repo, number))
@@ -210,7 +215,12 @@ def _transfer_target(url: str, headers: Mapping[str, str]) -> str:
     """301 の Location。API の Issue の URL でなければ失敗（認証のヘッダを別の先に送らない）。"""
     location = {k.lower(): v for k, v in headers.items()}.get("location", "").strip()
     target = urljoin(url, location) if location else ""
-    if not target.startswith(API_ROOT + "/") or not _ISSUE_PATH.fullmatch(target[len(API_ROOT) :]):
+    path = target[len(API_ROOT) :]
+    if (
+        not target.startswith(API_ROOT + "/")
+        or not _ISSUE_PATH.fullmatch(path)
+        or {".", ".."} & set(path.split("/"))
+    ):
         raise _error(url, "redirect", 301)
     return target
 

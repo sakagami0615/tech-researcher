@@ -41,19 +41,20 @@ def check_duplicate(
     *,
     dry_run: bool = False,
 ) -> Existing | Create:
-    """repo は投稿先（小文字の `owner/repo`）。DB の記録が別のリポジトリのものなら使わない。"""
+    """repo は投稿先の `owner/repo`。DB の記録は、転送先など別のリポジトリでもその番号を読む。"""
+    repo = repo.lower()
     stale = False
     row = find_report_issue(conn, cadence, target)
     if row is not None:
-        if (row.repo or "").lower() == repo and row.number is not None:
-            found = reader.get_issue(repo, row.number)
+        if row.repo is not None and row.number is not None:
+            found = reader.get_issue(row.repo, row.number)
             if found.ref is not None and not found.transferred:
                 return Existing(found.ref, "db")
             if found.ref is not None:
                 if not dry_run:
                     _record(conn, run_id, run_id, cadence, target, at, found.ref, "transfer")
                 return Existing(found.ref, "transferred")
-        stale = True  # 410・404、または別のリポジトリの記録。2 で確かめ直す
+        stale = True  # 410・404。2 で確かめ直す
     for listed in reader.list_report_issues(repo, cadence):
         marker = listed.marker
         if marker is None or (marker.cadence, marker.target) != (cadence, target):
