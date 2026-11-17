@@ -606,3 +606,12 @@ def test_partial_reason_says_at_least_and_not_checked_to_the_end():
     )
     assert kept == []
     assert "少なくとも" in excluded[0].reason and "途中で調べきれなかった" in excluded[0].reason
+
+
+def test_source_narrow_spaces_copied_with_more_narrow_spaces_inside_words():
+    words = [english_run(250)[i : i + 5] for i in range(0, 250, 5)]
+    source = "\u202f".join(words)  # 元のテキストの空白がすべて U+202F
+    # AI がそれを写したうえで、単語の途中に U+200A を挟む
+    output = "\u202f".join(w[:2] + "\u200a" + w[2:] for w in words)
+    assert longest(output, source).violates
+    assert longest(output, source).weight >= 250

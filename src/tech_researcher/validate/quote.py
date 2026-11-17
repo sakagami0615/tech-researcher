@@ -48,6 +48,7 @@ _INVISIBLE_RANGES = (
 # 幅の狭い空白。NFKC は普通の空白にしてしまい、出力で英単語の途中に挟んで一致を切れるので、
 # 出力では NFKC の前に取り除く
 _NARROW_SPACES = dict.fromkeys(map(ord, "\u2006\u2008\u2009\u200a\u202f\u205f"))
+_NARROW = re.compile("[\u2006\u2008-\u200a\u202f\u205f]")
 
 # メタデータの語句を伏せる印は、語句ごとに私用領域の1文字にする（私用領域の文字は正規化で取り除く
 # ので、元の文字とぶつからない）。同じ語句は出力と元のテキストの両方で同じ印になり、一致を切らない
@@ -57,7 +58,7 @@ _MASKS = re.compile("[-]")
 
 # 出力の1つの欄を、元のテキストすべてと比べるときに、窓が元のテキストにある位置を調べる回数の上限。
 # 時間を抑えるための上限で、同じ窓が何千回も並ぶ退化した本文（同じ文字の繰り返しなど）でだけ届く。
-# 届いたときは、調べきれないので違反とみなす（安全側）
+# 上限まで調べてもまだ出現が残っているときは、調べきれないので違反とみなす（安全側）
 _MAX_HITS = 10_000
 
 # 行頭の箇条書き・番号（`- `・`* `・`+ `・`1. `）。記号を消す前に取り除く
@@ -106,9 +107,12 @@ class Quote:
 
 @dataclass(frozen=True)
 class _Prepared:
-    """正規化して語句を伏せた元のテキスト。1回だけ作って、出力のすべての欄との比較に使う。"""
+    """正規化して語句を伏せた元のテキスト。1回だけ作って、出力のすべての欄との比較に使う。
 
-    text: str
+    texts は、幅の狭い空白を取り除いた形と、普通の空白にした形（出力の同じ形と組にして比べる）。
+    """
+
+    texts: tuple[str, str]
     primary: bool
     terms: _Terms
     terms_key: tuple[str, ...]
@@ -170,44 +174,53 @@ def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
         )
         if key not in compiled:
             compiled[key] = _terms(key)
-        text = _double(_mask(normalize(source.text, external=True), compiled[key]))
-        prepared.append(_Prepared(text, source.primary, compiled[key], key))
+        spaced = _double(_mask(normalize(source.text, external=True), compiled[key]))
+        removed = spaced
+        if _NARROW.search(source.text):
+            removed = _double(_mask(normalize(source.text), compiled[key]))
+        prepared.append(_Prepared((removed, spaced), source.primary, compiled[key], key))
     return prepared
 
 
-def _outputs(text: str) -> tuple[str, ...]:
-    """AI の出力の正規化。幅の狭い空白を取り除いた形と、普通の空白にした形（元のテキストを
-    そのまま書き写したとき用）。同じなら1つにする。"""
-    removed, spaced = normalize(text), normalize(text, external=True)
-    return (removed,) if removed == spaced else (removed, spaced)
+def _outputs(text: str) -> tuple[str, str]:
+    """AI の出力の正規化。幅の狭い空白を取り除いた形と、普通の空白にした形。"""
+    spaced = normalize(text, external=True)
+    return (normalize(text) if _NARROW.search(text) else spaced), spaced
 
 
 def _compare(
-    outputs: Sequence[str], sources: Sequence[_Prepared], limits: QuoteLimits
+    outputs: tuple[str, str], sources: Sequence[_Prepared], limits: QuoteLimits
 ) -> Quote | None:
-    """正規化した出力（の形）を、用意した元のテキストすべてと比べ、最も長く違反した一致を返す。
+    """正規化した出力を、用意した元のテキストすべてと比べ、最も長く違反した一致を返す。
 
-    窓の位置を調べる回数の上限は、出力の形をまたいだ合計。上限に届いたときは、それまでに違反を
-    見つけていれば、その長さを partial の印を付けて返し、見つけていなければ、unchecked を返す。
+    幅の狭い空白を取り除いた形どうし、普通の空白にした形どうしで比べる。取り除いた形は、出力で
+    単語の途中に挟む回避を、普通の空白にした形は、元のテキストの空白をそのまま書き写したときを
+    見落とさない。
+
+    窓の位置を調べる回数の上限は、形をまたいだ合計。上限まで調べてもまだ出現が残っているときは、
+    それまでに違反を見つけていれば、その長さを partial の印を付けて返し、見つけていなければ、
+    unchecked を返す（ちょうど上限の回数で出現が尽きたときは、調べ終えているので、通常の判定）。
     """
     worst: Quote | None = None
     budget = [_MAX_HITS]
-    for output in outputs:
+    for index, output in enumerate(outputs):
         masked: dict[tuple[str, ...], str] = {}
         for source in sources:
+            if index == 1 and outputs[0] == outputs[1] and source.texts[0] == source.texts[1]:
+                continue  # 1つ目の形と同じ比べ方になる
             if source.terms_key not in masked:
                 masked[source.terms_key] = _double(_mask(output, source.terms))
             limit = limits.primary_max_en if source.primary else limits.max_en
             quote = _best_quote(
-                masked[source.terms_key], source.text, source.primary, limit, budget
+                masked[source.terms_key], source.texts[index], source.primary, limit, budget
             )
-            if quote.unchecked:  # 上限に届いた。これ以上は調べない
+            if quote.unchecked:  # 上限まで調べても出現が残っている。これ以上は調べない
                 if worst is not None and worst.violates:
                     return replace(worst, partial=True)
                 return quote
             if worst is None or _rank(quote) > _rank(worst):
                 worst = quote
-            if quote.partial:  # 上限に届いた。それまでの最長を、少なくともの長さとして返す
+            if quote.partial:  # 同上。それまでの最長を、少なくともの長さとして返す
                 return replace(worst, partial=True)
     return worst
 
