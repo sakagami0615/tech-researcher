@@ -308,6 +308,7 @@ def test_history_join_uses_the_items_primary_key(conn):
     sql = f"EXPLAIN QUERY PLAN SELECT it.canonical_url {history._PUBLISHED_DAILY}"
     plan = " ".join(row[3] for row in conn.execute(sql))
     assert "SCAN it" not in plan
+    assert "SEARCH it USING INTEGER PRIMARY KEY" in plan
 
 
 def test_leading_zero_id_is_not_published(conn):
