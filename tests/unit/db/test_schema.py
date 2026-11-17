@@ -41,6 +41,7 @@ def test_creates_db_with_settings(tmp_path):
         "star_snapshots",
         "reports",
         "report_entries",
+        "meta",
         "issues",
     }
     conn.close()

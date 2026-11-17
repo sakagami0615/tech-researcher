@@ -2,11 +2,19 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from tech_researcher.config import ConfigError
+from tech_researcher.db import meta
 from tech_researcher.db.issues import find_report_issue, pending_projects, record_issue
 from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.periods import daily_target
-from tech_researcher.publish.dedup import Create, Existing, check_duplicate
+from tech_researcher.publish.dedup import (
+    Create,
+    Existing,
+    Skipped,
+    check_duplicate,
+    check_duplicate_from_env,
+)
 from tech_researcher.publish.github_issues import (
     IssueLookup,
     IssueReadError,
@@ -203,3 +211,79 @@ def test_transfer_in_same_run_keeps_created_at(conn):
     check_duplicate(conn, reader, REPO, RUN, "daily", DAY, later)
     row = find_report_issue(conn, "daily", DAY)
     assert (row.run_id, row.number, row.created_at) == (RUN, 7, before)
+
+
+def test_410_then_labels_found_dry_run_writes_nothing(conn):
+    seed(conn)
+    reader = FakeReader({11: IssueLookup(None, status=410)}, [listed(30)])
+    assert check(conn, reader, dry_run=True) == Existing(IssueRef(REPO, 30), "labels")
+    row = find_report_issue(conn, "daily", DAY)
+    assert (row.number, row.run_id) == (11, RUN)
+    assert conn.execute("SELECT count(*) FROM meta").fetchone()[0] == 0
+
+
+def test_first_supplement_records_issue_repo_and_mismatch_stops_before_any_read(conn):
+    check(conn, FakeReader(listed=[listed(30)]))
+    assert conn.execute("SELECT value FROM meta").fetchone() == (REPO,)
+    reader = FakeReader()
+    with pytest.raises(ConfigError):
+        check_duplicate(conn, reader, "test/repo", RETRY, "daily", DAY, AT)
+    assert (reader.gets, reader.lists) == ([], 0)
+    check(conn, FakeReader({30: IssueLookup(IssueRef(REPO, 30))}))  # 同じ投稿先なら通る
+
+
+def test_mismatch_also_stops_dry_run(conn):
+    meta.record_issue_repo(conn, REPO)
+    with pytest.raises(ConfigError):
+        check_duplicate(conn, FakeReader(), "test/repo", RETRY, "daily", DAY, AT, dry_run=True)
+
+
+def test_no_db_dry_run_checks_labels_only():
+    reader = FakeReader(listed=[listed(30)])
+    got = check_duplicate(None, reader, REPO, RETRY, "daily", DAY, AT, dry_run=True)
+    assert got == Existing(IssueRef(REPO, 30), "labels")
+    with pytest.raises(ValueError):
+        check_duplicate(None, FakeReader(), REPO, RETRY, "daily", DAY, AT)
+
+
+ENV = {"GITHUB_ISSUE_TOKEN": "ghp_" + "z" * 36, "GITHUB_ISSUE_REPO": "O/R"}
+
+
+@pytest.mark.parametrize("drop", ["GITHUB_ISSUE_TOKEN", "GITHUB_ISSUE_REPO"])
+def test_dry_run_without_issue_token_or_repo_is_skipped(conn, drop):
+    env = {k: v for k, v in ENV.items() if k != drop}
+    made = []
+    got = check_duplicate_from_env(
+        conn,
+        None,
+        RETRY,
+        "daily",
+        DAY,
+        AT,
+        dry_run=True,
+        environ=env,
+        make_reader=lambda *a: made.append(a),
+    )
+    assert got == Skipped(drop)
+    assert made == []
+
+
+@pytest.mark.parametrize("drop", ["GITHUB_ISSUE_TOKEN", "GITHUB_ISSUE_REPO"])
+def test_real_run_without_issue_token_or_repo_fails(conn, drop):
+    env = {k: v for k, v in ENV.items() if k != drop}
+    with pytest.raises(IssueReadError):
+        check_duplicate_from_env(conn, None, RETRY, "daily", DAY, AT, environ=env)
+
+
+def test_from_env_builds_reader_with_issue_token_and_lowercased_repo(conn):
+    seen = []
+
+    def make(token, limits):
+        seen.append(token)
+        return FakeReader(listed=[listed(30)])
+
+    got = check_duplicate_from_env(
+        conn, None, RETRY, "daily", DAY, AT, environ=ENV, make_reader=make
+    )
+    assert got == Existing(IssueRef("o/r", 30), "labels")
+    assert seen == [ENV["GITHUB_ISSUE_TOKEN"]]

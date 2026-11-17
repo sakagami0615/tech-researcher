@@ -59,8 +59,12 @@ def http_error(status, location=None):
     return FetchError(f"HTTP {status}", 1, status, headers)
 
 
+def labels(cadence="daily"):
+    return [{"name": "type:report"}, {"name": f"cadence:{cadence}"}]
+
+
 def item(number, body, **extra):
-    return {"number": number, "body": body, **extra}
+    return {"number": number, "body": body, "labels": labels(), **extra}
 
 
 def test_marker_reads_only_the_first_line():
@@ -242,7 +246,7 @@ def test_list_failure_and_page_cap(limits, monkeypatch):
 
 
 def test_list_rejects_malformed_items(limits):
-    r, _ = reader(limits, [{"body": MARK}])
+    r, _ = reader(limits, [{"body": MARK, "labels": labels()}])
     with pytest.raises(IssueReadError):
         list(r.list_report_issues("o/r", "daily"))
 
@@ -271,3 +275,60 @@ def test_get_issue_follows_relative_location(limits):
     )
     assert r.get_issue("o/r", 11).ref == IssueRef("n/r", 7)
     assert fake.calls[1][0] == f"{API}/repositories/123/issues/7"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"number": 1, "body": MARK},  # labels がない
+        {"number": 1, "body": MARK, "labels": "type:report"},
+        {"number": 1, "body": MARK, "labels": ["type:report"]},
+        {"number": 1, "body": MARK, "labels": [{"name": 3}]},
+        {"number": True, "body": MARK, "labels": []},
+        {"number": 0, "body": MARK, "labels": []},
+    ],
+)
+def test_list_malformed_items_fail(limits, bad):
+    r, _ = reader(limits, [bad])
+    with pytest.raises(IssueReadError) as e:
+        list(r.list_report_issues("o/r", "daily"))
+    assert e.value.category == "invalid_response"
+
+
+def test_list_ignores_issues_without_both_labels(limits):
+    wrong = [
+        item(1, MARK, labels=[]),
+        item(2, MARK, labels=[{"name": "type:report"}]),
+        item(3, MARK, labels=labels("weekly")),
+        item(4, MARK, labels=[{"name": "type:rejected"}, {"name": "cadence:daily"}]),
+        item(5, MARK),
+    ]
+    r, _ = reader(limits, wrong)
+    assert [g.number for g in r.list_report_issues("o/r", "daily")] == [5]
+
+
+def test_list_failure_message_has_no_token(limits):
+    r, _ = reader(limits, FetchError(f"HTTP 500 {TOKEN}", 3, 500))
+    with pytest.raises(IssueReadError) as e:
+        list(r.list_report_issues("o/r", "daily"))
+    assert e.value.category == "http_5xx"
+    assert TOKEN not in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"number": 8, "html_url": "https://github.com/n/r/issues/8"},  # Location は 7
+        {"number": 7, "html_url": "https://github.com/n/r/issues/8"},
+        {"number": 7, "html_url": "https://github.com/n/../issues/7"},
+        {"number": 7, "html_url": "https://github.com/-n/r/issues/7"},
+        {"number": True, "html_url": "https://github.com/n/r/issues/1"},
+        {"number": 7, "html_url": "https://github.com/n/r/issues/7", "pull_request": {}},
+        {"number": 7},
+    ],
+)
+def test_transfer_response_is_checked(limits, data):
+    r, _ = reader(limits, http_error(301, f"{API}/repositories/1/issues/7"), data)
+    with pytest.raises(IssueReadError) as e:
+        r.get_issue("o/r", 11)
+    assert e.value.category == "invalid_response"

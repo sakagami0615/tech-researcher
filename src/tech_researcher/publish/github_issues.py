@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlencode, urljoin
 
-from tech_researcher.collect.github_api import API_ROOT, API_VERSION, classify
+from tech_researcher.collect.github_api import API_ROOT, API_VERSION, TOKEN_FORMAT, classify
 from tech_researcher.collect.http import FetchError, Response, fetch
 from tech_researcher.config import GITHUB_REPO_NAME, Limits
 
@@ -27,7 +27,6 @@ PER_PAGE = 100
 MAX_PAGES = 100  # 一覧の上限（1万件）。超えたら、見落として重複させないよう失敗にする
 MAX_TRANSFERS = 3  # 転送をたどる回数の上限
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
-_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+")
 _NAME = r"[A-Za-z0-9_.\-]+"
 # 転送先の Location に使える形（API の Issue の URL だけ）
 _ISSUE_PATH = re.compile(rf"/(?:repositories/[0-9]+|repos/{_NAME}/{_NAME})/issues/[0-9]+")
@@ -78,6 +77,11 @@ class Marker:
     run_id: str
 
 
+def _is_number(value) -> bool:
+    """Issue の番号。bool（True）や 0・負の数を通さない。"""
+    return type(value) is int and value > 0
+
+
 def parse_marker(body: str | None) -> Marker | None:
     """本文の1行目だけを読む。識別子でなければ None（2行目以降は見ない）。"""
     if not body:
@@ -103,7 +107,7 @@ def issue_token(environ: Mapping[str, str] = os.environ) -> str:
     value = (environ.get(TOKEN_ENV) or "").strip()
     if not value:
         raise IssueReadError(f"{TOKEN_ENV} が設定されていない", "auth")
-    if not _TOKEN.fullmatch(value):
+    if not TOKEN_FORMAT.fullmatch(value):
         raise IssueReadError(f"{TOKEN_ENV} に使えない文字が含まれる", "auth")
     return value
 
@@ -126,7 +130,7 @@ class IssueReader:
         *,
         fetch_url: Callable[..., Response] = fetch,
     ):
-        if not _TOKEN.fullmatch(token):
+        if not TOKEN_FORMAT.fullmatch(token):
             raise IssueReadError("トークンに使えない文字が含まれる", "auth")
         self._headers = {
             "Accept": "application/vnd.github+json",
@@ -160,7 +164,7 @@ class IssueReader:
         data = _json(url, response)
         if (
             not isinstance(data, dict)
-            or not isinstance(data.get("number"), int)
+            or not _is_number(data.get("number"))
             or "pull_request" in data
             or (not transfers and data["number"] != number)
         ):
@@ -168,9 +172,15 @@ class IssueReader:
         if not transfers:
             return IssueLookup(IssueRef(repo, number))
         match = _HTML_URL.fullmatch(str(data.get("html_url")))
-        if match is None or int(match[2]) != data["number"]:
+        new_repo = match[1].lower() if match else ""
+        # Location の末尾・応答の number・html_url の番号が一致し、repo が投稿先として使える形のとき
+        if (
+            match is None
+            or not GITHUB_REPO_NAME.fullmatch(new_repo)
+            or not (int(match[2]) == data["number"] == int(url.rsplit("/", 1)[1]))
+        ):
             raise _error(url, "invalid_response", None)
-        return IssueLookup(IssueRef(match[1].lower(), data["number"]), transferred=True)
+        return IssueLookup(IssueRef(new_repo, data["number"]), transferred=True)
 
     def list_report_issues(self, repo: str, cadence: str) -> Iterator[ListedIssue]:
         """`type:report` と `cadence:{cadence}` のラベルの Issue を、Open・Closed とも全ページ読む。
@@ -196,10 +206,15 @@ class IssueReader:
             if not isinstance(items, list):
                 raise _error(url, "invalid_response", None)
             for item in items:
-                if not isinstance(item, dict) or not isinstance(item.get("number"), int):
+                if not isinstance(item, dict) or not _is_number(item.get("number")):
                     raise _error(url, "invalid_response", None)
                 if "pull_request" in item:
                     continue
+                names = _label_names(item.get("labels"))
+                if names is None:
+                    raise _error(url, "invalid_response", None)
+                if not {"type:report", f"cadence:{cadence}"} <= names:
+                    continue  # ラベルが付いていない（外された）ものは候補にしない
                 body = item.get("body")
                 marker = parse_marker(body if isinstance(body, str) else None)
                 yield ListedIssue(item["number"], marker)
@@ -209,6 +224,18 @@ class IssueReader:
 
     def _get(self, url: str) -> Response:
         return self._fetch(url, self._limits, headers=self._headers, follow_redirects=False)
+
+
+def _label_names(labels) -> set[str] | None:
+    """応答の labels のラベル名。形が壊れていれば None。"""
+    if not isinstance(labels, list):
+        return None
+    names = set()
+    for label in labels:
+        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+            return None
+        names.add(label["name"])
+    return names
 
 
 def _transfer_target(url: str, headers: Mapping[str, str]) -> str:
