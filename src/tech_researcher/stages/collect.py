@@ -49,7 +49,7 @@ from tech_researcher.collect.rss import collect_feed, feed_source_id
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, Feed, Limits, Qiita
 from tech_researcher.db.history import featured_urls, shown_urls
-from tech_researcher.db.runs import record_source_fetch
+from tech_researcher.db.runs import fetch_incomplete, record_source_fetch
 from tech_researcher.db.star_snapshots import load_star_snapshot
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Period, Target
@@ -351,6 +351,8 @@ def _collect_github(
         try:
             client = collectors.github(token, config.limits)
             stored = load_star_snapshot(db, target.key) if db else {}
+            # 最初の実行が測り残した日は、再実行で測れた分も判定に入れる
+            resumed = bool(stored) and fetch_incomplete(db, GITHUB_REPOS_SOURCE_ID, target.key)
             mentions = [rec for r in results if r.error is None for rec in r.records]
             found = collect_candidates(settings, target.key, mentions, client, db)
             stars = measure_stars(
@@ -364,19 +366,19 @@ def _collect_github(
             previous = load_star_snapshot(db, target.key - timedelta(days=1)) if db else {}
             # 同じ対象日の記録があれば（再実行・ドライラン）、その記録だけで判定する。再実行で候補が
             # 変わっても、判定の対象が変わらないようにするため（新しい候補は測って記録するだけ）
-            judged = replace(stars, snapshots=tuple(stored[r] for r in sorted(stored)))
-            spikes = judge_star_spikes(
-                settings, target, judged if stored else stars, previous, featured
-            )
+            rows = stored if stored and not resumed else {**stored, **_by_repo(stars.snapshots)}
+            judged = replace(stars, snapshots=tuple(rows[r] for r in sorted(rows)))
+            spikes = judge_star_spikes(settings, target, judged, previous, featured)
             records, readme_calls = _with_readmes(spikes.records, client, featured, log)
             star_unjudged = spikes.star_unjudged
             # 最初の失敗は Search を先に見る
             failure = found if found.error is not None else stars
             github = GitHubFetch(
-                len(stars.snapshots),
+                len(judged.snapshots),
                 found.search_attempts + stars.calls + readme_calls,
                 failure.error,
                 failure.error_category,
+                partial=failure.error is not None or bool(stars.unmeasured),
             )
         except Exception as e:
             name = type(e).__name__
@@ -397,6 +399,10 @@ def _collect_github(
         detail="skipped" if github.skipped else github.error,
     )
     return GitHubOutcome(github, at, records, star_unjudged)
+
+
+def _by_repo(snapshots):
+    return {s.repo: s for s in snapshots}
 
 
 def _with_readmes(

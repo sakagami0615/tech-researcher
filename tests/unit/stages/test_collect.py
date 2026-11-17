@@ -292,12 +292,16 @@ class FakeGitHub:
         stars=None,
         readmes=None,
         created=None,
+        graphql_fail=(),
+        search_error=None,
     ):
         self.calls = calls
         self.search_repos = search_repos
         self.graphql_error = graphql_error
         self.stars = stars or {}  # リポジトリ → 累計 Star 数（なければ 300）
         self.readmes = readmes or {}  # リポジトリ → README の本文（なければ 404）
+        self.graphql_fail = set(graphql_fail)  # この測定の問い合わせが失敗するリポジトリ
+        self.search_error = search_error  # Search の失敗の HTTP の状態
         self.created = created or {}  # リポジトリ → 作成日時（なければ REPO_CREATED）
 
     def fetch(self, url, limits, *, headers, sleep, follow_redirects, data=None):
@@ -311,6 +315,8 @@ class FakeGitHub:
             return Response(url, 200, json.dumps(body).encode(), 1)
         if data is None:
             self.calls.append("github_search")
+            if self.search_error is not None:
+                raise FetchError(f"HTTP {self.search_error}", 1, self.search_error)
             items = [{"full_name": r} for r in self.search_repos]
             body = {"total_count": len(items), "incomplete_results": False, "items": items}
             return Response(url, 200, json.dumps(body).encode(), 1)
@@ -319,15 +325,21 @@ class FakeGitHub:
             raise FetchError("HTTP 401", 1, self.graphql_error)
         variables = json.loads(data)["variables"]
         nodes = {}
+        errors = []
         for key, owner in variables.items():
             if key.startswith("o"):
                 name = variables["n" + key[1:]]
+                if f"{owner}/{name}" in self.graphql_fail:
+                    nodes["r" + key[1:]] = None
+                    errors.append({"type": "INTERNAL", "path": ["r" + key[1:]]})
+                    continue
                 nodes["r" + key[1:]] = {
                     "nameWithOwner": f"{owner}/{name}",
                     "stargazerCount": self.stars.get(f"{owner}/{name}", 300),
                     "createdAt": self.created.get(f"{owner}/{name}", REPO_CREATED),
                 }
-        return Response(url, 200, json.dumps({"data": nodes}).encode(), 1)
+        body = {"data": nodes, **({"errors": errors} if errors else {})}
+        return Response(url, 200, json.dumps(body).encode(), 1)
 
     def client(self, token, limits):
         return GitHubClient(token, limits, fetch_url=self.fetch, sleep=lambda s: None)
@@ -800,6 +812,95 @@ def test_rerun_judges_only_repos_recorded_on_the_first_run(tmp_path):
     assert conn.execute(
         "SELECT count(*) FROM star_snapshots WHERE repo = 'late/new'"
     ).fetchone() == (1,)
+    conn.close()
+
+
+def run_day(conn, tmp_path, run_id, github, collectors=None):
+    start_run(conn, run_id, TARGET, FETCHED)
+    return run_collect(
+        all_sources_config(),
+        TARGET,
+        tmp_path,
+        prod_log(tmp_path, run_id),
+        collectors=collectors or all_collectors([], github=github),
+        db=conn,
+        write_db=True,
+    )
+
+
+def github_urls(tmp_path):
+    return sorted(i.url for i in load_collected(tmp_path / COLLECTED) if "github.com" in i.url)
+
+
+def test_rerun_after_a_partial_first_run_judges_the_repos_measured_later(tmp_path):
+    """最初の実行が測り残した日は、再実行で測れた分も判定に入れる。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    previous_day(conn, hot=["hot/repo", "late/hot"], featured=[])
+    stars = {"hot/repo": 1300, "late/hot": 1400}
+    created = {"hot/repo": OLD_CREATED, "late/hot": OLD_CREATED}
+    first = FakeGitHub([], search_repos=(), stars=stars, created=created, graphql_fail={"late/hot"})
+    run_day(conn, tmp_path, PROD, first)
+    assert "https://github.com/late/hot" not in github_urls(tmp_path)
+    row = conn.execute(
+        "SELECT status, error_category, record_count FROM source_fetches"
+        " WHERE run_id = ? AND source_id = 'github_repos'",
+        (PROD,),
+    ).fetchone()
+    assert row == ("ok", "partial", 2)  # 測れた分があれば ok。測り残しの印を残す
+    second = FakeGitHub([], search_repos=(), stars=stars, created=created)
+    run_day(conn, tmp_path, "20261024-070000-beef", second)
+    assert "https://github.com/late/hot" in github_urls(tmp_path)  # 今回測れた分も判定する
+    row = conn.execute(
+        "SELECT status, error_category, record_count FROM source_fetches"
+        " WHERE run_id = '20261024-070000-beef' AND source_id = 'github_repos'"
+    ).fetchone()
+    assert row == ("ok", None, 3)  # 完了した。次の再実行は、この回の記録だけで判定する
+    conn.close()
+
+
+def test_rerun_with_a_failed_search_still_judges_from_the_recorded_day(tmp_path):
+    """候補の検索が失敗しても、記録から判定できれば github_repos は失敗にしない。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    previous_day(conn, hot=["hot/repo"], featured=[])
+    kwargs = {"stars": {"hot/repo": 1300}, "created": {"hot/repo": OLD_CREATED}}
+    run_day(conn, tmp_path, PROD, FakeGitHub([], search_repos=("hot/repo",), **kwargs))
+    first = github_urls(tmp_path)
+    summary = run_day(
+        conn,
+        tmp_path,
+        "20261024-070000-beef",
+        FakeGitHub([], search_error=401, **kwargs),
+    )
+    assert github_urls(tmp_path) == first
+    assert "github_repos" not in summary["failed_sources"]
+    status, count = conn.execute(
+        "SELECT status, record_count FROM source_fetches"
+        " WHERE run_id = '20261024-070000-beef' AND source_id = 'github_repos'"
+    ).fetchone()
+    assert (status, count) == ("ok", 2)  # 判定に使った測定の数（hot/repo と mentioned/repo）
+    conn.close()
+
+
+def test_featured_repo_with_another_event_is_passed_without_the_spike(tmp_path):
+    """載せ済みのリポジトリが別の出来事で渡るときは、急上昇の出来事と増分を外す。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    previous_day(conn, hot=[], featured=["done/repo"])
+    github = FakeGitHub(
+        [],
+        search_repos=("done/repo",),
+        stars={"done/repo": 1900},
+        created={"done/repo": OLD_CREATED},
+    )
+    collectors = all_collectors([], github=github)
+    release = record("rss:a", "https://github.com/done/repo", IN)
+    collectors = replace(collectors, feed=lambda f, limits: SourceResult("rss:a", (release,), 1))
+    summary = run_day(conn, tmp_path, PROD, github, collectors)
+    assert summary["held_items"] == 0
+    item = {i.url: i for i in load_collected(tmp_path / COLLECTED)}["https://github.com/done/repo"]
+    assert [e.type for e in item.events] == ["published"]
+    assert all(e.type == "published" for r in item.sources for e in r.events)
+    assert item.github.star_delta_24h is None
+    assert all(a.metric != "star_delta_24h" for a in item.attention)
     conn.close()
 
 

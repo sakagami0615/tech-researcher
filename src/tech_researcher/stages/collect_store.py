@@ -34,6 +34,7 @@ from tech_researcher.db.items import ItemRow, upsert_items
 from tech_researcher.db.runs import SourceFetch, record_source_fetch
 from tech_researcher.periods import Target
 
+PARTIAL = "partial"  # 一部だけ測れた（理由の分類がないとき）
 FETCH_FAILED = "fetch_failed"  # 収集処理が分類を付けなかった失敗
 # 掲載の根拠とする出来事の順位（小さいほど先。data-model.md 2.4）
 INCLUSION_ORDER = {"published": 0, "released": 0, "new_repo": 1, "attention_spike": 2, "posted": 3}
@@ -46,6 +47,9 @@ class GitHubFetch:
 
     measured は測った（同じ対象日の記録を使ったものを含む）リポジトリの数。
     error・error_category は最初の失敗（Search を先に見る）。skipped は測らなかった（週次）。
+    partial は一部だけ測れた・候補を取れなかった（測れなかった候補か、失敗があった）。
+    測れたものがあるときは、status は ok のまま error_category に失敗の分類（なければ
+    PARTIAL）を持たせ、再実行が測り残しを判定に入れるかの印にする。
     """
 
     measured: int
@@ -53,6 +57,7 @@ class GitHubFetch:
     error: str | None = None
     error_category: str | None = None
     skipped: bool = False
+    partial: bool = False
 
     @property
     def failed(self) -> bool:
@@ -65,6 +70,8 @@ class GitHubFetch:
             status, category = "failed", self.error_category or FETCH_FAILED
         else:
             status, category = ("ok" if self.measured else "no_results"), None
+            if self.measured and self.partial:
+                category = self.error_category or PARTIAL
         return SourceFetch(
             GITHUB_REPOS_SOURCE_ID,
             status,
