@@ -348,8 +348,8 @@ def _collect_github(
     else:
         try:
             client = collectors.github(token, config.limits)
-            records = [rec for r in results if r.error is None for rec in r.records]
-            found = collect_candidates(settings, target.key, records, client, db)
+            mentions = [rec for r in results if r.error is None for rec in r.records]
+            found = collect_candidates(settings, target.key, mentions, client, db)
             stars = measure_stars(
                 found.candidates,
                 client,

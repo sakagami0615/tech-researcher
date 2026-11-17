@@ -712,6 +712,56 @@ def test_spike_and_featured_exclusion_with_history(tmp_path):
     conn.close()
 
 
+def test_dry_run_excludes_with_history_from_a_readonly_connection(tmp_path):
+    """ドライランは読み取り専用の履歴で除外を判定し、何も書かない（D-22）。"""
+    path = tmp_path / "tech-researcher.sqlite3"
+    conn = open_db(path)
+    previous_day(conn, hot=["hot/repo"], featured=["done/repo"])
+    conn.close()
+    ro = open_readonly(path)
+    repos = ("hot/repo", "done/repo")
+    github = FakeGitHub(
+        [],
+        search_repos=repos,
+        stars={"hot/repo": 1300, "done/repo": 1900},
+        created={r: OLD_CREATED for r in repos},
+    )
+    summary = run_collect(
+        all_sources_config(),
+        TARGET,
+        tmp_path,
+        prod_log(tmp_path, "dry-20261024-060000-abcd"),
+        collectors=all_collectors([], github=github),
+        db=ro,
+        write_db=False,
+    )
+    ro.close()
+    assert summary["held_items"] == 1 and summary["unjudged_star"] is False
+    urls = {i.url for i in load_collected(tmp_path / COLLECTED)}
+    assert "https://github.com/hot/repo" in urls and "https://github.com/done/repo" not in urls
+    conn = open_db(path)
+    assert conn.execute("SELECT count(*) FROM items WHERE target = '2026-10-23'").fetchone() == (0,)
+    conn.close()
+
+
+def test_unexpected_error_in_github_does_not_duplicate_other_sources(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr("tech_researcher.stages.collect.measure_stars", boom)
+    config = replace(all_sources_config(), feeds=(feed("a"),))
+    summary = run_collect(
+        config,
+        TARGET,
+        tmp_path,
+        prod_log(tmp_path, "dry-20261024-060000-abcd"),
+        collectors=all_collectors([]),
+    )
+    assert "github_repos" in summary["failed_sources"]
+    items = {i.url: i for i in load_collected(tmp_path / COLLECTED)}
+    assert len(items["https://a.example.com/1"].sources) == 1  # 出典が二重にならない
+
+
 def test_featured_does_not_exclude_the_same_target_on_rerun(tmp_path):
     conn = open_db(tmp_path / "tech-researcher.sqlite3")
     previous_day(conn, hot=[], featured=["done/repo"])

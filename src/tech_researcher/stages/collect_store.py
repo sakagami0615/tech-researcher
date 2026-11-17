@@ -70,7 +70,7 @@ class GitHubFetch:
             status,
             self.attempts,
             self.measured,
-            min(in_period, self.measured),
+            in_period,
             fetched_at,
             category,
         )
