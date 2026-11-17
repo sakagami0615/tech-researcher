@@ -762,7 +762,7 @@ def agent(host, monkeypatch):
         host._append("agent-args", list(args))
         data = json.loads(stdin)
         result = SUCCESS | {
-            "modelUsage": {host.model: SUCCESS["modelUsage"][MODEL]},
+            "modelUsage": {host.model: SUCCESS["modelUsage"][MODEL]} if host.model else {},
             "structured_output": host.ai(data),
         }
         return StageResult(0, json.dumps(result, ensure_ascii=False), "")
@@ -814,6 +814,28 @@ def test_production_records_model_and_warns_when_it_changes(agent):
     [warning] = [r for r in log_of(agent, third["run_id"]) if r["event"] == "warning"]
     assert (warning["stage"], warning["error_category"]) == ("analyze", "model_changed")
     assert f"{MODEL} から claude-opus-5-20261101" in warning["detail"]
+
+
+def test_unknown_model_in_production_is_warned(agent):
+    agent.model = None  # 結果の JSON に modelUsage がない
+    _, summary, _ = agent.run()
+    assert models_of(agent) == [(summary["run_id"], None)]
+    warnings = [r for r in log_of(agent, summary["run_id"]) if r["event"] == "warning"]
+    assert [r["error_category"] for r in warnings] == ["model_unknown"]
+
+
+def test_model_record_failure_does_not_stop_verify(agent, monkeypatch):
+    def broken(*args, **kwargs):
+        raise LookupError("runs に開始の記録がない")
+
+    monkeypatch.setattr(cli, "record_model", broken)
+    code, summary, _ = agent.run()
+    assert (code, summary["failed_stage"]) == (1, "post")  # ③ は最後まで進んだ
+    log = log_of(agent, summary["run_id"])
+    assert ("analyze", "warning", "model_record_failed") in [
+        (r["stage"], r["event"], r.get("error_category")) for r in log
+    ]
+    assert ("verify", "end") in [(r["stage"], r["event"]) for r in log]
 
 
 def test_dry_run_does_not_record_or_compare_models(agent):

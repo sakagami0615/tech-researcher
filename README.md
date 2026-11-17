@@ -100,7 +100,8 @@ docker compose run --rm -T agent agent-run tr-daily-evaluate -p /tr-daily-evalua
   --no-session-persistence < tests/fixtures/agent/daily-input.json > /tmp/daily-result.json
 ```
 
-- `is_error` が `false` で、`structured_output` に日本語の項目があれば、スキルが読まれ、スキーマが受け付けられ、`/tmp` が noexec のままで推論が終わっています。`num_turns` は `[limits]` の `agent_max_turns` を決める材料にします
+- `is_error` が `false` で `structured_output` があれば、スキーマが受け付けられ、`/tmp` が noexec のままで推論が終わっています。`num_turns` は `[limits]` の `agent_max_turns` を決める材料にします
+- スキルが読まれたかは、スキルにだけ書いた決まりで確かめます：`category` が5つの値のどれか、`d1` と `d2`（同じ発表）が1つの項目にまとまっている、`d4` の項目に `period_event` がある、価値の低い `d6` が選ばれていない、文章に URL がない。`--output-format stream-json --verbose` にすると、初期化の情報でスキルが読み込まれたかも見られます
 - 成功の結果の形の例は `tests/fixtures/agent/daily-success.json` です。実際の出力で形が違えば、この例と `src/tech_researcher/agent/invoke.py` を直します
 
 ## 実行（bin/tr-run）

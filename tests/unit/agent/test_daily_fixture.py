@@ -6,7 +6,7 @@
   使う（README の「トークンを使う確認」）
 - daily-success.json：その入力に対する Claude Code の成功の結果の JSON の例。形は
   not-logged-in.json（実際の出力）に合わせて組み立てた。structured_output はスキルの決まりどおりに
-  書いたもので、スキーマと ③ の項目の検査（D1 を除く）をすべて通る
+  書いたもので、スキーマと ③ の項目の検査（D1 を含む）をすべて通る
 """
 
 import json

@@ -157,10 +157,15 @@ def _finish(conn: sqlite3.Connection, run_id: str, category: str | None) -> None
 def _record_model(files: RunFiles, model: str, log: RunLog) -> None:
     """本番の ② で使われたモデルを runs に記録し、前回の本番から変わっていればログで知らせる。
 
-    運用者はその警告を見て、AI の回帰テスト（D-07）を流す。
+    運用者はその警告を見て、AI の回帰テスト（D-07）を流す。記録は補助の機能なので、失敗しても
+    ③ は止めず、警告（model_record_failed）を残して検査を続ける。
     """
-    with closing(open_db(files.db)) as conn:
-        previous = record_model(conn, files.run_id, model)
+    try:
+        with closing(open_db(files.db)) as conn:
+            previous = record_model(conn, files.run_id, model)
+    except (sqlite3.Error, LookupError, ValueError, OSError) as e:
+        log.write("analyze", "warning", error_category="model_record_failed", exc=e)
+        return
     if previous is not None and previous != model:
         log.write(
             "analyze",

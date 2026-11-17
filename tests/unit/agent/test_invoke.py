@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from tech_researcher.agent import invoke
+from tech_researcher.agent.daily import CATEGORIES
+from tech_researcher.validate import text as text_checks
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "agent"
 NOT_LOGGED_IN = (FIXTURES / "not-logged-in.json").read_text(encoding="utf-8")
@@ -126,7 +128,18 @@ def test_call_passes_input_on_stdin_to_agent_service(schema):
 def test_repository_has_the_daily_skill():
     # イメージに入れる内側のスキル（docker/agent.Dockerfile が agent/skills/ をコピーする）
     skill = Path(__file__).parents[3] / "agent" / "skills" / invoke.DAILY_SKILL / "SKILL.md"
-    assert skill.read_text(encoding="utf-8").startswith(f"---\nname: {invoke.DAILY_SKILL}\n")
+    text = skill.read_text(encoding="utf-8")
+    assert text.startswith(f"---\nname: {invoke.DAILY_SKILL}\n")
+    # スキルに書いた目安が、③ の検査の値（コードの固定値。その2倍で除外）とカテゴリにそろっている
+    for limit in (
+        text_checks.HEADLINE_LIMIT,
+        text_checks.POINT_LIMIT,
+        *text_checks.IMPORTANCE_LIMIT.values(),
+        text_checks.PERIOD_EVENT_LIMIT,
+    ):
+        assert f"{limit}字以内" in text
+    assert f"1〜{text_checks.POINTS_LIMIT}つ" in text
+    assert all(f"| `{c}` |" in text for c in CATEGORIES)
 
 
 @pytest.mark.parametrize(("size", "called"), [(17, True), (16, False)])
@@ -319,6 +332,16 @@ def test_timeout_is_its_own_category(schema):
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "timeout"
+    assert (e.value.models, e.value.usage) == ((), None)
+
+
+def test_timeout_keeps_usage_when_result_was_printed(schema):
+    runner = FakeRunner(Done(None, result(num_turns=7)))
+    with pytest.raises(invoke.AgentError) as e:
+        call(runner, schema)
+    assert e.value.category == "timeout"
+    assert e.value.usage.num_turns == 7
+    assert e.value.models == ("claude-opus-4-5-20251101",)
 
 
 def test_unreadable_schema_is_bad_schema(tmp_path):

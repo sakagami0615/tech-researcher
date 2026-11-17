@@ -564,6 +564,11 @@ def _run_stages(job: Job) -> Summary:
     return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
 
 
+# claude を動かさずに終わった失敗（上限の超過、スキーマの誤り、イメージにスキルがない）。
+# usage の行を残さない
+_NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
+
+
 def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類と、使われたモデルを返す。
 
@@ -607,7 +612,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
                 max_input_bytes=limit,
             )
         except invoke.AgentError as e:
-            if e.category != "input_too_large":  # 上限を超えたときは AI を呼んでいない
+            if e.category not in _NOT_CALLED:
                 _log_usage(job, data, body, started, e.models, e.usage)
             # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
             detail = job.scanner.mask(e.detail)[-STDERR_TAIL_CHARS:]
@@ -623,6 +628,9 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
             return "agent_failed", ()
         _log_usage(job, data, body, started, result.models, result.usage)
         output, models = result.output, result.models
+        if not models and not job.files.dry_run:
+            # 結果の JSON の形が変わったなど。モデルの変化を見逃すので知らせる（structure.md 3.3）
+            job.log.write("analyze", "warning", error_category="model_unknown")
     else:
         output = {"items": []}
     try:

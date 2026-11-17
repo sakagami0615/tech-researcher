@@ -190,7 +190,16 @@ def call_agent(
     command = claude_command(skill, load_schema(schema), max_turns)
     result = runner.run(AGENT_SERVICE, command, timeout_s, stdin=body)
     if result.returncode is None:
-        raise AgentError("timeout", result.stderr, remove_failed=result.remove_failed)
+        # 止める前に結果の JSON が出ていれば、使った量とモデルは残す
+        data = _last_json(result.stdout)
+        done = data is not None and data.get("type") == "result"
+        raise AgentError(
+            "timeout",
+            result.stderr,
+            remove_failed=result.remove_failed,
+            models=_models(data.get("modelUsage")) if done else (),
+            usage=_usage(data) if done else None,
+        )
     if result.returncode == MISSING_SKILL_EXIT and _last_json(result.stdout) is None:
         raise AgentError("missing_skill", result.stderr, remove_failed=result.remove_failed)
     try:

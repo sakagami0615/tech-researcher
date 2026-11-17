@@ -859,6 +859,15 @@ def test_broken_schema_is_analyze_error_without_ai(agent, capfd, monkeypatch, tm
     summary = summary_of(capfd)
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "bad_schema")
     assert [_service(c) for c in agent.calls()] == ["worker"]  # AI を呼ばない
+    assert not [r for r in agent.log(summary["run_id"]) if r["event"] == "usage"]
+
+
+def test_missing_skill_in_image_leaves_no_usage(agent, capfd):
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": "", "exit": 78})
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["error_category"] == "missing_skill"
+    assert not [r for r in agent.log(summary["run_id"]) if r["event"] == "usage"]
 
 
 def _collected(job, stage, minutes, parse, extra=()):
