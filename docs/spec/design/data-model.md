@@ -303,7 +303,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `run_id` | TEXT PK | 1回の実行に1件 |
 | `cadence`・`target` | TEXT | 対象 |
 | `status` | TEXT | `passed`・`rejected` |
-| `rejected_checks` | TEXT | 不合格となった検証項目（例：`D6a`、`all_excluded`） |
+| `rejected_checks` | TEXT | 不合格となった検査の名前の JSON 配列（例：`["invalid_output"]`、`["all_excluded"]`）。合格は `[]`。名前は ③ のログの `error_category` と同じ分類名（下の注）。秘匿情報を検出して公開を止めたときは `secret_detected`（状態は `rejected`。本文は保存しない） |
 | `counts_json` | TEXT | 収集 M 件／AI の出力 N 件／除外 X 件（理由別）／掲載 Y 件（不合格 Issue の「件数」） |
 | `verification_json` | TEXT | 検証項目ごとの合否（不合格 Issue の付記） |
 | `ai_output_json` | TEXT | ② の出力の原文（D6(a) で不合格のときの調査用） |
@@ -316,14 +316,22 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `run_id`・`entry_no` | TEXT・INTEGER | PK。`entry_no` は AI の出力の順 |
 | `section` | TEXT | `daily_item`・`theme`・`tech_change`・`comparison`・`watch` |
 | `status` | TEXT | `published`（本文に入れた）・`excluded` |
-| `exclusion_reasons` | TEXT | `invalid_id`（D6b）・`invalid_source`（D1）・`missing_period_event`・`forbidden_link`（D2）・`forbidden_html`（D3）・`too_long`（文字数・要点数）・`duplicate_id`（D6b）など。D4 の分類名は実装で決める |
+| `exclusion_reasons` | TEXT | 除外の理由の名前の JSON 配列（`excluded` のときだけ1つ以上。`published` は `[]`）。名前は ③ のログの `error_category` と同じ分類名：`invalid_id`（D6b）・`invalid_source`（D1）・`missing_period_event`・`forbidden_link`（D2）・`forbidden_html`（D3）・`too_long`（文字数・要点数）・`duplicate_id`（D6b）・`long_quote`（D4）など（下の注） |
 | `display_no` | INTEGER | 日次の通し番号（`published` のときだけ） |
 | `theme_id` | TEXT | 週次のテーマだけ（3.6） |
 | `item_ids_json`・`past_ids_json` | TEXT | AI が選んだ ID |
 | `payload_json` | TEXT | AI の文章の部品（見出し・要点・重要性・状態など） |
 
 - 除外した項目もここに残す（US-E7-01「ログと履歴に記録」。Issue には書かない）
+- 除外の理由・不合格の検査の名前は、検査の分類（D1・D6b など）ではなく、③ のログの `error_category` と同じ名前にそろえる。ログと履歴を同じ語で検索でき、検査の実装が分類名を1か所に持てるため（D1 は `invalid_source`、D6(a) は `invalid_output`、D6(b) の ID の存在は `invalid_id`・重複は `duplicate_id`、D2・D3・D4 は各検査の分類名）。DB は名前の形（小文字の英数字と `_`）だけを確かめ、一覧は持たない。検査が増えても版を上げないため
 - 項目と items の対応は JSON の列で持つ。使う問い合わせが少ない（3.5）ので、結合用のテーブルは作らない
+- 実装での対応（`src/tech_researcher/db/reports.py`）
+  - `reports.run_id` と `report_entries.run_id` は runs・reports への外部キー。`save_report` が1つのトランザクションで、同じ実行のレポートを置き換え（再試行）、項目を消して入れ直す。`entry_no` は AI の出力の順（1から）
+  - `display_no`（実行の中で一意）は、掲載した日次の項目にだけ付ける。`theme_id` は `T0007` の形で、掲載したテーマにだけ付け、必須（新しいテーマの番号はコードが振る。3.6）。除外したテーマで AI が返した値は形が不正でありうるので列に入れず、`payload_json` に（例：`ai_theme_id`）残す
+  - `report_entries` の掲載したテーマは、`item_ids` か `past_ids` のどちらかがあればよい（今週の観測がなく過去の観測だけのことがある。4.3）。ほかの掲載項目は `item_ids` が必須。`save_report` と `record_issue` は、runs の行の `cadence`・`target` と一致しなければ書かない
+  - 掲載した項目の `item_ids` は、items にある `i{主キー}` に限る（なければ何も書かず失敗）。除外した項目は、存在しない ID を返したことが理由でありうるので、そのまま残す
+  - `ai_output_json`・`body_markdown`・`payload_json` は、呼ぶ側がマスクしてから渡す。`ai_output_json` は原文（壊れた出力もありうる）なので JSON かは確かめない
+  - ドライランの実行 ID は受け付けない（runs に行がなく、外部キーでも止まる）
 
 #### issues
 
@@ -342,6 +350,10 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - UQ（`run_id`, `kind`）：1回の実行で同じ種別の Issue を2件作らない（US-E7-02「1回の実行で不合格 Issue は1件」）。秘匿情報でレポートを止めて定型の実行エラー Issue を作ると、同じ実行に `report`（`blocked_secret`）と `run_error_secret` の2行ができる
 - 部分一意インデックス：UQ（`cadence`, `target`）WHERE `kind='report'` AND `state='created'`。同じ対象のレポート Issue の記録を2件持たない
 - GitHub 側の状態（Open/Closed、Projects のステータス、コメント）は持たない（US-E5-03）。持つのは「登録の処理を済ませたか」だけ
+- 実装での対応（`src/tech_researcher/db/issues.py`）
+  - `record_issue` が（`run_id`, `kind`）で upsert する。`created` は `repo`・`number` が必須で `projects_state` は `pending` で始まり、それ以外の状態は持たない。作った Issue（`created`）の行は、止めた・失敗した記録に戻さない
+  - 同じ番号の書き直しは `projects_state` と `created_at` を保つ。レポート Issue は、同じ（`cadence`, `target`）の記録が別の実行にあるときは、`replaces` で扱いを指定する。`transfer`（転送先の番号。301）は行の `run_id` と `created_at` を元のまま残して番号だけ置き換え、`recreate`（410・404 の後に別の実行で作り直した番号）は行の `run_id` を本文を投稿した実行に付け替える（「載せた」の導出が、その実行の項目を指すため）。番号が変わると `pending` に戻り、`projects_attempts`・`projects_last_error`・`projects_last_run_id` も消す
+  - 登録の結果は `mark_projects_done`・`mark_projects_issue_missing`・`record_projects_failure`（`pending` のまま試行回数・失敗の分類・実行を記録）で書く。未登録は `pending_projects`（古い順）で引く
 
 ### 3.5 判定に使う問い合わせ
 
@@ -355,6 +367,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | 前日の Star の記録が丸ごとない | star_snapshots に `target = T−1` の行が1件もない |
 
 - 「載せた」は専用のテーブルに持たず、公開したレポートの項目から導く。D-13 の「数えない」場合（上限に入らない・AI が選ばない・項目の除外・不合格・ドライラン）が、`status='published'` かつ `state='created'` の条件で外れる。同じ事実を二重に持たないので食い違いが起きない
+- 実装での対応（`src/tech_researcher/db/history.py`）：「載せた」は `featured_urls`、前日の記事は `shown_urls`（T−1 を渡す）が、`canonical_url` の集合を返す。読むだけで、ドライランでも使える
 - リポジトリを扱う記事と GitHub の項目は、どちらも `https://github.com/{owner}/{repo}` の正規化 URL で同じものとみなす。リポジトリ名の変更をまたいで同じものとはみなさない（変更後は別のものとして1回載りうる）
 
 ### 3.6 週次のテーマ
@@ -366,6 +379,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - 過去のテーマ：比較の窓（初期値は過去4週。report-templates.md 2.3）に入る、公開された週次レポート（`issues` の `state='created'`）の `section='theme'`・`status='published'` の行。テーマ名は最新のものを使う
 - AI が、渡していない `theme_id` を返した場合は、その項目を除外する（D-07 の D6(b)）
 - 不合格になった週・ドライランのテーマは、過去のテーマに入れない
+- 実装での対応（`src/tech_researcher/db/history.py`）：`past_themes(target, weeks)` が、`target` の前の `weeks` 週に当たる公開済みの週次レポートのテーマを `theme_id` ごとにまとめる（名前は最新の週の `payload_json` の `name`、履歴は（週、`payload_json` の `status`、`item_ids` の件数））。`next_theme_id` は、保存した最大の番号の次を返す（不合格の週の番号も数え、番号を再利用しない）。テーマの `payload_json` には `name`・`status` を入れる。採番は掲載したテーマの `theme_id` だけを数える
 
 ### 3.7 冪等性：書き込みごとのキーと、再試行のときの動き
 
@@ -546,6 +560,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - AI に渡す観測の範囲は、実装後に量を測って決める。全件で入りきらない場合は、今週と過去の両方に同じ絞り込み（例：注目度の値がある項目、一次情報の項目）をかける。量については、標準入力の上限（10MB）より先に、モデルの文脈の長さとサブスクリプションの利用量が問題になると見込んでいる（推測）
 - 本文（`primary_text`）は渡さない。テーマ単位の分析には日次ほどの深さが要らず、入力の量を抑えるため。D4 は渡した `title`・`excerpt` と比べる
 - `past_themes` は 3.6 のテーマ
+- 続くテーマで今週の観測がないことがあるので、掲載するテーマは `item_ids` か `past_ids` のどちらかがあればよい（3.4 の report_entries。ほかの掲載項目は `item_ids` が必須）。掲載したテーマの `theme_id` は、1つの週次レポートの中で重複しない（D6(b)。DB は部分一意索引で止める）。掲載した項目の `item_ids`・`past_ids` は、どちらも items にある ID に限る
 
 出力スキーマ（要点）：
 

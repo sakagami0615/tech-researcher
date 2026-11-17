@@ -1,10 +1,15 @@
 import sqlite3
 import threading
 import time
+from datetime import UTC, date, datetime
 
 import pytest
 
 from tech_researcher.db import schema
+from tech_researcher.db.history import shown_urls
+from tech_researcher.db.issues import record_issue
+from tech_researcher.db.reports import EntryRow, ReportRow, save_report
+from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import (
     BUSY_TIMEOUT_MS,
     SCHEMA_VERSION,
@@ -12,6 +17,7 @@ from tech_researcher.db.schema import (
     open_db,
     transaction,
 )
+from tech_researcher.periods import daily_target
 
 
 def pragma(conn, name):
@@ -27,7 +33,16 @@ def test_creates_db_with_settings(tmp_path):
     assert pragma(conn, "foreign_keys") == 1
     assert pragma(conn, "busy_timeout") == BUSY_TIMEOUT_MS
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
-    assert tables == {"runs", "source_fetches", "items", "feed_snapshots", "star_snapshots"}
+    assert tables == {
+        "runs",
+        "source_fetches",
+        "items",
+        "feed_snapshots",
+        "star_snapshots",
+        "reports",
+        "report_entries",
+        "issues",
+    }
     conn.close()
 
 
@@ -69,6 +84,53 @@ def test_upgrades_first_version_with_feed_snapshots(tmp_path, monkeypatch):
         "fetched_at",
     ]
     assert conn.execute("SELECT count(*) FROM runs").fetchone() == (1,)
+    conn.close()
+
+
+def test_upgrades_version_3_db_with_report_tables(tmp_path, monkeypatch):
+    """版3の DB（star_snapshots まで）に、版4で reports・report_entries・issues を足す。
+
+    既存の runs・items の行は残り、新しい表に書ける。
+    """
+    path = tmp_path / "x.sqlite3"
+    run_id = "20261024-060000-abcd"
+    with monkeypatch.context() as m:
+        m.setattr(schema, "MIGRATIONS", schema.MIGRATIONS[:3])
+        m.setattr(schema, "SCHEMA_VERSION", 3)
+        conn = open_db(path)
+        start_run(
+            conn, run_id, daily_target(date(2026, 10, 24), 1), datetime(2026, 10, 23, tzinfo=UTC)
+        )
+        conn.execute(
+            "INSERT INTO items (cadence, target, canonical_url, kind, title, published_precision,"
+            " inclusion_event, inclusion_at, events_json, attention_json, sources_json,"
+            " links_json, meta_terms_json, first_run_id, last_run_id) VALUES ('daily',"
+            " '2026-10-23', 'https://e.com/a', 'article', 't', 'unknown', 'posted', 'a', '[]',"
+            " '[]', '[]', '[]', '[]', ?, ?)",
+            (run_id, run_id),
+        )
+        conn.close()
+    conn = open_db(path)
+    assert pragma(conn, "user_version") == SCHEMA_VERSION
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
+    assert {"reports", "report_entries", "issues"} <= names
+    assert conn.execute("SELECT count(*) FROM runs").fetchone() == (1,)
+    (item_id,) = conn.execute("SELECT item_id FROM items").fetchone()
+    entry = EntryRow("daily_item", "published", (f"i{item_id}",), display_no=1)
+    report = ReportRow("daily", date(2026, 10, 23), "passed", {}, {}, [entry], body_markdown="本文")
+    save_report(conn, run_id, report)
+    record_issue(
+        conn,
+        run_id,
+        "report",
+        "daily",
+        date(2026, 10, 23),
+        "created",
+        datetime(2026, 10, 24, tzinfo=UTC),
+        repo="o/r",
+        number=1,
+    )
+    assert shown_urls(conn, date(2026, 10, 23)) == {"https://e.com/a"}
     conn.close()
 
 
