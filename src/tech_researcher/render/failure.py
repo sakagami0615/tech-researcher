@@ -295,20 +295,26 @@ def _footer(text: str) -> str:
 
 def _usable(inv: Investigation | None) -> Investigation | None:
     """D2・D3・確度の形に違反する ④ の出力は、AI を利用できないときの定型にする（D-07、3.5）。"""
-    if (
-        inv is None
-        or inv.confidence not in CONFIDENCES
-        or len(inv.event) > EVENT_LIMIT * LIMIT_FACTOR
-    ):
-        return None
-    if not (inv.contents and inv.measures):
-        return None
+    return None if inv is None or investigation_violation(inv) else inv
+
+
+def investigation_violation(inv: Investigation) -> str | None:
+    """④ の調査結果が載せられない理由（分類）。載せられるなら None。
+
+    分類は too_long（発生した事象の文字数）・bad_confidence・empty（空の欄）・bad_target・
+    forbidden_text（D2・D3）。理由に AI の文は入れない。
+    """
+    if inv.confidence not in CONFIDENCES:
+        return "bad_confidence"
+    if len(inv.event) > EVENT_LIMIT * LIMIT_FACTOR:
+        return "too_long"
     texts = (inv.event, inv.cause, *inv.contents, *(m.text for m in inv.measures))
-    if not all(sanitize_text(t) for t in texts):  # 空・空白だけ・無害化の後に空になるもの
-        return None
+    # 調査内容・対策案がない、または空・空白だけ・無害化の後に空になる文がある
+    if not (inv.contents and inv.measures) or not all(sanitize_text(t) for t in texts):
+        return "empty"
     if any(m.target not in TARGETS for m in inv.measures):
-        return None
-    return None if any(text_violation(t) for t in texts) else inv
+        return "bad_target"
+    return "forbidden_text" if any(text_violation(t) for t in texts) else None
 
 
 def _investigation(inv: Investigation) -> str:

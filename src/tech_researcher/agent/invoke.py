@@ -36,6 +36,7 @@ MISSING_SKILL_EXIT = 78  # agent-run がスキルを見つけられなかった�
 # 内側のスキル（structure.md 3.5）。リポジトリの agent/skills/<名前>/SKILL.md を、agent のイメージの
 # 作業ディレクトリの .claude/skills/ にコピーする（docker/agent.Dockerfile）
 DAILY_SKILL = "tr-daily-evaluate"
+INVESTIGATE_SKILL = "tr-investigate"  # ④ 失敗時の調査（日次・週次で共通）
 
 # Claude Code が結果の JSON に書く分類（subtype・terminal_reason）。ログに残す前に形を確かめる
 _CODE = re.compile(r"[a-z0-9_]{1,64}")

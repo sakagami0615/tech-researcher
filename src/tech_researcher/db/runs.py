@@ -6,6 +6,7 @@ runs は実行ごとに1行足し、同じ実行の中では同じ行を更新�
 ここの関数は1文ずつ書く（autocommit で、その文だけでコミットされる）。
 """
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -187,3 +188,61 @@ def fetch_incomplete(conn: sqlite3.Connection, source_id: str, target: date) -> 
         (target.isoformat(), source_id),
     ).fetchone()
     return row is not None and (row[0] == "failed" or row[1] is not None)
+
+
+@dataclass(frozen=True)
+class RunHistory:
+    """④ の入力の履歴の行の材料（data-model.md 4.4）。値は DB にあるコードの分類と数だけ。
+
+    fetches は取得の状態ごとの情報源の数、failed_sources は失敗した（情報源 ID、分類）。
+    rejected_checks は reports の不合格となった検査の名前（レポートを保存していなければ空）。
+    """
+
+    run_id: str
+    cadence: str
+    target: str
+    started_at: datetime
+    status: str
+    failed_stage: str | None
+    error_category: str | None
+    retry_count: int | None
+    rejected_checks: tuple[str, ...]
+    fetches: dict[str, int]
+    failed_sources: tuple[tuple[str, str | None], ...]
+
+
+def recent_runs(conn: sqlite3.Connection, since: datetime, run_id: str) -> list[RunHistory]:
+    """since 以降に始まった、run_id 以外の実行の履歴（古い順）。④ の入力の履歴に使う。"""
+    rows = conn.execute(
+        "SELECT r.run_id, r.cadence, r.target, r.started_at, r.status, r.failed_stage,"
+        " r.error_category, r.retry_count, p.rejected_checks FROM runs AS r"
+        " LEFT JOIN reports AS p ON p.run_id = r.run_id"
+        " WHERE r.started_at >= ? AND r.run_id != ? ORDER BY r.started_at, r.run_id",
+        (utc_text(since), run_id),
+    ).fetchall()
+    history = []
+    for rid, cadence, target, started, status, stage, category, retries, checks in rows:
+        fetches = conn.execute(
+            "SELECT source_id, status, error_category FROM source_fetches WHERE run_id = ?"
+            " ORDER BY source_id",
+            (rid,),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for _, fetch_status, _ in fetches:
+            counts[fetch_status] = counts.get(fetch_status, 0) + 1
+        history.append(
+            RunHistory(
+                run_id=rid,
+                cadence=cadence,
+                target=target,
+                started_at=datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC),
+                status=status,
+                failed_stage=stage,
+                error_category=category,
+                retry_count=retries,
+                rejected_checks=tuple(json.loads(checks)) if checks else (),
+                fetches=counts,
+                failed_sources=tuple((s, c) for s, st, c in fetches if st == "failed"),
+            )
+        )
+    return history

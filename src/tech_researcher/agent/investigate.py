@@ -1,0 +1,336 @@
+"""④ 失敗時の調査の入力と出力の検査（data-model.md 4.4、report-templates.md 3.2・3.5、D-07）。
+
+- 入力：失敗の定型の項目（コードが作った値）と、ログ・検証結果・履歴の抜粋を1行1要素にして行 ID
+  （L001, L002, …）を付けたもの。行の文は、コードが作った分類・数・名前だけから組み立てる。
+  ログは issue_fields の項目だけを使い、detail・exception（外部由来の文や、除外した項目の本文・
+  タイトルを含みうる）は入れない。検証結果は合否・分類・件数と、形の正しい項目 ID だけにする。
+  どの行も秘匿情報の検出器でマスクしてから入れる（US-E6-06）
+- 出力：スキーマ（D6(a)）・D2・D3・確度・空の欄・文字数を検査し、違反したら AI を利用できない
+  ときの定型（3.5）に落とす。根拠の行は AI が選んだ ID から、コードが元の行を取り出す（存在しない
+  ID は捨てる。10行×3ブロックまで）。AI の出力の全文と根拠の抜粋は秘匿情報の検査にもかけ、
+  見つかれば公開停止（3.6）にさせる（③ の検査と同じく、捨てる文の中でも止める）
+- ② の AI の呼び出しが失敗した実行エラーでは、AI を利用できないものとして ④ を呼ばない（D-04）
+- ④ は再試行しない（structure.md 6.3）。失敗したら定型にする
+
+統括スクリプトの失敗の分岐へのつなぎ込みと、investigation.json・runs の investigation_json への
+保存は、日次の失敗の分岐（#41）で行う。
+"""
+
+import json
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from importlib import resources
+from importlib.resources.abc import Traversable
+from pathlib import Path
+
+from tech_researcher.agent import invoke
+from tech_researcher.db.runs import RunHistory
+from tech_researcher.logging import issue_fields
+from tech_researcher.periods import JST, Target
+from tech_researcher.render.failure import (
+    STAGES,
+    Countermeasure,
+    Investigation,
+    investigation_violation,
+    select_evidence,
+)
+from tech_researcher.validate.schema import INVESTIGATE_OUTPUT_SCHEMA, check_schema
+from tech_researcher.validate.secret_scan import SecretScanner
+
+INVESTIGATE_SCHEMA = resources.files("tech_researcher") / "schemas" / INVESTIGATE_OUTPUT_SCHEMA
+
+KINDS = ("run_error", "rejected")  # 実行エラー・不合格
+CONFIDENCES = {"high": "高", "medium": "中", "low": "低"}  # 表記はコードが変える（4.4）
+HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の例）
+# ② の AI の呼び出しが失敗した分類（invoke.py の AgentError と、統括スクリプトの launch_failed）。
+# AI 自体を利用できない失敗として ④ を飛ばす（D-04、US-E7-04 の「LLM 呼び出しの失敗」）。
+# claude を呼ばずに止めた input_too_large・bad_schema は、AI は使えるので ④ を呼ぶ
+AGENT_UNUSABLE = frozenset(
+    {"agent_failed", "bad_output", "timeout", "missing_skill", "launch_failed"}
+)
+
+# 検証結果の行に入れてよい項目 ID の形（i{主キー}・ドライランの仮の d{番号}。2.6）
+_ITEM_ID = re.compile(r"[id][0-9]{1,18}")
+_SPACE = re.compile(r"\s+")
+
+
+@dataclass(frozen=True)
+class Failure:
+    """④ に渡す失敗の定型の項目（report-templates.md 3.3・3.4 の概要）。値はすべてコードが作る。
+
+    error_category は Issue に書くエラーの概要（コードが分類した短い文）、error_code は
+    統括スクリプトの失敗の分類（AI を利用できるかの判定にだけ使い、入力には入れない）。
+    rejected_checks は不合格となった検証項目（不合格のときだけ）。
+    """
+
+    kind: str
+    target: Target
+    failed_stage: str | None = None
+    error_category: str | None = None
+    error_code: str | None = None
+    retry_count: int | None = None
+    rejected_checks: tuple[str, ...] | None = None
+
+    def __post_init__(self):
+        if self.kind not in KINDS:
+            raise ValueError(f"知らない失敗の種類 {self.kind!r}")
+        if (self.kind == "run_error") != (self.failed_stage is not None):
+            raise ValueError("failed_stage は実行エラーのときだけ必要")
+        if self.failed_stage is not None and self.failed_stage not in STAGES:
+            raise ValueError(f"処理段階にない {self.failed_stage!r}")
+        if (self.kind == "rejected") != (self.rejected_checks is not None):
+            raise ValueError("rejected_checks は不合格のときだけ必要")
+
+
+@dataclass(frozen=True)
+class Line:
+    """④ に渡す1行。kind は log・verification・history。"""
+
+    line_id: str
+    kind: str
+    text: str
+
+
+@dataclass(frozen=True)
+class InvestigateResult:
+    """④ の結果。investigation が None なら 3.5 の定型にし、reason にその分類を入れる。
+
+    reason：agent_unusable（④ を呼ばなかった）、AgentError の分類・launch_failed（④ の失敗）、
+    invalid_output（D6(a)）、investigation_violation の分類（D2・D3 など）、secret_detected
+    （公開停止。3.6 にする）。output は検査を通った出力（investigation.json・runs の
+    investigation_json に残すもの）。called は AI を呼んだか（使用量のログを残すか）。
+    """
+
+    investigation: Investigation | None
+    reason: str | None = None
+    output: dict | None = None
+    secret_kinds: tuple[str, ...] = ()
+    called: bool = False
+    models: tuple[str, ...] = ()
+    usage: invoke.AgentUsage | None = None
+
+
+def agent_unusable(failure: Failure) -> bool:
+    """② の AI の呼び出しが失敗した実行エラーか（AI を利用できないので ④ を飛ばす。D-04）。"""
+    return failure.failed_stage == "analyze" and failure.error_code in AGENT_UNUSABLE
+
+
+def log_lines(path: Path) -> list[str]:
+    """1回の実行のログ（JSON Lines）から、許可した項目（issue_fields）だけで作った行。
+
+    detail・exception は使わない（外部由来の文や、除外した項目の本文・タイトルを含みうる）。
+    読めない行は飛ばす。時刻は JST の時:分:秒にする。
+    """
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or "stage" not in record or "event" not in record:
+            continue
+        fields = issue_fields(record)
+        head = [_time(fields.get("time")), _value(fields["stage"]), _value(fields["event"])]
+        tail = [
+            f"{name}={_value(fields[name])}"
+            for name in ("source", "error_category", "count", "attempt")
+            if name in fields
+        ]
+        lines.append(" ".join(p for p in head + tail if p))
+    return lines
+
+
+def verification_lines(validation: Mapping) -> list[str]:
+    """③ の結果（validation.json）から、合否・分類・件数と、除外した項目の ID だけの行。
+
+    除外の理由の文（AI が返した ID の文字列を含みうる）は入れない。除外の分類はログの行
+    （excluded の error_category）にある。項目 ID は形の正しいものだけにし、ほかは数だけにする。
+    """
+    excluded = validation.get("excluded")
+    excluded = excluded if isinstance(excluded, list) else []
+    lines = [
+        f"verify result={_value(validation.get('result'))} "
+        f"reason={_value(validation.get('reason'))} "
+        f"entries={_value(validation.get('entries'))} excluded={len(excluded)}"
+    ]
+    for entry in excluded:
+        ids = entry.get("item_ids") if isinstance(entry, dict) else None
+        ids = ids if isinstance(ids, list) else []
+        good = [i for i in ids if isinstance(i, str) and _ITEM_ID.fullmatch(i)]
+        text = f"verify excluded item_ids={','.join(good) or 'none'}"
+        if len(good) != len(ids):
+            text += f" malformed_ids={len(ids) - len(good)}"
+        lines.append(text)
+    return lines
+
+
+def history_lines(history: Iterable[RunHistory]) -> list[str]:
+    """直近の実行の履歴（db/runs.py の recent_runs）を、1実行1行の文にする。"""
+    lines = []
+    for run in history:
+        parts = [
+            f"{run.started_at.astimezone(JST):%Y-%m-%d %H:%M}",
+            run.cadence,
+            f"target={run.target}",
+            f"status={run.status}",
+        ]
+        for name, value in (
+            ("failed_stage", run.failed_stage),
+            ("error_category", run.error_category),
+            ("retry_count", run.retry_count),
+        ):
+            if value is not None:
+                parts.append(f"{name}={_value(value)}")
+        if run.rejected_checks:
+            parts.append(f"rejected_checks={','.join(map(_value, run.rejected_checks))}")
+        if run.fetches:
+            parts.append("sources " + " ".join(f"{s}={n}" for s, n in sorted(run.fetches.items())))
+        if run.failed_sources:
+            failed = ",".join(f"{s}:{c or 'unknown'}" for s, c in run.failed_sources)
+            parts.append(f"failed_sources={_value(failed)}")
+        lines.append(" ".join(parts))
+    return lines
+
+
+def number_lines(
+    scanner: SecretScanner,
+    log: Sequence[str] = (),
+    verification: Sequence[str] = (),
+    history: Sequence[str] = (),
+) -> list[Line]:
+    """行に ID（L001, L002, …）を付ける。どの行もマスクしてから入れる（US-E6-06）。"""
+    groups = (("log", log), ("verification", verification), ("history", history))
+    texts = [(kind, text) for kind, group in groups for text in group]
+    return [
+        Line(f"L{n:03d}", kind, _value(scanner.mask(text)))
+        for n, (kind, text) in enumerate(texts, 1)
+    ]
+
+
+def build_investigate_input(
+    failure: Failure, lines: Sequence[Line], scanner: SecretScanner
+) -> dict:
+    """④ に渡す入力（data-model.md 4.4）。"""
+    target = failure.target
+    category = failure.error_category
+    return {
+        "task": "investigate",
+        "failure": {
+            "kind": failure.kind,
+            "cadence": target.cadence,
+            "target": target.key.isoformat(),
+            "period": {
+                "start": target.period.start.astimezone(JST).isoformat(),
+                "end": target.period.end.astimezone(JST).isoformat(),
+            },
+            "failed_stage": failure.failed_stage,
+            "error_category": None if category is None else scanner.mask(category),
+            "retry_count": failure.retry_count,
+            "rejected_checks": None
+            if failure.rejected_checks is None
+            else [scanner.mask(c) for c in failure.rejected_checks],
+        },
+        "lines": [{"id": line.line_id, "kind": line.kind, "text": line.text} for line in lines],
+    }
+
+
+def parse_investigation(output: object, lines: Sequence[Line]) -> Investigation:
+    """構造化出力をスキーマで検査し（D6(a)。合わなければ ValueError）、調査結果にする。
+
+    根拠は、選ばれた ID のうち入力にある行を、元の行から取り出す（存在しない ID は捨てる）。
+    """
+    check_schema(output, INVESTIGATE_OUTPUT_SCHEMA)
+    texts = {line.line_id: line.text for line in lines}
+    return Investigation(
+        event=output["event"],
+        cause=output["cause"],
+        confidence=CONFIDENCES[output["confidence"]],
+        contents=tuple(output["investigation"]),
+        measures=tuple(Countermeasure(m["target"], m["text"]) for m in output["countermeasures"]),
+        evidence=select_evidence(texts, output["evidence_line_ids"]),
+    )
+
+
+def investigate(
+    failure: Failure,
+    lines: Sequence[Line],
+    timeout_s: float,
+    *,
+    runner: invoke.Runner,
+    scanner: SecretScanner,
+    max_turns: int | None,
+    max_input_bytes: int,
+    schema: Path | Traversable = INVESTIGATE_SCHEMA,
+) -> InvestigateResult:
+    """④ を1回だけ呼び（再試行しない）、検査を通った調査結果を返す。
+
+    timeout_s は ④ の上限（limits の investigate）、max_input_bytes は入力の上限。AI を利用
+    できない失敗（agent_unusable）では呼ばない。
+    """
+    if agent_unusable(failure):
+        return InvestigateResult(None, "agent_unusable")
+    data = build_investigate_input(failure, lines, scanner)
+    body = json.dumps(data, ensure_ascii=False).encode()
+    try:
+        result = invoke.call_agent(
+            body,
+            timeout_s,
+            runner=runner,
+            skill=invoke.INVESTIGATE_SKILL,
+            schema=schema,
+            max_turns=max_turns,
+            max_input_bytes=max_input_bytes,
+        )
+    except invoke.AgentError as e:
+        called = e.category not in ("input_too_large", "bad_schema", "missing_skill")
+        return InvestigateResult(None, e.category, called=called, models=e.models, usage=e.usage)
+    except OSError:  # docker を起動できない
+        return InvestigateResult(None, "launch_failed")
+    done = {"called": True, "models": result.models, "usage": result.usage}
+    output = result.output
+    # 無害化の前の全文と、1つずつの文字列を検査する（③ と同じ。stages/daily.py）
+    texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
+    if kinds := _secret_kinds(scanner, texts):
+        return InvestigateResult(None, "secret_detected", secret_kinds=kinds, **done)
+    try:
+        investigation = parse_investigation(output, lines)
+    except ValueError:
+        return InvestigateResult(None, "invalid_output", **done)
+    if reason := investigation_violation(investigation):
+        return InvestigateResult(None, reason, **done)
+    evidence = [line for block in investigation.evidence for line in block]
+    if kinds := _secret_kinds(scanner, evidence):
+        return InvestigateResult(None, "secret_detected", secret_kinds=kinds, **done)
+    return InvestigateResult(investigation, output=output, **done)
+
+
+def _secret_kinds(scanner: SecretScanner, texts: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted({f.kind for text in texts for f in scanner.find(text)}))
+
+
+def _strings(value: object) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _time(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    try:
+        return f"{datetime.fromisoformat(value).astimezone(JST):%H:%M:%S}"
+    except ValueError:
+        return ""
+
+
+def _value(value: object) -> str:
+    """1行に収まる値（改行・連続する空白は1つの空白にする）。None は none。"""
+    return "none" if value is None else _SPACE.sub(" ", str(value)).strip()
