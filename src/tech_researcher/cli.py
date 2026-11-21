@@ -1,13 +1,14 @@
 """コマンドの入口（structure.md 2.2）。worker の各段階を1つずつ起動する。
 
 統括スクリプト（#16）が `docker compose run --rm -T worker <段階> …` で呼ぶ（D-04）。段階は
-`collect`（①）と `verify`（③、日次だけ）。実行 ID と
+`collect`（①）・`verify`（③、日次だけ）・`finish`（本番の失敗した実行を runs で閉じる）。実行 ID と
 実行のフォルダは統括スクリプトが用意し、段階は実行 ID の日付から対象と期間を決める。
 ① は本番の DB を開き、本番の実行では runs の開始を書いてから、取得結果と収集項目を書く。
 ドライランは DB を読み取り専用で開き、何も書かない（D-22）。① で実行エラーと分かった本番の実行
 （すべての情報源の取得に失敗した日と、① の例外）は、runs を failed と終了時刻で閉じる。D-13 の観測の
 実行（実行 ID の先頭が obs-。日次の ① だけ）は、それ以外なら observed で閉じる。通常の日次・週次の
-② 以降の終わりは、その失敗の分岐と ⑤ を実装する Issue で書く。③ は、本番では統括スクリプトから
+② 以降の失敗の終わりは `finish` で書く（統括スクリプトが失敗の分岐から呼ぶ。成功の終わりは ⑤ を
+実装する Issue で書く）。③ は、本番では統括スクリプトから
 渡された ② のモデルの名前を runs の model に記録し、前回の本番から変わっていればログで知らせる
 （structure.md 3.3。ドライランは記録せず比べない）。本番の ③ は、結果（レポート案・掲載と除外の
 項目・検証結果）を reports・report_entries に保存する（ドライランは書かない）。
@@ -23,6 +24,7 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -30,10 +32,17 @@ from contextlib import closing, nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tech_researcher.agent.investigate import INVESTIGATION
 from tech_researcher.agent.invoke import split_models
 from tech_researcher.config import Config, ConfigError, load_config
 from tech_researcher.db.readonly import open_readonly
-from tech_researcher.db.runs import finish_run, record_model, start_run
+from tech_researcher.db.runs import (
+    STAGES,
+    finish_run,
+    record_investigation,
+    record_model,
+    start_run,
+)
 from tech_researcher.db.schema import open_db
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target, daily_target, weekly_target
@@ -43,6 +52,7 @@ from tech_researcher.stages.daily import run_verify, write_daily_input
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
+_CATEGORY = re.compile(r"[A-Za-z0-9_]{1,64}")
 _TARGETS = {"daily": daily_target, "weekly": weekly_target}
 
 
@@ -91,6 +101,8 @@ def _run(
     log: RunLog,
     scanner: SecretScanner,
 ) -> dict:
+    if args.stage in ("finish", "record-investigation"):
+        return _finish_stage(args, files, log)
     if args.stage == "verify":
         if files.dry_run:
             return run_verify(config, target, files.run_id, files.dir, log, scanner)
@@ -158,6 +170,42 @@ def _finish(conn: sqlite3.Connection, run_id: str, category: str | None) -> None
     )
 
 
+def _finish_stage(args: argparse.Namespace, files: RunFiles, log: RunLog) -> dict:
+    """本番の失敗した実行（② 以降の失敗、不合格、公開停止）を runs で閉じる。
+
+    record-investigation は、① の worker がすでに閉じた実行に ④ の出力だけを足す。
+    統括スクリプトが失敗の分岐の終わりに呼ぶ。④ の調査結果（実行のフォルダの
+    investigation.json。検査を通ったもの）があれば investigation_json に入れる。② が失敗した
+    ときに結果の JSON に出ていたモデルも記録する。同じ実行の中でやり直したときは同じ行を上書きする。
+    """
+    text = None
+    path = files.dir / INVESTIGATION
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        if not isinstance(json.loads(text), dict):
+            raise ValueError("investigation.json が JSON のオブジェクトでない")
+    if args.stage == "record-investigation":
+        if text is None:
+            raise ValueError("investigation.json がない")
+        with closing(open_db(files.db)) as conn:
+            record_investigation(conn, files.run_id, text)
+        return {"status": "recorded"}
+    if args.model is not None:
+        _record_model(files, args.model, log)
+    with closing(open_db(files.db)) as conn:
+        finish_run(
+            conn,
+            files.run_id,
+            args.status,
+            datetime.now(UTC),
+            failed_stage=args.failed_stage,
+            error_category=args.error_category,
+            retry_count=args.retry_count,
+            investigation_json=text,
+        )
+    return {"status": args.status}
+
+
 def _record_model(files: RunFiles, model: str, log: RunLog) -> None:
     """本番の ② で使われたモデルを runs に記録し、前回の本番から変わっていればログで知らせる。
 
@@ -196,7 +244,35 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--model", help="② で使われたモデルの名前（`,` でつなぐ）。本番では runs に記録する"
     )
+    finish = stages.add_parser(
+        "finish", help="本番の失敗した実行（実行エラー・不合格）を runs で閉じる"
+    )
+    finish.add_argument("cadence", choices=sorted(_TARGETS))
+    finish.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
+    finish.add_argument("--status", required=True, choices=["failed", "rejected"])
+    finish.add_argument("--failed-stage", choices=sorted(STAGES), help="status が failed のとき")
+    finish.add_argument("--error-category", type=_category, help="コードが決めた分類の名前")
+    finish.add_argument("--retry-count", type=_count)
+    finish.add_argument("--model", help="② で使われたモデルの名前（`,` でつなぐ）")
+    record = stages.add_parser(
+        "record-investigation",
+        help="① の worker がすでに閉じた実行に、④ の出力（investigation.json）だけを記録する",
+    )
+    record.add_argument("cadence", choices=sorted(_TARGETS))
+    record.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
     return parser
+
+
+def _category(value: str) -> str:
+    if not _CATEGORY.fullmatch(value):  # ログと DB にコードの分類以外を入れない
+        raise argparse.ArgumentTypeError(f"分類の名前の形が違う: {value!r}")
+    return value
+
+
+def _count(value: str) -> int:
+    if not re.fullmatch(r"[0-9]{1,6}", value):
+        raise argparse.ArgumentTypeError(f"0 以上の整数にする: {value!r}")
+    return int(value)
 
 
 def _prepare(
@@ -205,6 +281,8 @@ def _prepare(
     files = RunFiles(data_dir(environ, Path.cwd()), args.run_id)
     if getattr(args, "model", None) is not None:
         split_models(args.model)  # 形が違えば起動の誤り（ログと DB に外部の文を入れない）
+    if args.stage in ("finish", "record-investigation") and (files.dry_run or files.observation):
+        raise _UsageError("finish は通常の本番の実行だけ（ドライランは DB に書かない）")
     if files.observation and (args.stage, args.cadence) != ("collect", "daily"):
         raise _UsageError("観測（obs-）の実行は日次の ① だけ")
     if not files.dir.is_dir():

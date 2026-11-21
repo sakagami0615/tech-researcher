@@ -24,6 +24,7 @@ from tech_researcher.stages.collect import (
     Collectors,
     load_collected,
     run_collect,
+    unavailable_notes,
     unjudged_notes,
 )
 from tech_researcher.validate.secret_scan import SecretScanner
@@ -434,6 +435,16 @@ def test_all_sources_run_in_order_and_are_saved(tmp_path):
         " fetched_at FROM source_fetches WHERE run_id = ? ORDER BY rowid",
         (PROD,),
     ).fetchall()
+    # 情報源ごとの取得結果（実行エラー Issue の表の元）。ok の行の測り残しの印は失敗の理由にしない
+    saved = json.loads((tmp_path / "fetches.json").read_text(encoding="utf-8"))
+    assert [(f["source_id"], f["status"], f["category"], f["attempts"]) for f in saved] == [
+        ("rss:a", "ok", None, 1),
+        ("rss:c", "failed", "fetch_failed", 3),
+        ("qiita", "no_results", None, 1),
+        ("hackernews", "ok", None, 1),
+        ("github_search", "failed", "timeout", 2),
+        ("github_repos", "ok", None, 4),
+    ]
     at = "2026-10-23T21:00:00Z"
     assert fetches == [
         ("rss:a", "ok", None, 1, 2, 1, at),  # 古い記事は期間で落ちた
@@ -561,6 +572,17 @@ def test_github_without_measurement_is_a_failed_source(tmp_path):
         " WHERE source_id = 'github_repos'"
     ).fetchall() == [("failed", "auth", 0)]
     conn.close()
+    # 測定に失敗した日は、失敗を「取得できなかった情報源」に出す。前日の記録がないための
+    # 「判定していません」はヘッダに出さない（理由が測定の失敗になるため）
+    assert summary["unjudged_star"] is False
+    assert unjudged_notes(tmp_path, config) == []
+    assert unavailable_notes(tmp_path, config) == [("GitHub（新着・急上昇）", "認証エラー")]
+    fetches = json.loads((tmp_path / "fetches.json").read_text(encoding="utf-8"))
+    assert [(f["source_id"], f["status"], f["category"]) for f in fetches][-1] == (
+        "github_repos",
+        "failed",
+        "auth",
+    )
 
 
 def test_github_token_is_read_only_when_a_github_source_is_enabled(tmp_path):
