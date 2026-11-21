@@ -150,4 +150,4 @@ def test_known_states_match_the_skill_run_outcome_states():
         pytest.skip("third_party/last30days がない（bin/setup-third-party.sh で用意する）")
     text = schema.read_text(encoding="utf-8")
     block = text[text.index("RunOutcomeState = Literal[") :].split("]", 1)[0]
-    assert set(re.findall(r'"([a-z-]+)"', block)) == set(KNOWN_STATES)
+    assert set(re.findall(r'"([^"]+)"', block)) == set(KNOWN_STATES)
