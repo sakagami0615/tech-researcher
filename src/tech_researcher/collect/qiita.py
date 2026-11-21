@@ -10,11 +10,13 @@
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
+from time import monotonic
 from urllib.parse import urlencode
 
-from tech_researcher.collect.http import INVALID_RESPONSE, FetchError, classify, fetch
+from tech_researcher.collect.http import INVALID_RESPONSE, TIMEOUT, FetchError, classify, fetch
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.collect.rss import html_links
 from tech_researcher.config import Limits, Qiita
@@ -40,18 +42,30 @@ def search_query(tags: tuple[str, ...], period: Period) -> str:
     return f"tag:{','.join(tags)} created:>={start.isoformat()} created:<{end_day.isoformat()}"
 
 
-def collect_qiita(qiita: Qiita, period: Period, limits: Limits, *, fetch_url=fetch) -> SourceResult:
+def collect_qiita(
+    qiita: Qiita,
+    period: Period,
+    limits: Limits,
+    *,
+    fetch_url=fetch,
+    deadline: float | None = None,
+    clock: Callable[[], float] = monotonic,
+) -> SourceResult:
     """対象期間を覆う新着を、ページを送りながらすべて取る。
 
     どれかのページが失敗するか、要求の上限に達したら、情報源全体を失敗にする（部分レポート）。
     再試行も要求に数え、残りの回数を超えないよう、1ページの再試行の回数を残りに合わせて減らす。
     重なった記事は先に出たものを残す。
+    deadline は時間の上限（clock の値。structure.md 6.4）。ページの間で確かめ、過ぎていたら
+    情報源全体を timeout の失敗にする。
     """
     fetched_at = datetime.now(UTC)
     query = search_query(qiita.tags, period)
     records: dict[str, Record] = {}
     attempts = 0
     for page in range(1, MAX_PAGE + 1):
+        if deadline is not None and clock() >= deadline:
+            return _failure(attempts, "情報源ごとの時間の上限に達した", TIMEOUT)
         remaining = limits.qiita_calls - attempts
         if remaining < 1:
             return _failure(attempts, f"要求の上限 {limits.qiita_calls} 回に達した")

@@ -216,6 +216,42 @@ def test_retry_is_used_up():
     assert all(r.attempts == 2 and "300 秒" in r.error and not r.records for r in results)
 
 
+def test_deadline_shortens_the_cli_timeout():
+    """① の時間の上限（deadline）。1回の上限時間は残りの時間で縮める。"""
+    now = [100.0]
+    run = FakeRun(done())
+    results = collect_last30days(
+        CONFIG, PERIOD, ROOT, github_token="t", run=run, deadline=100.0 + 250, clock=lambda: now[0]
+    )
+    ((_, kwargs),) = run.calls
+    assert kwargs["timeout"] == 250  # 上限（300 秒）より残りの時間（250 秒）が短い
+    assert all(r.error is None for r in results)
+
+
+def test_deadline_already_passed_does_not_run_the_cli():
+    run = FakeRun()
+    results = collect_last30days(
+        CONFIG, PERIOD, ROOT, github_token="t", run=run, deadline=50.0, clock=lambda: 100.0
+    )
+    assert run.calls == []
+    assert all(r.error_category == "timeout" and r.attempts == 0 for r in results)
+
+
+def test_retry_stops_when_the_deadline_passes_between_attempts():
+    now = [0.0]
+    run = FakeRun(done(1, "", "boom"), done())
+
+    def advancing(args, **kwargs):
+        now[0] += 100
+        return run(args, **kwargs)
+
+    results = collect_last30days(
+        CONFIG, PERIOD, ROOT, github_token="t", run=advancing, deadline=100.0, clock=lambda: now[0]
+    )
+    assert len(run.calls) == 1  # 1回目の後に上限を過ぎた。再試行しない
+    assert all(r.error_category == "timeout" and r.attempts == 1 for r in results)
+
+
 def test_exit_1_is_retried():
     run = FakeRun(done(1, "", "boom"), done())
     assert [r.error for r in collect(run)] == [None, None]

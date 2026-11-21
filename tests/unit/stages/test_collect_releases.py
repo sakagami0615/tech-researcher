@@ -56,7 +56,7 @@ def config():
 
 
 def collectors(result):
-    def collect(settings, period, client):
+    def collect(settings, period, client, **_):
         assert settings is RELEASES and period == TARGET.period
         if isinstance(result, Exception):
             raise result
@@ -175,7 +175,7 @@ def test_featured_repo_release_is_passed_without_spike_numbers(tmp_path):
         prod_log(tmp_path),
         collectors=replace(
             all_collectors([], github=github),
-            releases=lambda s, p, c: SourceResult("github_releases", (release_record(),), 1),
+            releases=lambda s, p, c, **_: SourceResult("github_releases", (release_record(),), 1),
         ),
         db=conn,
         write_db=True,
@@ -251,7 +251,7 @@ def test_one_github_client_is_shared_so_the_rest_limit_counts_everything(tmp_pat
     collected = replace(
         all_collectors([], github=github),
         github=make,
-        releases=lambda s, p, c: used.append(c) or SourceResult("github_releases", (), 1),
+        releases=lambda s, p, c, **_: used.append(c) or SourceResult("github_releases", (), 1),
     )
     run_collect(cfg, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
     assert len(made) == 1 and used == made

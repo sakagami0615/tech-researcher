@@ -36,6 +36,7 @@ import tempfile
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from pathlib import Path
+from time import monotonic
 
 from tech_researcher.collect.http import (
     AUTH,
@@ -109,11 +110,15 @@ def collect_last30days(
     github_token: str | None = None,
     run: Runner = subprocess.run,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    deadline: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> list[SourceResult]:
     """有効な情報源（hackernews・github_search）を1回の実行で集め、情報源ごとの結果を返す。
 
     root は last30days-skill を置いたディレクトリ（third_party/last30days）。
     github_token は収集用トークンで、子プロセスに GITHUB_TOKEN として渡す（D-05）。
+    deadline は時間の上限（clock の値。structure.md 6.4）。CLI の1回の上限時間を残りの時間で
+    縮め、過ぎていれば CLI を動かさずに timeout の失敗にする。
     """
     enabled = [
         sid
@@ -132,7 +137,9 @@ def collect_last30days(
             results[sid] = SourceResult(sid, (), 0, "収集用トークンがない", error_category="auth")
     source_ids = [sid for sid in enabled if sid not in results]
     if source_ids:
-        results.update(_collect(config, period, root, source_ids, github_token, run, now))
+        results.update(
+            _collect(config, period, root, source_ids, github_token, run, now, deadline, clock)
+        )
     return [results[sid] for sid in enabled]
 
 
@@ -144,6 +151,8 @@ def _collect(
     github_token: str | None,
     run: Runner,
     now: Callable[[], datetime],
+    deadline: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> dict[str, SourceResult]:
     """source_ids を1回の CLI の実行で集める。"""
     names = [SOURCE_NAMES[sid] for sid in source_ids]
@@ -152,7 +161,7 @@ def _collect(
     with tempfile.TemporaryDirectory(prefix="last30days-") as home:
         try:
             stdout, stderr, attempts = _run(
-                args, child_env(home, github_token), home, config.limits, run
+                args, child_env(home, github_token), home, config.limits, run, deadline, clock
             )
             data = parse_agent_json(stdout)
         except _CliError as e:
@@ -245,11 +254,27 @@ def child_env(home: str, github_token: str | None) -> dict[str, str]:
 
 
 def _run(
-    args: list[str], env: dict[str, str], cwd: str, limits: Limits, run: Runner
+    args: list[str],
+    env: dict[str, str],
+    cwd: str,
+    limits: Limits,
+    run: Runner,
+    deadline: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> tuple[str, str, int]:
-    """CLI を呼ぶ。終了コード 0・3 なら stdout・stderr・試行回数を返す。"""
+    """CLI を呼ぶ。終了コード 0・3 なら stdout・stderr・試行回数を返す。
+
+    deadline（clock の値）を過ぎたら動かさず、1回の上限時間は残りの時間で縮める。再試行も残りの
+    時間の中だけで行う。
+    """
     attempts = limits.last30days_retries + 1
     for attempt in range(1, attempts + 1):
+        timeout = float(limits.last30days_timeout_s)
+        if deadline is not None:
+            left = deadline - clock()
+            if left <= 0:
+                raise _CliError("時間の上限に達した", attempt - 1, TIMEOUT)
+            timeout = min(timeout, left)
         try:
             done = run(
                 args,
@@ -259,12 +284,12 @@ def _run(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=limits.last30days_timeout_s,
+                timeout=timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             # 外側から止めると stdout は空になるので、部分結果は使えない（D-01）
-            error, category = f"{limits.last30days_timeout_s} 秒の上限を超えた", TIMEOUT
+            error, category = f"{timeout:g} 秒の上限を超えた", TIMEOUT
         else:
             if done.returncode in (0, EXIT_PARTIAL):
                 return done.stdout, done.stderr, attempt

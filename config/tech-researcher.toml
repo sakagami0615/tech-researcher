@@ -277,6 +277,8 @@ http_retry_waits_s = [5, 20] # 再試行2回。それぞれの前に待つ秒数
 retry_after_max_s = 60       # Retry-After に従う上限
 last30days_timeout_s = 300   # 内部の上限（約171秒）より長くする
 last30days_retries = 1
+collect_wrapup_s = 60        # ① の上限の少し前に情報源の取得をやめ、まとめて書く時間を残す
+analyze_retries = 1          # ② の再試行。一時的な失敗だけ、合計の上限（analyze_minutes）の残りの中で
 github_rest_calls = 1500
 github_search_calls = 100
 github_search_per_minute = 25
@@ -285,7 +287,7 @@ github_graphql_batch = 100  # 1回の問い合わせでまとめるリポジト�
 github_write_calls = 20
 qiita_calls = 30
 # ⑤ の GitHub への書き込みと Projects の登録は、HTTP の上限（応答30秒・再試行2回）を使う
-# ② の再試行の回数と agent の呼び出し回数は、それを実装する Issue で足す
+# ④ は再試行しない。段階・ジョブ全体も再試行しない
 # agent_max_turns =           # 値は PoC で決める
 
 [limits.daily]

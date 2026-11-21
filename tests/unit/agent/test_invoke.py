@@ -18,6 +18,10 @@ from tech_researcher.validate import text as text_checks
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "agent"
 NOT_LOGGED_IN = (FIXTURES / "not-logged-in.json").read_text(encoding="utf-8")
+# 同じ形で、分類の手がかりのない失敗の文（agent_failed になる）
+UNCLASSIFIED = json.dumps(
+    {**json.loads(NOT_LOGGED_IN), "result": "something went wrong"}, ensure_ascii=False
+)
 SCHEMA = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
 
 
@@ -260,15 +264,61 @@ def test_model_names_are_taken_from_usage():
     assert got.models == ("claude-haiku-4-5", "claude-sonnet-4-5[1m]")
 
 
-def test_not_logged_in_is_agent_failure_without_result_text():
-    # 実際の出力（トークンなし）。終了コード1、is_error、subtype は success
+def test_not_logged_in_is_auth_failure_without_result_text():
+    # 実際の出力（トークンなし）。終了コード1、is_error、subtype は success。認証の失敗にする
     with pytest.raises(invoke.AgentError) as e:
         invoke.parse_result(1, NOT_LOGGED_IN)
-    assert e.value.category == "agent_failed"
+    assert e.value.category == "auth"
     assert e.value.detail == (
         "exit=1 is_error=true subtype=success terminal_reason=api_error structured_output=false"
+        " classified=auth"
     )
     assert "logged" not in e.value.detail  # result の文はログに入れない
+
+
+def test_unclassified_failure_stays_agent_failed():
+    with pytest.raises(invoke.AgentError) as e:
+        invoke.parse_result(1, UNCLASSIFIED)
+    assert e.value.category == "agent_failed"
+    assert "classified" not in e.value.detail
+
+
+@pytest.mark.parametrize(
+    ("fields", "category"),
+    [
+        ({"api_error_status": 529}, "overloaded"),
+        ({"api_error_status": 500}, "server_error"),
+        ({"api_error_status": 503}, "server_error"),
+        ({"api_error_status": 429}, "usage_limit"),
+        ({"api_error_status": 401}, "auth"),
+        ({"api_error_status": 403}, "auth"),
+        ({"api_error_status": 400, "result": "bad request"}, "agent_failed"),
+        ({"api_error_status": True, "result": "bad request"}, "agent_failed"),
+        ({"result": "API Error: Overloaded"}, "overloaded"),
+        ({"result": "Internal server error"}, "server_error"),
+        ({"result": "Unable to connect to API (ECONNRESET)"}, "network"),
+        ({"result": "Claude AI usage limit reached"}, "usage_limit"),
+        ({"result": "Invalid API key · Please run /login"}, "auth"),
+        # 状態が先。文に別の手がかりがあっても、状態で決める
+        ({"api_error_status": 529, "result": "Not logged in"}, "overloaded"),
+        # is_error が真でない文は読まない
+        ({"is_error": False, "result": "overloaded"}, "agent_failed"),
+    ],
+)
+def test_failure_classification(fields, category):
+    data = {**json.loads(NOT_LOGGED_IN), "result": "x", **fields}
+    assert invoke.classify_failure(data) == category
+    if category in ("overloaded", "server_error", "network"):
+        assert category in invoke.TRANSIENT
+    else:
+        assert category not in invoke.TRANSIENT
+
+
+def test_output_present_is_never_reclassified():
+    # 出力があるのに失敗（is_error など）は agent_failed のまま（文を読まない）
+    with pytest.raises(invoke.AgentError) as e:
+        invoke.parse_result(1, result(is_error=True, result="Overloaded"))
+    assert e.value.category == "agent_failed"
 
 
 @pytest.mark.parametrize(
@@ -311,7 +361,7 @@ def test_missing_result_json_is_bad_output(stdout):
 
 
 def test_failure_keeps_stderr_for_log(schema):
-    runner = FakeRunner(Done(1, NOT_LOGGED_IN, "error: something", remove_failed=True))
+    runner = FakeRunner(Done(1, UNCLASSIFIED, "error: something", remove_failed=True))
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "agent_failed"
@@ -364,7 +414,7 @@ def test_missing_skill_in_image_is_its_own_category(schema):
 
 def test_claude_exit_78_with_result_is_parsed_normally(schema):
     # claude の結果の JSON があれば、終了コードが 78 でも agent-run の失敗とはみなさない
-    runner = FakeRunner(Done(78, NOT_LOGGED_IN))
+    runner = FakeRunner(Done(78, UNCLASSIFIED))
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "agent_failed"

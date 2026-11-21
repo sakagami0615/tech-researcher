@@ -94,6 +94,7 @@ UID_ENV = {"TR_UID": lambda: os.getuid(), "TR_GID": lambda: os.getgid()}
 DOCKER_CONFIG_DIR = Path("tech-researcher") / "docker"
 
 MINUTE = 60.0  # 設定の上限（分）を秒にする。テストで縮める
+_now = time.monotonic  # ② の再試行の残り時間の計算に使う時計。テストで偽物に差し替える
 STOP_GRACE_S = 10.0  # 止めるとき、SIGTERM から SIGKILL までの猶予
 DOCKER_TIMEOUT_S = 60.0  # コンテナを探す・消す docker の呼び出しの上限
 POLL_S = 0.2  # ジョブの子プロセスの終わりを確かめる間隔
@@ -557,9 +558,9 @@ def _run_stages(job: Job) -> Summary:
         return job.summary(
             "error", failed_stage="analyze", error_category="not_implemented", **fields
         )
-    category, models = _analyze(job)
+    category, models, retries = _analyze(job)
     if category is not None:
-        return _fail(job, "analyze", category, fields, models)
+        return _fail(job, "analyze", category, fields, models, retries)
     model_args = ["--model", ",".join(models)] if models else []
     verified, category = _worker(job, "verify", job.limits.verify, _verify_summary, model_args)
     if verified is None:
@@ -585,6 +586,7 @@ def _fail(
     category: str | None,
     fields: Mapping | None = None,
     models: tuple[str, ...] = (),
+    retries: int = 0,
 ) -> Summary:
     """日次の ① 〜 ③ の実行エラー：④ の調査・本文・本番の runs の終わりを行い、要約にする。
 
@@ -592,7 +594,9 @@ def _fail(
     """
     assert category is not None
     if job.cadence == "daily":
-        failures.handle(job, failures.Outcome(failures.RUN_ERROR, stage, category, models), MINUTE)
+        failures.handle(
+            job, failures.Outcome(failures.RUN_ERROR, stage, category, models, retries), MINUTE
+        )
     return job.summary("error", failed_stage=stage, error_category=category, **(fields or {}))
 
 
@@ -602,8 +606,14 @@ def _validation_reason(job: Job) -> str | None:
     return reason if isinstance(reason, str) and CATEGORY.fullmatch(reason) else None
 
 
-def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
-    """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類と、使われたモデルを返す。
+def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
+    """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類・使われたモデル・行った
+    再試行の回数を返す。
+
+    再試行（structure.md 6.3）：出力がなく、分類が一時的な失敗（invoke.TRANSIENT）のときだけ、
+    limits.analyze_retries 回まで、再試行を含めた合計の上限（limits の analyze）の残りの時間の中で
+    行う。上限の時間の超過・利用上限・認証の失敗・出力がスキーマに合わない（③ の不合格）は
+    再試行しない。再試行は ③ で不合格になった後の再生成ではない（US-E7-02）。
 
     ② が失敗したときも、結果の JSON にモデルが出ていれば返す（失敗の分岐が runs に記録する）。
 
@@ -629,40 +639,55 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
         body = encode_input(data, limit)
     except InputTooLarge as e:
         job.log.write("analyze", "failure", error_category="input_too_large", detail=str(e))
-        return "input_too_large", ()
+        return "input_too_large", (), 0
     except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
         job.log.write("analyze", "failure", error_category="bad_input", exc=e)
-        return "bad_input", ()
+        return "bad_input", (), 0
     models: tuple[str, ...] = ()
+    retries = 0
     if data["items"]:
-        started = time.monotonic()
-        try:
-            result = invoke.call_agent(
-                body,
-                job.limits.analyze * MINUTE,
-                runner=job.compose,
-                skill=invoke.DAILY_SKILL,
-                schema=DAILY_SCHEMA,
-                max_turns=job.config.limits.agent_max_turns,
-                max_input_bytes=limit,
-            )
-        except invoke.AgentError as e:
-            if e.category not in invoke.NOT_CALLED:  # claude を動かさずに終わった失敗
-                _log_usage(job, data, body, started, e.models, e.usage)
-            # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
-            detail = job.scanner.mask(e.detail)[-STDERR_TAIL_CHARS:]
-            job.log.write("analyze", "failure", error_category=e.category, detail=detail)
-            if e.remove_failed:
-                job.log.write("analyze", "failure", error_category="container_remove_failed")
-            return e.category, e.models  # 結果の JSON にモデルが出ていれば、runs に記録する
-        except OSError as e:  # docker を起動できない
-            job.log.write("analyze", "failure", error_category="launch_failed", exc=e)
-            return "launch_failed", ()
-        except Exception as e:
-            # AI を呼んだ後の想定外の失敗。値の分からない記録でも、1回の呼び出しとして残す
-            _log_usage(job, data, body, started, (), None)
-            job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
-            return "agent_failed", ()
+        began = _now()
+        total = job.limits.analyze * MINUTE
+        while True:
+            started = time.monotonic()
+            try:
+                result = invoke.call_agent(
+                    body,
+                    max(total - (_now() - began), 0.0),  # 再試行は合計の上限の残りの中で行う
+                    runner=job.compose,
+                    skill=invoke.DAILY_SKILL,
+                    schema=DAILY_SCHEMA,
+                    max_turns=job.config.limits.agent_max_turns,
+                    max_input_bytes=limit,
+                )
+            except invoke.AgentError as e:
+                if e.category not in invoke.NOT_CALLED:  # claude を動かさずに終わった失敗
+                    _log_usage(job, data, body, started, e.models, e.usage)
+                # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
+                detail = job.scanner.mask(e.detail)[-STDERR_TAIL_CHARS:]
+                job.log.write("analyze", "failure", error_category=e.category, detail=detail)
+                if e.remove_failed:
+                    job.log.write("analyze", "failure", error_category="container_remove_failed")
+                if (
+                    e.category in invoke.TRANSIENT
+                    and not e.remove_failed
+                    and retries < job.config.limits.analyze_retries
+                    and _now() - began < total
+                ):
+                    retries += 1
+                    job.log.write("analyze", "retry", error_category=e.category, count=retries)
+                    continue
+                # 結果の JSON にモデルが出ていれば、runs に記録する
+                return e.category, e.models, retries
+            except OSError as e:  # docker を起動できない
+                job.log.write("analyze", "failure", error_category="launch_failed", exc=e)
+                return "launch_failed", (), retries
+            except Exception as e:
+                # AI を呼んだ後の想定外の失敗。値の分からない記録でも、1回の呼び出しとして残す
+                _log_usage(job, data, body, started, (), None)
+                job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
+                return "agent_failed", (), retries
+            break
         _log_usage(job, data, body, started, result.models, result.usage)
         output, models = result.output, result.models
         if not models and not job.files.dry_run:
@@ -674,12 +699,12 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
         _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
     except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
         job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
-        return "output_write_failed", ()
+        return "output_write_failed", (), retries
     if data["items"]:
         job.log.write("analyze", "end", count=len(data["items"]))
     else:
         job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
-    return None, models
+    return None, models, retries
 
 
 def _log_usage(

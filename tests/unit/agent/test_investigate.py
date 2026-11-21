@@ -28,7 +28,7 @@ from tech_researcher.render.failure import (
 )
 from tech_researcher.validate.secret_scan import SecretScanner
 
-from .test_invoke import NOT_LOGGED_IN, Done, FakeRunner, result
+from .test_invoke import UNCLASSIFIED, Done, FakeRunner, result
 
 TARGET = daily_target(date(2026, 10, 24), 1)  # 対象日 2026-10-23
 RUN_ID = "20261024-060000-a1b2"
@@ -332,8 +332,9 @@ def test_agent_unusable_skips_the_call(code):
     assert got.reason == "agent_unusable" and not got.called
 
 
-def test_agent_unusable_is_limited_to_skill_and_launch_failures():
-    assert inv.AGENT_UNUSABLE == {"missing_skill", "launch_failed"}
+def test_agent_unusable_is_limited_to_unrecoverable_ai_failures():
+    # スキルがない・docker を起動できない・利用上限・認証の失敗（一時的な失敗は含めない）
+    assert inv.AGENT_UNUSABLE == {"missing_skill", "launch_failed", "usage_limit", "auth"}
 
 
 @pytest.mark.parametrize(
@@ -350,7 +351,7 @@ def test_other_analyze_failures_are_investigated(code):
 
 
 def test_agent_failure_falls_back_without_retry():
-    got, runner = run(done=Done(1, NOT_LOGGED_IN, stderr="stderr の末尾", remove_failed=True))
+    got, runner = run(done=Done(1, UNCLASSIFIED, stderr="stderr の末尾", remove_failed=True))
     assert len(runner.calls) == 1  # ④ は再試行しない（structure.md 6.3）
     assert got.investigation is None and got.reason == "agent_failed" and got.called
     # 使用量と失敗の行に残す値（structure.md 3.3）

@@ -364,11 +364,11 @@ def all_collectors(calls, github=None, token=TOKEN, hn_record=None):
         calls.append(f"rss:{f.id}")
         return fake_collect(f, limits)
 
-    def qiita(settings, period, limits):
+    def qiita(settings, period, limits, **_):
         calls.append("qiita")
         return SourceResult("qiita", (), 1)
 
-    def last30days(config, period, given_token):
+    def last30days(config, period, given_token, **_):
         calls.append("last30days")
         assert given_token == token  # 収集用トークンを渡す
         hn = hn_record or record("hackernews", "https://news.example.com/x", IN)
@@ -600,7 +600,7 @@ def test_github_token_is_read_only_when_a_github_source_is_enabled(tmp_path):
 
 
 def test_unexpected_error_in_last30days_fails_its_sources(tmp_path):
-    def broken(config, period, token):
+    def broken(config, period, token, **_):
         raise RuntimeError("想定外 " + TOKEN)
 
     config = replace(CONFIG, hackernews=FULL.hackernews, github_search=FULL.github_search)
@@ -632,7 +632,7 @@ def test_fetches_are_recorded_as_each_source_finishes(tmp_path):
     conn = open_db(tmp_path / "tech-researcher.sqlite3")
     start_run(conn, PROD, TARGET, FETCHED)
 
-    def stopped(settings, period, limits):
+    def stopped(settings, period, limits, **_):
         raise KeyboardInterrupt  # 上限で止められたときの代わり（情報源の失敗にはしない）
 
     config = replace(CONFIG, feeds=(feed("a"), feed("c")), qiita=FULL.qiita)

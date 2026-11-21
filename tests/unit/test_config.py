@@ -108,6 +108,32 @@ def test_repository_config_loads():
     assert config.limits.weekly.agent_input_bytes == 8_000_000
 
 
+def test_initial_limits_follow_d21():
+    """初期値は D-21（structure.md 6.3〜6.5）の値。変えるときは文書も合わせる。"""
+    limits = load_config(CONFIG_PATH).limits
+    daily, weekly = limits.daily, limits.weekly
+    assert (daily.job, weekly.job) == (60, 90)
+    assert (daily.collect, daily.analyze, daily.verify, daily.investigate, daily.post) == (
+        20,
+        20,
+        2,
+        8,
+        5,
+    )
+    assert (weekly.collect, weekly.analyze, weekly.verify, weekly.investigate, weekly.post) == (
+        25,
+        40,
+        3,
+        10,
+        5,
+    )
+    assert (daily.collect_per_source, weekly.collect_per_source) == (10, 10)
+    assert (daily.agent_input_bytes, weekly.agent_input_bytes) == (2_000_000, 8_000_000)
+    assert (limits.github_rest_calls, limits.github_search_calls) == (1500, 100)
+    assert (limits.github_graphql_calls, limits.qiita_calls) == (50, 30)
+    assert limits.analyze_retries == 1
+
+
 def test_all_sources_parse(base):
     config = parse_config(full(base))
     assert config.hackernews.enabled and not config.github_search.enabled
@@ -403,6 +429,27 @@ def test_stage_limits_must_fit_in_job(base):
     data = full(base)
     data["limits"]["daily"]["analyze_minutes"] = 40  # 20+40+2+8+5 = 75 > 60
     with pytest.raises(ConfigError, match="ジョブ全体"):
+        parse_config(data)
+
+
+def test_wrapup_must_be_shorter_than_the_collect_limit(base):
+    data = full(base)
+    data["limits"]["collect_wrapup_s"] = 20 * 60  # 日次の ① の上限（20 分）以上
+    with pytest.raises(ConfigError, match="collect_wrapup_s"):
+        parse_config(data)
+
+
+def test_retry_and_wrapup_limits_are_read(base):
+    limits = load_config(CONFIG_PATH).limits
+    assert (limits.collect_wrapup_s, limits.analyze_retries) == (60, 1)
+    data = full(base)
+    data["limits"]["analyze_retries"] = 0
+    assert parse_config(data).limits.analyze_retries == 0
+    data["limits"]["analyze_retries"] = -1
+    with pytest.raises(ConfigError, match="analyze_retries"):
+        parse_config(data)
+    del data["limits"]["analyze_retries"]
+    with pytest.raises(ConfigError, match="analyze_retries"):
         parse_config(data)
 
 
