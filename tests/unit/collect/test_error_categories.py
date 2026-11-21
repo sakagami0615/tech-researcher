@@ -4,6 +4,8 @@ import gzip
 import subprocess
 from datetime import date
 
+import pytest
+
 from tech_researcher.collect import http as tr_http
 from tech_researcher.collect.http import FetchError, Response, classify
 from tech_researcher.collect.last30days import collect_last30days
@@ -97,3 +99,23 @@ def test_last30days_unknown_state_is_invalid_but_known_failure_has_no_category()
     got = states(hackernews="rate-limited", github="brand-new-state")
     assert got == {"hackernews": None, "github_search": "invalid_response"}
     assert states(hackernews="ok")["github_search"] == "invalid_response"  # 状態が出力にない
+
+
+@pytest.mark.parametrize(
+    ("state", "category"),
+    [
+        ("partial", None),
+        ("rate-limited", None),
+        ("auth-failed", "auth"),
+        ("payment-required", None),
+        ("unreachable", "network"),
+        ("timeout", "timeout"),
+        ("schema-drift", "invalid_response"),
+        ("skipped-unconfigured", None),
+        ("error", None),
+    ],
+)
+def test_last30days_failure_states_map_to_categories(state, category):
+    run = FakeRun(done(3, output({"hackernews": state, "github": "ok"}, [])))
+    hn, _ = collect_last30days(CONFIG, PERIOD, ROOT, github_token="t", run=run)
+    assert hn.error is not None and hn.error_category == category

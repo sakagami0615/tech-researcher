@@ -5,6 +5,7 @@ last30days-skill の固定 SHA を更新したときに手で流す（bin/setup-
 """
 
 import json
+import re
 import subprocess
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -14,6 +15,7 @@ import pytest
 
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.last30days import (
+    KNOWN_STATES,
     SCRIPT,
     ContractError,
     collect_last30days,
@@ -139,3 +141,13 @@ def test_real_cli_output_matches_contract():
     (result,) = collect_last30days(config, target.period, LAST30DAYS)
     assert result.error is None, result.error
     assert all(r.published_precision == "date" for r in result.records)
+
+
+def test_known_states_match_the_skill_run_outcome_states():
+    """固定の SHA の schema.py の RunOutcomeState と、取り決めの状態の一覧が一致する。"""
+    schema = LAST30DAYS / "skills" / "last30days" / "scripts" / "lib" / "schema.py"
+    if not schema.is_file():
+        pytest.skip("third_party/last30days がない（bin/setup-third-party.sh で用意する）")
+    text = schema.read_text(encoding="utf-8")
+    block = text[text.index("RunOutcomeState = Literal[") :].split("]", 1)[0]
+    assert set(re.findall(r'"([a-z-]+)"', block)) == set(KNOWN_STATES)

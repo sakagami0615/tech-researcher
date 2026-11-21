@@ -37,7 +37,13 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 
-from tech_researcher.collect.http import EXIT_CODE, INVALID_RESPONSE, TIMEOUT
+from tech_researcher.collect.http import (
+    AUTH,
+    EXIT_CODE,
+    INVALID_RESPONSE,
+    NETWORK,
+    TIMEOUT,
+)
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.config import Config, Limits, Subquery
 from tech_researcher.periods import Period, last30days_window
@@ -53,9 +59,26 @@ SOURCE_NAMES = {"hackernews": "hackernews", "github_search": "github"}
 # 注目度の metric の接頭辞（data-model.md 2.4）
 METRIC_PREFIXES = {"hackernews": "hn", "github": "github"}
 OK_STATES = frozenset({"ok", "no-results"})
-# 取り決めにある情報源の状態（decisions.md の last30days-skill の節）。ここにない値は、出力の
-# 契約に合わないものとして invalid_response にする。失敗の状態に理由は付かないので、分類はしない
-KNOWN_STATES = OK_STATES | {"skipped-unconfigured", "timeout", "rate-limited", "error"}
+# 情報源の状態の取り決め：固定の SHA の third_party/last30days の
+# skills/last30days/scripts/lib/schema.py の RunOutcomeState（11種類）。OK_STATES 以外は失敗として
+# 扱い、理由の分類（source_fetches の error_category）を付けられるものだけ付ける。
+# rate-limited は付けない：GitHub は名前解決の失敗・接続拒否・タイムアウトでも rate-limited と
+# 表示し（decisions.md）、レート制限と書くと誤ることがあるため。payment-required・error・
+# skipped-unconfigured は理由が分からない。partial（項目を返したうえで一部が失敗した）も失敗として
+# 扱う（返ってきた項目は使わない。使う扱いは別の Issue）
+STATE_CATEGORIES: dict[str, str | None] = {
+    "partial": None,
+    "rate-limited": None,
+    "auth-failed": AUTH,
+    "payment-required": None,
+    "unreachable": NETWORK,
+    "timeout": TIMEOUT,
+    "schema-drift": INVALID_RESPONSE,
+    "skipped-unconfigured": None,
+    "error": None,
+}
+# 取り決めにある状態のすべて。ここにない値は、出力の契約に合わないものとして invalid_response
+KNOWN_STATES = OK_STATES | STATE_CATEGORIES.keys()
 EXIT_PARTIAL = 3  # LAST30DAYS_STRICT_EXIT=1 で、一部の情報源が失敗した
 EXIT_USAGE = 2  # 引数・設定の誤り。再試行しても直らない
 STDERR_TAIL_CHARS = 2000  # 失敗の原因の分類に使う stderr の末尾（D-01）
@@ -157,7 +180,7 @@ def _collect(
                 (),
                 attempts,
                 f"{name} の{reason}：{_tail(stderr)}",
-                error_category=None if known else INVALID_RESPONSE,
+                error_category=STATE_CATEGORIES[state] if known else INVALID_RESPONSE,
             )
             continue
         records = tuple(_record(sid, r, fetched_at) for r in data["results"] if r["source"] == name)
