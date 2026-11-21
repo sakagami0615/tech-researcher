@@ -227,7 +227,8 @@ def test_github_is_not_started_without_time_for_its_searches(tmp_path):
     base = all_collectors(calls)
 
     def slow_feed(f, limits):
-        clock.now += 7 * 60  # 全体の上限（10 分）まで残り 3 分
+        if clock.now == 1000.0:  # 最初の feed だけ。全体の上限（10 分）まで残り 3 分になる
+            clock.now += 7 * 60
         return base.feed(f, limits)
 
     collected = replace(base, feed=slow_feed, clock=clock)
@@ -236,3 +237,4 @@ def test_github_is_not_started_without_time_for_its_searches(tmp_path):
     assert "github_repos" in summary["failed_sources"]
     assert "github_search" not in calls and "github_graphql" not in calls
     assert fetched_status(tmp_path)["github_repos"] == ("failed", "timeout")
+    assert clock.now < 1000.0 + 10 * 60  # 上限は過ぎていない（Search の時間だけが足りない）
