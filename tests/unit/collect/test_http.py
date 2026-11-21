@@ -4,6 +4,7 @@ import io
 import socket
 import ssl
 import urllib.error
+import urllib.request
 from dataclasses import replace
 from email.message import Message
 
@@ -397,3 +398,57 @@ def test_real_request_to_a_silent_server_is_cut_at_the_deadline(limits):
         assert time.monotonic() - started < 5
     finally:
         server.close()
+
+
+class Trickle(FakeResponse):
+    """1回の読み込みごとに時計を進める応答（少しずつ送り続ける相手）。"""
+
+    def __init__(self, body, clock, step):
+        super().__init__(body)
+        self.clock, self.step, self.reads = clock, step, 0
+
+    def read(self, size=-1):
+        self.reads += 1
+        self.clock[0] += self.step
+        return super().read(size)
+
+
+def test_body_read_in_chunks_stops_at_the_deadline(limits):
+    now = [0.0]
+    body = Trickle(b"x" * (3 * tr_http.CHUNK_BYTES), now, step=10.0)
+    open_url, _ = scripted(body)
+    with pytest.raises(FetchError) as e:
+        fetch(URL, limits, open_url=open_url, deadline=15.0, clock=lambda: now[0])
+    assert e.value.category == "timeout"
+    assert body.reads == 2  # 2塊目の後（20 秒）で上限（15 秒）を過ぎた。3塊目は読まない
+
+
+def test_chunked_read_returns_the_whole_body_within_the_deadline(limits):
+    now = [0.0]
+    data = b"y" * (2 * tr_http.CHUNK_BYTES + 5)
+    open_url, _ = scripted(Trickle(data, now, step=1.0))
+    response = fetch(URL, limits, open_url=open_url, deadline=100.0, clock=lambda: now[0])
+    assert response.body == data
+
+
+def test_body_size_limit_still_applies_with_a_deadline(limits, monkeypatch):
+    monkeypatch.setattr(tr_http, "MAX_BODY_BYTES", 100)
+    open_url, _ = scripted(b"z" * 101)
+    with pytest.raises(FetchError) as e:
+        fetch(URL, limits, open_url=open_url, deadline=100.0, clock=lambda: 0.0)
+    assert e.value.category == "invalid_response"
+
+
+def test_redirect_is_not_followed_after_the_deadline():
+    now = [0.0]
+    handler = tr_http._RedirectHandler(10.0, lambda: now[0])
+    request = urllib.request.Request(URL)
+    headers = Message()
+    headers["Location"] = "https://feed.example/next"
+    followed = handler.redirect_request(
+        request, None, 301, "moved", headers, "https://feed.example/next"
+    )
+    assert followed is not None  # 上限の内ならたどる
+    now[0] = 10.0
+    with pytest.raises(tr_http._OutOfTime):
+        handler.redirect_request(request, None, 301, "moved", headers, "https://feed.example/next")

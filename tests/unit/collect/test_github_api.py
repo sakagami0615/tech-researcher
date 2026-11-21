@@ -30,8 +30,9 @@ class FakeFetch:
         self.calls = []
         self.bodies = []  # POST の本文（GET は None）
 
-    def __call__(self, url, limits, *, headers, sleep, follow_redirects, data=None):
+    def __call__(self, url, limits, *, headers, sleep, follow_redirects, data=None, **extra):
         assert follow_redirects is False
+        self.extra = extra  # 時間の上限の引数（上限を決めたときだけ渡る）
         self.calls.append((url, limits.http_retry_waits_s, dict(headers)))
         self.bodies.append(data)
         self.sleep = sleep
@@ -276,6 +277,40 @@ def test_search_redirect_waits_for_interval(limits):
     api.search("repositories", {"q": "x"})
     assert clock.sleeps == [pytest.approx(2.4)]
     assert api.search_calls == 2
+
+
+def test_search_redirect_wait_that_does_not_fit_the_deadline_is_not_made(limits):
+    clock = Clock()
+    fetch = FakeFetch(redirect("/search/repositories?q=y"), {})
+    api = client(replace(limits, github_search_per_minute=25), fetch, clock=clock)
+    api.limit_time(2.0, clock)  # 間隔（2.4 秒）の待ちが収まらない
+    with pytest.raises(GitHubError) as e:
+        api.search("repositories", {"q": "x"})
+    assert e.value.category == github_api.TIMEOUT
+    assert clock.sleeps == [] and api.search_calls == 1
+
+
+def test_time_limit_is_passed_to_fetch_with_the_clock(limits):
+    clock = Clock()
+    fetch = FakeFetch({}, {})
+    api = client(limits, fetch, clock=clock)
+    api.get("/a")
+    assert fetch.extra == {}  # 上限がなければ、差し替えた取得の引数を変えない
+    other = Clock()
+    api.limit_time(50.0, other)
+    api.get("/b")
+    assert fetch.extra == {"deadline": 50.0, "clock": other, "min_wait": 0.0}
+
+
+def test_search_that_does_not_fit_the_deadline_is_not_sent(limits):
+    clock = Clock()
+    fetch = FakeFetch({}, {})
+    api = client(replace(limits, github_search_per_minute=25), fetch, clock=clock)
+    api.search("repositories", {"q": "x"})
+    api.limit_time(clock.now + 2.0, clock)  # 次の Search まで 2.4 秒待つが、残りは 2 秒
+    with pytest.raises(GitHubError) as e:
+        api.search("repositories", {"q": "y"})
+    assert e.value.category == github_api.TIMEOUT and api.search_calls == 1
 
 
 def test_too_many_redirects(limits):

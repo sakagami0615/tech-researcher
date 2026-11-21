@@ -618,7 +618,7 @@ def _github_client(
     """1回の実行で共有する GitHub のクライアント。① 全体の上限を、すべての要求の時間の上限にする
     （要求の時間を残りまで縮め、残りに収まらない再試行や待ちは始めない）。"""
     client = collectors.github(token, limits)
-    client.deadline = deadlines.overall
+    client.limit_time(deadlines.overall, deadlines.clock)
     return client
 
 

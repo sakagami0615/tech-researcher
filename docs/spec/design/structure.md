@@ -350,7 +350,7 @@ primary_max_en = 200            # 一次情報の本文と比べるときの値�
 [limits]                        # 上限（6章。D-21）
 # agent_max_turns =           # 値は PoC で決める（3.8 の7）
 analyze_retries = 1             # ② の再試行（6.3）
-collect_wrapup_s = 60           # ① の上限の前に取得をやめる秒数（6.4）
+collect_wrapup_s = 120          # ① の上限の前に取得をやめる秒数（6.4）
 # ほかの上限も同じく置く
 ```
 
@@ -442,7 +442,7 @@ last30days-skill は `--days N --as-of YYYY-MM-DD` で期間を受け取り、�
 | 段階の合計 | 55 分 | 83 分 | — |
 | ジョブ全体 | 60 分（6:00 に始めて 7:00 まで。月曜の週次 7:00 と重ならない） | 90 分 | `bin/tr-run` が統括スクリプトを止める。止めたことはログに残す |
 
-- ① の上限は worker が自分で守る。設定の `collect_wrapup_s`（初期値 120 秒）だけ早く情報源の取得をやめ、まとめて書く時間を残す。上限の後の情報源は取得せずに `timeout` の失敗とし、終わった情報源の分で続ける。GitHub の要求（REST・Search・GraphQL）と RSS・Qiita の HTTP は、1回の要求の接続・応答の上限時間を ① 全体の上限までの残りに縮め、残りに収まらない再試行・待ち（`Retry-After`・Search の間隔を含む）は始めない。`collect_wrapup_s`（初期値 120 秒）は、まとめて書く時間とコンテナの起動の余裕（初回のビルドは除く）にあてる。情報源ごとの上限は、last30days-skill の CLI の上限時間・Qiita のページの間・GitHub Releases のリポジトリとページの間・README の取得で確かめる（RSS・Atom は1回の要求が HTTP の上限で終わる）。GitHub の候補集め・Star 数の測定は途中で止めないので、残りの時間が Search を使い切る時間（`github_search_calls` ÷ `github_search_per_minute` 分）より短ければ始めずに `timeout` の失敗にする（最低限の目安。Star 数の測定や HTTP の待ちは含まない）。README の取得は github_repos の情報源ごとの上限で止める。② の再試行は、残りが1分より短ければ行わない
+- ① の上限は worker が自分で守る。設定の `collect_wrapup_s`（初期値 120 秒）だけ早く情報源の取得をやめ、まとめて書く時間を残す。上限の後の情報源は取得せずに `timeout` の失敗とし、終わった情報源の分で続ける。GitHub の要求（REST・Search・GraphQL）と RSS・Qiita の HTTP は、1回の要求の接続・応答の上限時間を ① 全体の上限までの残りに縮め、残りに収まらない再試行・待ち（`Retry-After`・Search の間隔を含む）は始めない。本文は 64KB ずつ読んで塊の間で、リダイレクトはたどる前に、上限を確かめる（少しずつ送り続ける応答や転送の連続でも超えない。本文の大きさの上限は別に残す）。`collect_wrapup_s`（初期値 120 秒）は、まとめて書く時間とコンテナの起動の余裕（初回のビルドは除く）にあてる。情報源ごとの上限は、last30days-skill の CLI の上限時間・Qiita のページの間・GitHub Releases のリポジトリとページの間・README の取得で確かめる（RSS・Atom は1回の要求が HTTP の上限で終わる）。GitHub の候補集め・Star 数の測定は途中で止めないので、残りの時間が Search を使い切る時間（`github_search_calls` ÷ `github_search_per_minute` 分）より短ければ始めずに `timeout` の失敗にする（最低限の目安。Star 数の測定や HTTP の待ちは含まない）。README の取得は github_repos の情報源ごとの上限で止める。② の再試行は、残りが1分より短ければ行わない
 - `bin/tr-run` に止められた統括スクリプトは実行エラー Issue を作れない。ジョブ全体の上限は、統括スクリプトの不具合で止まらないときの最後の歯止めとし、段階の合計との差（日次 5 分・週次 7 分）をコンテナの起動などの余裕とする
 
 ### 6.5 API 利用量（1回の実行あたり）
