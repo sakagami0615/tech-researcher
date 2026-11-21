@@ -100,6 +100,28 @@ def finish_run(
         raise LookupError(f"runs に開始の記録がない: {run_id}")
 
 
+def record_model(conn: sqlite3.Connection, run_id: str, model: str) -> str | None:
+    """② で使われたモデルの名前を記録し、前回の本番の実行で記録した名前を返す（structure.md 3.3）。
+
+    前回は、この実行より前に始まった、model を持つ実行のうち最も新しいもの（日次・週次を問わない。
+    どちらも Claude Code の既定のモデルを使うため）。なければ None。同じ実行の中のやり直しは
+    同じ行を上書きする。
+    """
+    check_writable_run_id(run_id)
+    if not model:
+        raise ValueError("モデルの名前が空")
+    previous = conn.execute(
+        "SELECT model FROM runs WHERE model IS NOT NULL AND run_id != ?"
+        " AND started_at <= (SELECT started_at FROM runs WHERE run_id = ?)"
+        " ORDER BY started_at DESC, run_id DESC LIMIT 1",
+        (run_id, run_id),
+    ).fetchone()
+    cursor = conn.execute("UPDATE runs SET model = ? WHERE run_id = ?", (model, run_id))
+    if cursor.rowcount != 1:
+        raise LookupError(f"runs に開始の記録がない: {run_id}")
+    return None if previous is None else previous[0]
+
+
 @dataclass(frozen=True)
 class SourceFetch:
     """1回の実行での1情報源の取得結果。attempts は初回を含めた試行回数。"""

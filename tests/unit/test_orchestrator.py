@@ -647,6 +647,7 @@ def test_dry_run_prints_summary_only_and_keeps_it(host, capfd):
     assert [(r["stage"], r["event"]) for r in host.log(run_id)] == [
         ("job", "start"),
         ("analyze", "start"),
+        ("analyze", "usage"),
         ("analyze", "end"),
         ("job", "end"),
     ]
@@ -681,21 +682,6 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
     assert host.calls()[0]["locked"]
 
 
-@pytest.mark.parametrize("dry_run", [False, True])
-def test_daily_stops_at_analyze_until_skill_exists(host, capfd, monkeypatch, dry_run):
-    """内側のスキル（#22）がまだなければ、AI も ③ も起動せずに実行エラーにする。"""
-    monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)  # 偽の AI を外す
-    host.behave("ok", lock="daily-dry-run" if dry_run else "daily")
-    assert orchestrator.main(["daily", *(["--dry-run"] if dry_run else [])], host.environ) == 1
-    summary = summary_of(capfd)
-    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
-        "error",
-        "analyze",
-        "not_implemented",
-    )
-    assert [c["argv"][-4] for c in host.calls()] == ["collect"]
-
-
 # --- ② の AI の呼び出し（agent コンテナ。agent/invoke.py、structure.md 3.3） ---
 
 NOT_LOGGED_IN = (ROOT / "tests" / "fixtures" / "agent" / "not-logged-in.json").read_text()
@@ -716,9 +702,6 @@ AGENT_OK = json.dumps(
 def agent(host, monkeypatch, tmp_path) -> Host:
     """製品の call_agent を使い、偽の docker の agent サービスに答えさせる。"""
     monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)
-    skill = host.repo / "agent" / "skills" / "tr-daily-evaluate"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: tr-daily-evaluate\n---\n")
     schema = tmp_path / "daily_output.json"
     schema.write_text('{\n  "type": "object"\n}\n')
     monkeypatch.setattr(orchestrator, "DAILY_SCHEMA", schema)
@@ -774,22 +757,53 @@ def test_agent_gets_input_on_stdin_with_fixed_command(agent, capfd):
     assert "ANTHROPIC_API_KEY" not in call["env"]
     assert call["env"]["TR_SECRETS_DIR"] == str(agent.secrets / f".run-{run_id}")
     # 標準入力は worker が書いた ② の入力。出力は構造化出力だけを残す
-    stdin = json.loads((agent.fake / "agent-stdin").read_bytes())
+    body = (agent.fake / "agent-stdin").read_bytes()
+    stdin = json.loads(body)
     assert stdin == json.loads((out_dir / "agent-input.json").read_text())
     assert json.loads((out_dir / "agent-output.json").read_text()) == {"items": []}
-    end = [r for r in agent.log(run_id) if (r["stage"], r["event"]) == ("analyze", "end")]
-    assert end[0]["detail"] == "model=claude-opus-4-5-20251101 turns=2"
+    [usage] = [r for r in agent.log(run_id) if r["event"] == "usage"]
+    assert usage["stage"] == "analyze"
+    assert usage["count"] == len(stdin["items"])  # 渡した項目の数
+    assert re.fullmatch(
+        rf"model=claude-opus-4-5-20251101 input_bytes={len(body)} wall_ms=\d+"
+        r" duration_ms=unknown duration_api_ms=unknown num_turns=2 input_tokens=unknown"
+        r" output_tokens=unknown cache_creation_input_tokens=unknown"
+        r" cache_read_input_tokens=unknown total_cost_usd=unknown",
+        usage["detail"],
+    )
+    # ③ に使われたモデルを渡す（本番では worker が runs に記録する）
+    assert calls[2]["argv"][-6:] == [
+        "verify",
+        "daily",
+        "--run-id",
+        run_id,
+        "--model",
+        "claude-opus-4-5-20251101",
+    ]
 
 
-def test_agent_end_log_without_model_or_turns(agent, capfd):
+def test_agent_usage_log_without_model(agent, capfd):
     stdout = json.loads(AGENT_OK)
     del stdout["num_turns"]
     stdout["modelUsage"] = {}
     agent.behave("ok", lock="daily-dry-run", agent={"stdout": json.dumps(stdout)})
     assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 0
     run_id = summary_of(capfd)["run_id"]
-    end = [r for r in agent.log(run_id) if (r["stage"], r["event"]) == ("analyze", "end")]
-    assert end[0]["detail"] == "model=unknown turns=unknown"
+    [usage] = [r for r in agent.log(run_id) if r["event"] == "usage"]
+    assert usage["detail"].startswith("model=unknown input_bytes=")
+    assert "num_turns=unknown" in usage["detail"]
+    verify = agent.calls()[2]["argv"]
+    assert "--model" not in verify  # 分からなければ渡さない（runs の model は空のまま）
+
+
+def test_agent_failure_keeps_usage_log(agent, capfd):
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    run_id = summary_of(capfd)["run_id"]
+    events = [(r["event"], r.get("error_category")) for r in agent.log(run_id)]
+    assert events.index(("usage", None)) < events.index(("failure", "agent_failed"))
+    [usage] = [r for r in agent.log(run_id) if r["event"] == "usage"]
+    assert "duration_ms=43 " in usage["detail"]  # 失敗の結果の JSON の値も残す
 
 
 def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
@@ -845,9 +859,18 @@ def test_broken_schema_is_analyze_error_without_ai(agent, capfd, monkeypatch, tm
     summary = summary_of(capfd)
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "bad_schema")
     assert [_service(c) for c in agent.calls()] == ["worker"]  # AI を呼ばない
+    assert not [r for r in agent.log(summary["run_id"]) if r["event"] == "usage"]
 
 
-def _collected(job, stage, minutes, parse):
+def test_missing_skill_in_image_leaves_no_usage(agent, capfd):
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": "", "exit": 78})
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["error_category"] == "missing_skill"
+    assert not [r for r in agent.log(summary["run_id"]) if r["event"] == "usage"]
+
+
+def _collected(job, stage, minutes, parse, extra=()):
     """① の代わり。② の入力（1項目）を書き、成功の要約を返す。"""
     (job.files.dir / "agent-input.json").write_text(json.dumps({"task": "daily", "items": [{}]}))
     return {"items": 1, "sources": 1, "failed_sources": []}, None

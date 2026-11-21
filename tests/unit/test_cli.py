@@ -191,6 +191,13 @@ def test_failure_when_log_cannot_be_written_prints_no_details(env, capsys, monke
     assert "外部の文" not in captured.err and TOKEN not in captured.err
 
 
+@pytest.mark.parametrize("model", ["", "bad name", "a,,b", "claude\n-x"])
+def test_bad_model_name_is_usage_error(env, capsys, model):
+    # 統括スクリプトが確かめた名前だけを渡す。形が違えば DB とログに入れずに止める
+    assert cli.main(["verify", "daily", "--run-id", DRY, "--model", model], env) == 2
+    assert "モデルの名前" in capsys.readouterr().err
+
+
 def test_verify_failure_is_logged_as_verify(env, capsys):
     # ② の出力がない（統括スクリプトの誤りなど）。段階の途中の失敗にし、③ の失敗として残す
     assert cli.main(["collect", "daily", "--run-id", DRY], env) == 0

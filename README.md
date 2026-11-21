@@ -73,8 +73,11 @@ docker compose run --rm -T worker collect daily --run-id "$run_id"
 - ② は `structured_output` をそのまま保存し、形の検査は ③ の D6(a) で行います（違反は全体の不合格）
 - メモリは 2GB、プロセス数は 256 までです（`mem_limit`・`pids_limit`）
 - ルートのファイルシステムは読み取り専用で、書けるのは `CLAUDE_CONFIG_DIR`（`/claude`）と `/tmp` だけです（どちらも tmpfs で、コンテナを消すと消えます）。設定・実行データ・リポジトリはマウントしません。root では動かさず、権限（capabilities）をすべて外します
-- 道具と MCP をなくし（`--tools ""`・`--disallowedTools "mcp__*"`・`--strict-mcp-config`）、構造化出力（`--output-format json --json-schema`）で受け取り、セッションを保存しません（`--no-session-persistence`）。`--bare`（サブスクリプションのトークンを読まない）と `--model` は付けず、使われたモデルはログ（② の終わりの `detail`）に残します。`[limits]` の `agent_max_turns` を書いたときだけ `--max-turns` を付けます
-- スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキルは `agent/skills/tr-daily-evaluate/SKILL.md` です。スキルがまだなければ、② を実行エラー（`not_implemented`）にして AI を呼びません（スキルの有無はリポジトリで確かめます）
+- 道具と MCP をなくし（`--tools ""`・`--disallowedTools "mcp__*"`・`--strict-mcp-config`）、構造化出力（`--output-format json --json-schema`）で受け取り、セッションを保存しません（`--no-session-persistence`）。`--bare`（サブスクリプションのトークンを読まない）と `--model` は付けません。`[limits]` の `agent_max_turns` を書いたときだけ `--max-turns` を付けます
+- スキーマは `src/tech_researcher/schemas/daily_output.json`、内側のスキル（AI への指示）は `agent/skills/tr-daily-evaluate/SKILL.md` です
+- ② の入力が `[limits.daily]` の `agent_input_bytes`（2MB）を超えたら、AI を呼ばずに実行エラー（`input_too_large`）にします
+- AI を呼ぶたびに、成否によらず、ログに `usage` の行を1行残します。`count` は渡した項目の数、`detail` は `model=…`（使われたモデル）・`input_bytes=…`（標準入力の大きさ）・`wall_ms=…`（コンテナの起動を含めた所要時間）と、Claude Code の結果の JSON の `duration_ms`・`duration_api_ms`・`num_turns`・トークン数（`input_tokens`・`output_tokens`・`cache_creation_input_tokens`・`cache_read_input_tokens`）・`total_cost_usd`（クライアント側の見積もりで、サブスクリプションの利用量そのものではない）です。値がないものは `unknown` です
+- 本番では、使われたモデルの名前を runs の `model` に記録します（③ の worker が書きます）。前回の本番の実行の値と違えば、ログに `warning`（`model_changed`）を残します。見たら AI の回帰テスト（D-07）を流してください。`model_unknown`（本番の ② で AI の呼び出しが成功したのに、結果からモデルの名前が取れない）と `model_record_failed`（runs に書けない。③ は続けます）は、モデルの変化を見逃しうるので、原因を調べ、必要なら回帰テストを流してください。ドライランは記録せず、比べません
 - イメージは `docker compose build agent` を実行した時点の `agent/skills/` と Claude Code の版を持ちます。`agent/skills/` や `CLAUDE_CODE_VERSION` を変えたら、`docker compose build agent` をやり直してください（`bin/tr-run` は作り直しません）
 
 ビルドと、トークンを使わない確認（版と、読み取り専用で起動できること）：
@@ -85,7 +88,23 @@ docker compose run --rm -T agent claude --version   # 固定した版が出る
 # /app などは書けず（Read-only file system）、/claude と /tmp だけに書ける
 docker compose run --rm -T agent sh -c 'touch /app/x; touch /claude/x /tmp/x && echo ok'
 echo '{"x":1}' | docker compose run --rm -T agent cat   # 標準入力がコンテナに届く
+docker compose run --rm -T agent agent-run tr-daily-evaluate --version   # スキルがイメージにある
 ```
+
+トークンを使う確認（structure.md 3.8 の5〜7。`agent.env` にトークンを書いてから）。確認用の ② の入力（架空の内容）を、統括スクリプトと同じ引数で渡します。
+
+```sh
+docker compose run --rm -T agent agent-run tr-daily-evaluate -p /tr-daily-evaluate \
+  --tools "" --disallowedTools "mcp__*" --strict-mcp-config --output-format json \
+  --json-schema "$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), ensure_ascii=False, separators=(",", ":")))' src/tech_researcher/schemas/daily_output.json)" \
+  --no-session-persistence < tests/fixtures/agent/daily-input.json > /tmp/daily-result.json
+```
+
+- `is_error` が `false` で `structured_output` があれば、スキーマが受け付けられ、`/tmp` が noexec のままで推論が終わっています。`num_turns` は `[limits]` の `agent_max_turns` を決める材料にします
+- スキルが読まれたかは、スキルにだけ書いた決まりで確かめます：`d1` と `d2`（同じ発表）が1つの項目にまとまっている、`d4` の項目に `period_event` がある、価値の低い `d6` が選ばれていない、文章に URL がない。`category` が5つの値のどれかであることも見ますが、これはスキーマでも満たされるので、スキルが読まれた証拠にはなりません
+- 外部の文の中の指示に従わないことは、`d7`（指示の形の文を日本語と英語で埋め込んだ、価値の低い記事）で確かめます：`d7` が選ばれず、出力に `CANARY-d7f3` や `canary-d7f3.invalid` など指示に従った文がない
+- `--output-format stream-json --verbose` にすると、初期化の情報でスキルが読み込まれたかも見られます
+- 成功の結果の形の例は `tests/fixtures/agent/daily-success.json` です。実際の出力で形が違えば、この例と `src/tech_researcher/agent/invoke.py` を直します
 
 ## 実行（bin/tr-run）
 
@@ -101,7 +120,7 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 - compose には `PATH`・`HOME`・`DOCKER_HOST`・`TR_DATA_DIR`・`TR_SECRETS_DIR`・`TR_UID`・`TR_GID` と、専用の `DOCKER_CONFIG` だけを渡します。リポジトリの `.env` は読みません。`TR_SECRETS_DIR` は worker.env・agent.env の場所を compose に教えるだけで、コンテナには入りません
 - `DOCKER_CONFIG` は `${XDG_CONFIG_HOME:-$HOME/.config}/tech-researcher/docker`（権限 700）です。`~/.docker/config.json` の `proxies` などはコンテナに入りません。このため Docker のコンテキスト（`DOCKER_CONTEXT`・`docker context use`）は使えず、デーモンは `DOCKER_HOST` で指定します。compose のプラグインは、`~/.docker/cli-plugins` ではなく、システムの場所（`/usr/libexec/docker/cli-plugins` など）に入れておきます
 - 標準出力には、実行 ID・種類・対象日・結果の種別・件数・取得できなかった情報源の名前・ドライランの出力先だけを JSON 1行で出します。ドライランでは同じものを出力のフォルダの `summary.json` に残します
-- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。② は agent コンテナの Claude Code を呼びます（上の「agent コンテナ」）。ただし内側のスキル（`tr-daily-evaluate`。#22 で足します）はまだないので、いまは日次の実行（ドライランを含む）が ② で実行エラー（`not_implemented`）になります。② が失敗したときは、`agent_failed`（終了コードが0でない、または構造化出力がない。認証の失敗を含む）・`timeout`・`bad_output` などの分類を要約とログに出します。ログには compose・Claude Code の stderr の末尾（秘匿値を伏せたもの）と Claude Code の分類（`subtype` など）を残し、AI の応答の文（`result`）は残しません。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日（いまは0件の日、② をつないだ後はすべての日）も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
+- 日次は ① 収集 → ② 評価・要約 → ③ 検証・検査（`verify`）とつなぎ、ドライランでは ③ の結果（`validation.json`・`secret-scan.json`・作るはずの Issue の `issue.md`）を出力のフォルダに残します。② は agent コンテナの Claude Code を呼びます（上の「agent コンテナ」）。② が失敗したときは、`agent_failed`（終了コードが0でない、または構造化出力がない。認証の失敗を含む）・`timeout`・`bad_output` などの分類を要約とログに出します。ログには compose・Claude Code の stderr の末尾（秘匿値を伏せたもの）と Claude Code の分類（`subtype` など）を残し、AI の応答の文（`result`）は残しません。収集結果が0件の日は AI を呼ばずに ③ に進むので、ドライランは「該当なし」の本文を残して終わります。すべての情報源の取得に失敗した日は ① で実行エラー（`all_sources_failed`）、有効な情報源がないときは `no_sources` になります。不合格の日の本文と秘匿情報の検査の結果は、まだ残しません（#38 で足します）。⑤ 投稿もまだないので、本番は ③ まで進んだ日も ③ の後に実行エラー（`post`／`not_implemented`）で終わります
 - ① は、本番では DB（`$TR_DATA_DIR/db/tech-researcher.sqlite3`）を開き、runs の開始・取得結果（source_fetches）・収集項目（items。日次だけ）・Star 数と人気型フィードの記録（日次だけ）を書きます。① で実行エラーになった本番の実行（すべての情報源の取得に失敗した日など）は runs を `failed` で閉じます。② 以降の終わりは、それぞれの失敗の分岐と ⑤ で書くので、それまで本番の runs は `running` のまま残ります。ドライランは DB を読み取り専用で開き、何も書きません（DB がなければ前日の記録がないものとして動きます）
 - 週次は ① 収集だけです。ドライランは ① の後に終わり、本番は ① の後に実行エラー（`not_implemented`）で終わります
 

@@ -20,8 +20,8 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 秘匿値をマスクのためにだけ読む。
 
 日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
-とつなぐ。内側のスキル（agent/skills/tr-daily-evaluate/SKILL.md）がまだなければ、AI を呼ばずに
-② を実行エラー（not_implemented）にする。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで
+とつなぐ。② で使われたモデルの名前は ③ に渡し、本番では worker が runs の model に記録して前回の
+本番と比べる（structure.md 3.3）。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで
 終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗した
 ときの ④・⑤ への分岐も、それらの Issue で足す。
 
@@ -546,10 +546,11 @@ def _run_stages(job: Job) -> Summary:
         return job.summary(
             "error", failed_stage="analyze", error_category="not_implemented", **fields
         )
-    category = _analyze(job)
+    category, models = _analyze(job)
     if category is not None:
         return job.summary("error", failed_stage="analyze", error_category=category, **fields)
-    verified, category = _worker(job, "verify", job.limits.verify, _verify_summary)
+    model_args = ["--model", ",".join(models)] if models else []
+    verified, category = _worker(job, "verify", job.limits.verify, _verify_summary, model_args)
     if verified is None:
         return job.summary("error", failed_stage="verify", error_category=category, **fields)
     if verified["result"] == REJECTED:  # 不合格（US-E7-02）。④ と不合格 Issue は後の Issue で足す
@@ -563,71 +564,108 @@ def _run_stages(job: Job) -> Summary:
     return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
 
 
-def _analyze(job: Job) -> str | None:
-    """② を呼び、構造化出力を agent-output.json に保存する。失敗なら分類を返す。
+# claude を動かさずに終わった失敗（上限の超過、スキーマの誤り、イメージにスキルがない）。
+# usage の行を残さない
+_NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
+
+
+def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
+    """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類と、使われたモデルを返す。
 
     structured_output はそのまま保存し、形の検査は ③ の D6(a) で行う（違反は全体の不合格。
     D-04、D-07・US-E7-02）。
 
-    入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。収集結果が0件の
-    日も AI を呼ばず、項目のない出力をコードが作る（③ が「該当なし」の本文にする。
-    report-templates.md 1.5）。
+    入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。ファイルの
+    大きさを読み込む前に確かめ、読み込んだ後も標準入力に渡すバイト列で確かめる（worker は同じ
+    形の JSON で書くので、2つは同じ大きさになる）。収集結果が0件の日も AI を呼ばず、項目のない
+    出力をコードが作る（③ が「該当なし」の本文にする。report-templates.md 1.5）。
+    AI を呼んだら、成否によらず1回分の使用量・所要時間・モデル・入力量をログ（usage）に残す。
     """
     job.log.write("analyze", "start")
+    path = job.files.dir / AGENT_INPUT
+    limit = job.limits.agent_input_bytes
     try:
-        data = json.loads((job.files.dir / AGENT_INPUT).read_text(encoding="utf-8"))
+        size = path.stat().st_size
+        if size > limit:  # 読み込む前に止める
+            raise InputTooLarge(f"② の入力が {size} バイトで、上限 {limit} を超えた")
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
             raise ValueError("② の入力に items の配列がない")
-        body = encode_input(data, job.limits.agent_input_bytes)
+        body = encode_input(data, limit)
     except InputTooLarge as e:
         job.log.write("analyze", "failure", error_category="input_too_large", detail=str(e))
-        return "input_too_large"
+        return "input_too_large", ()
     except (OSError, ValueError) as e:  # worker が入力を書けていない・壊れている
         job.log.write("analyze", "failure", error_category="bad_input", exc=e)
-        return "bad_input"
-    result = None
+        return "bad_input", ()
+    models: tuple[str, ...] = ()
     if data["items"]:
+        started = time.monotonic()
         try:
             result = invoke.call_agent(
                 body,
                 job.limits.analyze * MINUTE,
                 runner=job.compose,
-                skill=job.repo / invoke.SKILLS_DIR / invoke.DAILY_SKILL,
+                skill=invoke.DAILY_SKILL,
                 schema=DAILY_SCHEMA,
                 max_turns=job.config.limits.agent_max_turns,
+                max_input_bytes=limit,
             )
-        except NotImplementedError:  # 内側のスキル（#22）がまだない
-            job.log.write("analyze", "failure", error_category="not_implemented")
-            return "not_implemented"
         except invoke.AgentError as e:
+            if e.category not in _NOT_CALLED:
+                _log_usage(job, data, body, started, e.models, e.usage)
             # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
             detail = job.scanner.mask(e.detail)[-STDERR_TAIL_CHARS:]
             job.log.write("analyze", "failure", error_category=e.category, detail=detail)
             if e.remove_failed:
                 job.log.write("analyze", "failure", error_category="container_remove_failed")
-            return e.category
+            return e.category, ()
         except OSError as e:  # docker を起動できない
             job.log.write("analyze", "failure", error_category="launch_failed", exc=e)
-            return "launch_failed"
+            return "launch_failed", ()
         except Exception as e:
+            # AI を呼んだ後の想定外の失敗。値の分からない記録でも、1回の呼び出しとして残す
+            _log_usage(job, data, body, started, (), None)
             job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
-            return "agent_failed"
-        output = result.output
+            return "agent_failed", ()
+        _log_usage(job, data, body, started, result.models, result.usage)
+        output, models = result.output, result.models
+        if not models and not job.files.dry_run:
+            # 結果の JSON の形が変わったなど。モデルの変化を見逃すので知らせる（structure.md 3.3）
+            job.log.write("analyze", "warning", error_category="model_unknown")
     else:
         output = {"items": []}
     try:
         _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
     except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
         job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
-        return "output_write_failed"
-    if result is not None:
-        # 使われたモデル（structure.md 3.3）。runs への記録と前回との比較は #22 で足す
-        models = ",".join(result.models) or "unknown"
-        turns = "unknown" if result.num_turns is None else result.num_turns
-        job.log.write("analyze", "end", detail=f"model={models} turns={turns}")
+        return "output_write_failed", ()
+    if data["items"]:
+        job.log.write("analyze", "end", count=len(data["items"]))
     else:
         job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
-    return None
+    return None, models
+
+
+def _log_usage(
+    job: Job,
+    data: dict,
+    body: bytes,
+    started: float,
+    models: Sequence[str],
+    usage: invoke.AgentUsage | None,
+) -> None:
+    """AI の1回の呼び出しの記録（structure.md 3.3・3.8 の7・8）。値はコードが作る名前と数だけ。
+
+    count は渡した項目の数、input_bytes は標準入力に渡したバイト数、wall_ms はコンテナの起動を
+    含めた所要時間。ほかは Claude Code の結果の JSON の値（なければ unknown）。
+    """
+    wall_ms = round((time.monotonic() - started) * 1000)
+    detail = (
+        f"model={','.join(models) or 'unknown'} input_bytes={len(body)} wall_ms={wall_ms} "
+        + (usage or invoke.AgentUsage()).fields()
+    )
+    job.log.write("analyze", "usage", count=len(data["items"]), detail=detail)
 
 
 def _write_output(job: Job, output: object) -> None:
@@ -638,10 +676,17 @@ def _write_output(job: Job, output: object) -> None:
 
 
 def _worker(
-    job: Job, stage: str, minutes: int, parse: Callable[[str], dict | None]
+    job: Job,
+    stage: str,
+    minutes: int,
+    parse: Callable[[str], dict | None],
+    extra: Sequence[str] = (),
 ) -> tuple[dict | None, str | None]:
-    """worker の段階を1つ動かし、要約を parse で読んで返す。失敗なら分類を返す。"""
-    args = [stage, job.cadence, "--run-id", job.files.run_id]
+    """worker の段階を1つ動かし、要約を parse で読んで返す。失敗なら分類を返す。
+
+    extra は段階の CLI に足す引数（③ に渡す使われたモデルの名前など）。
+    """
+    args = [stage, job.cadence, "--run-id", job.files.run_id, *extra]
     try:
         result = job.compose.run(WORKER, args, minutes * MINUTE)
     except OSError as e:

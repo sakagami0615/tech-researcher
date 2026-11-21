@@ -247,6 +247,7 @@ def test_dry_run_goes_round_and_keeps_results(host):
         ("collect", "source_result"),
         ("collect", "end"),
         ("analyze", "start"),
+        ("analyze", "usage"),
         ("analyze", "end"),
         ("verify", "start"),
         ("verify", "end"),
@@ -469,6 +470,13 @@ def test_ai_failure_stops_before_verify(host):
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
+    # 想定外の失敗でも、1回の呼び出しの記録（値は unknown）を残す
+    log = [
+        json.loads(x) for x in (Path(summary["output_dir"]) / "log.jsonl").read_text().splitlines()
+    ]
+    [usage] = [r for r in log if r["event"] == "usage"]
+    assert usage["detail"].startswith("model=unknown input_bytes=")
+    assert "num_turns=unknown" in usage["detail"]
 
 
 @pytest.mark.parametrize("feed", [FEED, EMPTY_FEED])
@@ -740,3 +748,122 @@ def test_long_quote_is_excluded_by_the_configured_limit(host):
     assert [x["item_ids"] for x in validation["excluded"]] == [["d1"]]
     assert "上限 5" in validation["excluded"][0]["reason"]
     assert ("verify", "excluded") in stages_of(out_dir / "log.jsonl")
+
+
+# --- ② を製品の call_agent でつなぐ（偽の agent コンテナが Claude Code の結果の JSON を返す） ---
+
+PRODUCT_CALL_AGENT = invoke.call_agent
+SUCCESS = json.loads((ROOT / "tests" / "fixtures" / "agent" / "daily-success.json").read_text())
+MODEL = "claude-opus-4-5-20251101"
+
+
+@pytest.fixture
+def agent(host, monkeypatch):
+    """call_agent は製品のまま。agent のサービスだけを偽にし、受け取った引数を残す。"""
+    monkeypatch.setattr(invoke, "call_agent", PRODUCT_CALL_AGENT)
+    host.model = MODEL
+
+    def run(compose, service, args, timeout_s, stdin=None):
+        if service == "worker":
+            return host.fake_compose_run(compose, service, args, timeout_s)
+        host._append("agent-args", list(args))
+        data = json.loads(stdin)
+        result = SUCCESS | {
+            "modelUsage": {host.model: SUCCESS["modelUsage"][MODEL]} if host.model else {},
+            "structured_output": host.ai(data),
+        }
+        return StageResult(0, json.dumps(result, ensure_ascii=False), "")
+
+    monkeypatch.setattr(orchestrator.Compose, "run", run)
+    return host
+
+
+def models_of(host) -> list[tuple]:
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        return conn.execute("SELECT run_id, model FROM runs ORDER BY rowid").fetchall()
+
+
+def log_of(host, run_id: str) -> list[dict]:
+    path = host.data / "logs" / "2026" / "10" / f"{run_id}.jsonl"
+    return [json.loads(x) for x in path.read_text().splitlines()]
+
+
+def test_product_call_agent_uses_the_skill_and_schema(agent):
+    code, summary, _ = agent.run("--dry-run")
+
+    assert (code, summary["result"]) == (0, "dry_run")
+    [args] = agent.calls("agent-args")
+    assert args[:4] == ["agent-run", "tr-daily-evaluate", "-p", "/tr-daily-evaluate"]
+    # 製品のスキーマを1行にして渡す
+    schema = json.loads(args[args.index("--json-schema") + 1])
+    assert schema == json.loads(orchestrator.DAILY_SCHEMA.read_text(encoding="utf-8"))
+    out_dir = Path(summary["output_dir"])
+    assert json.loads((out_dir / "validation.json").read_text())["entries"] == 2
+    log = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    [usage] = [r for r in log if r["event"] == "usage"]
+    assert usage["detail"].startswith(f"model={MODEL} input_bytes=")
+    assert "duration_ms=84210 " in usage["detail"]
+    assert "output_tokens=2310 " in usage["detail"]
+    assert not (agent.data / "db").exists()  # ドライランはモデルを DB に書かない
+
+
+def test_production_records_model_and_warns_when_it_changes(agent):
+    code, first, _ = agent.run()
+    assert (code, first["failed_stage"]) == (1, "post")  # ⑤ はまだない
+    assert models_of(agent) == [(first["run_id"], MODEL)]
+    assert not [r for r in log_of(agent, first["run_id"]) if r["event"] == "warning"]
+
+    _, second, _ = agent.run()  # 同じモデル
+    assert not [r for r in log_of(agent, second["run_id"]) if r["event"] == "warning"]
+    agent.model = "claude-opus-5-20261101"
+    _, third, _ = agent.run()
+    assert [m for _, m in models_of(agent)] == [MODEL, MODEL, "claude-opus-5-20261101"]
+    [warning] = [r for r in log_of(agent, third["run_id"]) if r["event"] == "warning"]
+    assert (warning["stage"], warning["error_category"]) == ("analyze", "model_changed")
+    assert f"{MODEL} から claude-opus-5-20261101" in warning["detail"]
+
+
+def test_unknown_model_in_production_is_warned(agent):
+    agent.model = None  # 結果の JSON に modelUsage がない
+    _, summary, _ = agent.run()
+    assert models_of(agent) == [(summary["run_id"], None)]
+    warnings = [r for r in log_of(agent, summary["run_id"]) if r["event"] == "warning"]
+    assert [r["error_category"] for r in warnings] == ["model_unknown"]
+
+
+def test_model_record_failure_does_not_stop_verify(agent, monkeypatch):
+    def broken(*args, **kwargs):
+        raise LookupError("runs に開始の記録がない")
+
+    monkeypatch.setattr(cli, "record_model", broken)
+    code, summary, _ = agent.run()
+    assert (code, summary["failed_stage"]) == (1, "post")  # ③ は最後まで進んだ
+    log = log_of(agent, summary["run_id"])
+    assert ("analyze", "warning", "model_record_failed") in [
+        (r["stage"], r["event"], r.get("error_category")) for r in log
+    ]
+    assert ("verify", "end") in [(r["stage"], r["event"]) for r in log]
+
+
+def test_dry_run_does_not_record_or_compare_models(agent):
+    agent.run()
+    agent.model = "claude-opus-5-20261101"
+    _, summary, _ = agent.run("--dry-run")
+    log = Path(summary["output_dir"]) / "log.jsonl"
+    assert ("analyze", "warning") not in stages_of(log)
+    assert [m for _, m in models_of(agent)] == [MODEL]
+
+
+def test_too_large_input_file_is_not_read(host, monkeypatch):
+    """② の入力のファイルが上限を超えていれば、読み込まずに止める。"""
+    host.write_config(LIMITS.replace("agent_input_bytes = 2_000_000", "agent_input_bytes = 100"))
+    real_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        assert path.name != "agent-input.json", "上限を超えた入力を読んだ"
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    code, summary, _ = host.run("--dry-run")
+    assert (code, summary["error_category"]) == (1, "input_too_large")
+    assert host.calls("agent") == []

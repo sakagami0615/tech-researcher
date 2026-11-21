@@ -7,7 +7,9 @@
 ドライランは DB を読み取り専用で開き、何も書かない（D-22）。① で実行エラーと分かった本番の実行
 （すべての情報源の取得に失敗した日と、① の例外）は、runs を failed と終了時刻で閉じる。D-13 の観測の
 実行（実行 ID の先頭が obs-。日次の ① だけ）は、それ以外なら observed で閉じる。通常の日次・週次の
-② 以降の終わりは、その失敗の分岐と ⑤ を実装する Issue で書く。
+② 以降の終わりは、その失敗の分岐と ⑤ を実装する Issue で書く。③ は、本番では統括スクリプトから
+渡された ② のモデルの名前を runs の model に記録し、前回の本番から変わっていればログで知らせる
+（structure.md 3.3。ドライランは記録せず比べない）。
 標準出力には、コードが作る要約（件数・情報源の ID・結果の種別）だけを JSON で出す。外部由来の文と
 例外の中身は出さず、ログ（秘匿情報をマスクする）にだけ残す（structure.md 3.2・7.3）。
 相対パスは作業ディレクトリ（ホストではリポジトリ、worker では /app）から解く。
@@ -27,9 +29,10 @@ from contextlib import closing, nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tech_researcher.agent.invoke import split_models
 from tech_researcher.config import Config, ConfigError, load_config
 from tech_researcher.db.readonly import open_readonly
-from tech_researcher.db.runs import finish_run, start_run
+from tech_researcher.db.runs import finish_run, record_model, start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target, daily_target, weekly_target
@@ -88,6 +91,8 @@ def _run(
     scanner: SecretScanner,
 ) -> dict:
     if args.stage == "verify":
+        if args.model is not None and not files.dry_run:
+            _record_model(files, args.model, log)
         return run_verify(config, target, files.run_id, files.dir, log, scanner)
     conn = open_readonly(files.db) if files.dry_run else open_db(files.db)
 
@@ -149,6 +154,27 @@ def _finish(conn: sqlite3.Connection, run_id: str, category: str | None) -> None
     )
 
 
+def _record_model(files: RunFiles, model: str, log: RunLog) -> None:
+    """本番の ② で使われたモデルを runs に記録し、前回の本番から変わっていればログで知らせる。
+
+    運用者はその警告を見て、AI の回帰テスト（D-07）を流す。記録は補助の機能なので、失敗しても
+    ③ は止めず、警告（model_record_failed）を残して検査を続ける。
+    """
+    try:
+        with closing(open_db(files.db)) as conn:
+            previous = record_model(conn, files.run_id, model)
+    except Exception as e:  # DB の誤り（SchemaError を含む）・行がないなど。中身はマスクしてログへ
+        log.write("analyze", "warning", error_category="model_record_failed", exc=e)
+        return
+    if previous is not None and previous != model:
+        log.write(
+            "analyze",
+            "warning",
+            error_category="model_changed",
+            detail=f"前回の本番 {previous} から {model} に変わった。AI の回帰テスト（D-07）を流す",
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tech-researcher")
     stages = parser.add_subparsers(dest="stage", required=True)
@@ -163,6 +189,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("cadence", choices=["daily"])  # 週次は週次の Issue で足す
     verify.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
+    verify.add_argument(
+        "--model", help="② で使われたモデルの名前（`,` でつなぐ）。本番では runs に記録する"
+    )
     return parser
 
 
@@ -170,6 +199,8 @@ def _prepare(
     args: argparse.Namespace, environ: Mapping[str, str]
 ) -> tuple[RunFiles, Config, Target]:
     files = RunFiles(data_dir(environ, Path.cwd()), args.run_id)
+    if getattr(args, "model", None) is not None:
+        split_models(args.model)  # 形が違えば起動の誤り（ログと DB に外部の文を入れない）
     if files.observation and (args.stage, args.cadence) != ("collect", "daily"):
         raise _UsageError("観測（obs-）の実行は日次の ① だけ")
     if not files.dir.is_dir():

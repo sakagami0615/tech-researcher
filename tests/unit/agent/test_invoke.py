@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from tech_researcher.agent import invoke
+from tech_researcher.agent.daily import CATEGORIES
+from tech_researcher.validate import text as text_checks
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "agent"
 NOT_LOGGED_IN = (FIXTURES / "not-logged-in.json").read_text(encoding="utf-8")
@@ -61,27 +63,15 @@ def schema(tmp_path) -> Path:
     return path
 
 
-@pytest.fixture
-def skill(tmp_path) -> Path:
-    path = tmp_path / "agent" / "skills" / "tr-daily-evaluate"
-    path.mkdir(parents=True)
-    (path / "SKILL.md").write_text("---\nname: tr-daily-evaluate\n---\n", encoding="utf-8")
-    return path
-
-
-@pytest.fixture(autouse=True)
-def _skill_for_call(skill, monkeypatch):
-    monkeypatch.setattr(invoke, "SKILLS_DIR", skill.parent)
-
-
-def call(runner, schema, max_turns=None):
+def call(runner, schema, max_turns=None, max_input_bytes=2_000_000):
     return invoke.call_agent(
         b'{"task": "daily"}',
         1200.0,
         runner=runner,
-        skill=invoke.SKILLS_DIR / invoke.DAILY_SKILL,
+        skill=invoke.DAILY_SKILL,
         schema=schema,
         max_turns=max_turns,
+        max_input_bytes=max_input_bytes,
     )
 
 
@@ -120,7 +110,9 @@ def test_max_turns_is_passed_when_configured():
 def test_call_passes_input_on_stdin_to_agent_service(schema):
     runner = FakeRunner(Done(0, result()))
     got = call(runner, schema, max_turns=4)
-    assert got == invoke.AgentResult({"items": []}, ("claude-opus-4-5-20251101",), 2)
+    assert got.output == {"items": []}
+    assert got.models == ("claude-opus-4-5-20251101",)
+    assert got.usage.num_turns == 2
     [(service, args, timeout_s, stdin)] = runner.calls
     assert service == "agent"
     assert timeout_s == 1200.0
@@ -133,12 +125,33 @@ def test_call_passes_input_on_stdin_to_agent_service(schema):
     )
 
 
-def test_missing_skill_is_not_implemented(schema, skill):
-    (skill / "SKILL.md").unlink()
+def test_repository_has_the_daily_skill():
+    # イメージに入れる内側のスキル（docker/agent.Dockerfile が agent/skills/ をコピーする）
+    skill = Path(__file__).parents[3] / "agent" / "skills" / invoke.DAILY_SKILL / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+    assert text.startswith(f"---\nname: {invoke.DAILY_SKILL}\n")
+    # スキルに書いた目安が、③ の検査の値（コードの固定値。その2倍で除外）とカテゴリにそろっている
+    for limit in (
+        text_checks.HEADLINE_LIMIT,
+        text_checks.POINT_LIMIT,
+        *text_checks.IMPORTANCE_LIMIT.values(),
+        text_checks.PERIOD_EVENT_LIMIT,
+    ):
+        assert f"{limit}字以内" in text
+    assert f"1〜{text_checks.POINTS_LIMIT}つ" in text
+    assert all(f"| `{c}` |" in text for c in CATEGORIES)
+
+
+@pytest.mark.parametrize(("size", "called"), [(17, True), (16, False)])
+def test_input_over_limit_stops_before_calling(schema, size, called):
     runner = FakeRunner(Done(0, result()))
-    with pytest.raises(NotImplementedError):
-        call(runner, schema)
-    assert runner.calls == []  # AI を呼ばない
+    if called:
+        call(runner, schema, max_input_bytes=size)  # ちょうど上限は通す
+    else:
+        with pytest.raises(invoke.AgentError) as e:
+            call(runner, schema, max_input_bytes=size)
+        assert e.value.category == "input_too_large"
+    assert bool(runner.calls) == called  # 超えたら AI を呼ばない
 
 
 def test_packaged_daily_schema_is_passed_on_one_line():
@@ -178,6 +191,67 @@ def test_build_progress_before_result_is_skipped():
     # イメージがないと compose がビルドの進み具合を標準出力に出す
     got = invoke.parse_result(0, "#1 building\n#2 DONE 0.1s\n" + result() + "\n")
     assert got.output == {"items": []}
+
+
+def test_usage_and_duration_are_taken_from_result():
+    got = invoke.parse_result(
+        0,
+        result(
+            duration_ms=81234,
+            duration_api_ms=79000,
+            num_turns=2,
+            total_cost_usd=0.42,
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 3456,
+                "cache_creation_input_tokens": 50000,
+                "cache_read_input_tokens": 7000,
+            },
+        ),
+    )
+    assert got.usage == invoke.AgentUsage(81234, 79000, 2, 12, 3456, 50000, 7000, 0.42)
+    assert got.usage.fields() == (
+        "duration_ms=81234 duration_api_ms=79000 num_turns=2 input_tokens=12 output_tokens=3456"
+        " cache_creation_input_tokens=50000 cache_read_input_tokens=7000 total_cost_usd=0.42"
+    )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"duration_ms": "1 ms", "num_turns": True, "usage": "x", "total_cost_usd": float("nan")},
+        {"duration_ms": -1, "usage": {"input_tokens": 1.5}, "total_cost_usd": "0.1"},
+    ],
+)
+def test_usage_keeps_only_numbers(fields):
+    data = json.loads(result()) | fields
+    got = invoke.parse_result(0, json.dumps(data))
+    assert got.usage.duration_ms is None
+    assert got.usage.input_tokens is None
+    assert got.usage.total_cost_usd is None
+    assert "unknown" in got.usage.fields()
+
+
+def test_failure_keeps_usage_and_models():
+    # 上限のターン数で止まったときなども、使った量は残す（structure.md 3.8 の7・8）
+    with pytest.raises(invoke.AgentError) as e:
+        invoke.parse_result(1, result(is_error=True, subtype="error_max_turns", num_turns=5))
+    assert e.value.usage.num_turns == 5
+    assert e.value.models == ("claude-opus-4-5-20251101",)
+
+
+def test_not_logged_in_usage_is_zero():
+    with pytest.raises(invoke.AgentError) as e:
+        invoke.parse_result(1, NOT_LOGGED_IN)
+    assert e.value.usage == invoke.AgentUsage(43, 0, 1, 0, 0, 0, 0, 0.0)
+    assert e.value.models == ()
+
+
+def test_split_models():
+    assert invoke.split_models("claude-a,claude-b[1m]") == ("claude-a", "claude-b[1m]")
+    for bad in ("", "a,,b", "a b", "a\nb"):
+        with pytest.raises(ValueError):
+            invoke.split_models(bad)
 
 
 def test_model_names_are_taken_from_usage():
@@ -258,6 +332,16 @@ def test_timeout_is_its_own_category(schema):
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "timeout"
+    assert (e.value.models, e.value.usage) == ((), None)
+
+
+def test_timeout_keeps_usage_when_result_was_printed(schema):
+    runner = FakeRunner(Done(None, result(num_turns=7)))
+    with pytest.raises(invoke.AgentError) as e:
+        call(runner, schema)
+    assert e.value.category == "timeout"
+    assert e.value.usage.num_turns == 7
+    assert e.value.models == ("claude-opus-4-5-20251101",)
 
 
 def test_unreadable_schema_is_bad_schema(tmp_path):

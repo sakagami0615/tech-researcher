@@ -6,6 +6,7 @@ import pytest
 from tech_researcher.db.runs import (
     SourceFetch,
     finish_run,
+    record_model,
     record_source_fetch,
     start_run,
     utc_text,
@@ -56,6 +57,30 @@ def test_start_records_target_and_period(conn):
         "investigation_json": None,
         "model": None,
     }
+
+
+def test_record_model_returns_previous_production_model(conn):
+    assert record_model(conn, RUN_ID, "claude-a") is None  # 前回の記録がない
+    assert run_row(conn)["model"] == "claude-a"
+    assert record_model(conn, RUN_ID, "claude-a") is None  # 同じ実行のやり直しは自分と比べない
+    later = "20261025-060000-0123"
+    weekly = "20261026-070000-0456"
+    start_run(conn, later, TARGET, STARTED + timedelta(days=1))
+    start_run(conn, "obs-20261025-060000-0789", TARGET, STARTED + timedelta(days=1, hours=1))
+    assert record_model(conn, later, "claude-b") == "claude-a"
+    start_run(conn, weekly, weekly_target(date(2026, 10, 26), 7), STARTED + timedelta(days=2))
+    assert record_model(conn, weekly, "claude-b") == "claude-b"  # 日次・週次を問わない
+    # 前に始まった実行だけと比べる（後から始まった実行の記録は前回に数えない）
+    assert record_model(conn, RUN_ID, "claude-a") is None
+
+
+def test_record_model_rejects_dry_run_unknown_run_and_empty(conn):
+    with pytest.raises(ValueError):
+        record_model(conn, "dry-20261024-060000-abcd", "claude-a")
+    with pytest.raises(ValueError):
+        record_model(conn, RUN_ID, "")
+    with pytest.raises(LookupError):
+        record_model(conn, "20261024-060000-ffff", "claude-a")
 
 
 def test_runs_are_added_per_run(conn):

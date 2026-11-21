@@ -537,6 +537,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | 文字数・要点数 | 各文、`points` の要素数 | 文は目安の2倍を超えたら除外（見出し 40・要点 80・重要性 標準形 100／簡潔形 60・期間内の出来事 60 字）。`points` は目安 3 の2倍の6つを超えたら除外。値はコードの固定値（report-templates.md 0.3・1.3） |
 
 - `primary_item_id` と `primary_link_id` の両方に値がある場合の扱いは実装で決める。初期案は、スキルで「片方だけ」と指示し、両方あれば `primary_link_id` を先頭にする
+  - 実装での対応：初期案のとおり。スキル（`agent/skills/tr-daily-evaluate/SKILL.md`）は、項目そのものが一次情報なら `primary_item_id`、そうでなく候補リンクに一次情報があれば `primary_link_id` を選ばせる
 
 ### 4.3 週次（② 評価・要約）
 
@@ -661,6 +662,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - 入力にスキーマの版（`schema_version`）を持たせるか
 - 週次の「今週の観測」の件数を、items の行で数えるか、正規化 URL の重複を除いて数えるか
 - スキーマに書ける JSON Schema の範囲（`--json-schema` が受け付けない書き方がないか）
+  - 確かめた結果（2026-11-17、Claude Code 2.1.311、トークンなし）：`$schema`（draft 2020-12）を書くと、`--json-schema` が起動の時点でエラーにする。そのため `$schema` は書かず、③ の検査は draft 2020-12 の検査器を名指しで使う。② の側がどの規格でスキーマを解釈するかは明示されていないので、② と ③ で意味が同じと確かめたキーワード（型・必須・`enum`・`anyOf`・`additionalProperties`・`items`・`properties`・`title`）だけを使い、単体テスト（`ALLOWED_KEYWORDS`）でほかのキーワードが入らないよう守る。`title`・`anyOf`・`enum`・`additionalProperties` を使った日次のスキーマは、起動の検査を通って認証の段階まで進む。AI が実際にそのスキーマで構造化出力を返せるかは、トークンで確かめる（structure.md 3.8 の7）
 
 ## 5. 実装で確かめること
 
