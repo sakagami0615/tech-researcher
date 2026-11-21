@@ -39,7 +39,7 @@ MAX_REDIRECTS = 3
 # 不正な値を http.client に渡すと、例外のメッセージに値がそのまま入るため、先に確かめる
 TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_.\-]+")
 # 応答の JSON の入れ子の深さの上限。一番外の配列・オブジェクトを 1 と数え、
-# 値（文字列や数）は数えない。# GitHub の正しい応答はずっと浅い。
+# 値（文字列や数）は数えない。GitHub の正しい応答はずっと浅い。
 # json の RecursionError に頼ると、Python の版によっては深い入れ子も読めてしまうため、自分で数える
 MAX_JSON_DEPTH = 64
 _END = object()
