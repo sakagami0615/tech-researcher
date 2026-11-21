@@ -9,7 +9,6 @@
 - 再試行は http.fetch に任せる（タイムアウト・接続の失敗・429・5xx）
 """
 
-import json
 import os
 import re
 from collections.abc import Callable, Iterator, Mapping
@@ -17,7 +16,13 @@ from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlencode, urljoin
 
-from tech_researcher.collect.github_api import API_ROOT, API_VERSION, TOKEN_FORMAT, classify
+from tech_researcher.collect.github_api import (
+    API_ROOT,
+    API_VERSION,
+    TOKEN_FORMAT,
+    classify,
+    load_json,
+)
 from tech_researcher.collect.http import FetchError, Response, fetch
 from tech_researcher.config import GITHUB_REPO_NAME, Limits
 
@@ -272,7 +277,7 @@ def _transfer_target(url: str, headers: Mapping[str, str]) -> str:
 
 def _json(url: str, response: Response):
     try:
-        return json.loads(response.body)
+        return load_json(response.body)
     except (ValueError, RecursionError) as e:
         raise _error(url, "invalid_response", None) from e
 

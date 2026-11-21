@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from tech_researcher.collect.github_api import MAX_JSON_DEPTH
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.config import load_config
 from tech_researcher.publish import github_issues
@@ -375,4 +376,13 @@ def test_transfer_by_repository_id_requires_repository_url(limits):
     r, _ = reader(limits, http_error(301, f"{API}/repositories/1/issues/7"), data)
     with pytest.raises(IssueReadError) as e:
         r.get_issue("o/r", 11)
+    assert e.value.category == "invalid_response"
+
+
+def test_get_issue_too_deeply_nested_json_is_an_invalid_response(limits):
+    depth = MAX_JSON_DEPTH + 1
+    body = (b"[" * depth) + (b"]" * depth)
+    r, _ = reader(limits, Response(f"{API}/repos/o/r/issues/7", 200, body, 1))
+    with pytest.raises(IssueReadError) as e:
+        r.get_issue("o/r", 7)
     assert e.value.category == "invalid_response"
