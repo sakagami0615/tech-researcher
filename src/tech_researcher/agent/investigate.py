@@ -14,7 +14,7 @@
 - ④ は再試行しない（structure.md 6.3）。失敗したら定型にする
 
 統括スクリプトの失敗の分岐へのつなぎ込みと、investigation.json・runs の investigation_json への
-保存は、日次の失敗の分岐（#41）で行う。
+保存は failures.py で行う。
 """
 
 import json
@@ -43,6 +43,7 @@ from tech_researcher.validate.secret_scan import SecretScanner
 
 INVESTIGATE_SCHEMA = resources.files("tech_researcher") / "schemas" / INVESTIGATE_OUTPUT_SCHEMA
 
+INVESTIGATION = "investigation.json"  # ④ の出力（検査を通ったもの）。実行のフォルダに置く
 KINDS = ("run_error", "rejected")  # 実行エラー・不合格
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}  # 表記はコードが変える（4.4）
 HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の例）
@@ -205,6 +206,9 @@ def history_lines(history: Iterable[RunHistory]) -> list[str]:
         if run.failed_sources:
             failed = ",".join(f"{s}:{c or 'unknown'}" for s, c in run.failed_sources)
             parts.append(f"failed_sources={_value(failed)}")
+        if run.partial_sources:
+            partial = ",".join(f"{s}:{n}" for s, n in run.partial_sources)
+            parts.append(f"partial_sources={_value(partial)}")
         lines.append(" ".join(parts))
     return lines
 

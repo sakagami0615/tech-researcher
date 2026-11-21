@@ -21,9 +21,10 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 
 日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
 とつなぐ。② で使われたモデルの名前は ③ に渡し、本番では worker が runs の model に記録して前回の
-本番と比べる（structure.md 3.3）。⑤ 投稿はまだないので、本番は ③ の後に実行エラーで
-終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は not_implemented）。段階が失敗した
-ときの ④・⑤ への分岐も、それらの Issue で足す。
+本番と比べる（structure.md 3.3）。日次の ① 〜 ③ の失敗（実行エラー・不合格・秘匿情報の検出）は
+failures.py が ④ の調査・本文（issue.md）・本番の runs の終わりへつなぐ。⑤ 投稿はまだないので、
+本番は ③ の後に実行エラーで終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は
+not_implemented）。⑤ への分岐は、その Issue で足す。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -45,6 +46,7 @@ from datetime import datetime
 from importlib import resources
 from pathlib import Path
 
+from tech_researcher import failures
 from tech_researcher.agent import invoke
 from tech_researcher.agent.daily import InputTooLarge, encode_input
 from tech_researcher.collect.sources import source_names
@@ -121,7 +123,9 @@ class Summary:
 
     result：report（レポート）・rejected（不合格）・error（実行エラー）・dry_run（ドライラン）・
     observed（D-13 の観測。observe.py）。
-    failed_sources は設定ファイルの表示名。Issue の番号と URL は ⑤ を実装する Issue で足す。
+    failed_sources は取得に失敗した情報源、partial_sources は一部だけ取れなかった情報源（取れた分は
+    使った部分レポート。US-E6-03）の、設定ファイルの表示名。Issue の番号と URL は ⑤ を実装する
+    Issue で足す。
     """
 
     run_id: str
@@ -132,6 +136,7 @@ class Summary:
     error_category: str | None = None
     items: int | None = None
     failed_sources: list[str] = field(default_factory=list)
+    partial_sources: list[str] = field(default_factory=list)
     output_dir: str | None = None
 
 
@@ -532,12 +537,16 @@ def _run_stages(job: Job) -> Summary:
         job, "collect", job.limits.collect, lambda out: _stage_summary(out, names)
     )
     if collected is None:
-        return job.summary("error", failed_stage="collect", error_category=category)
-    fields = {"items": collected["items"], "failed_sources": collected["failed_sources"]}
+        return _fail(job, "collect", category)
+    fields = {
+        "items": collected["items"],
+        "failed_sources": collected["failed_sources"],
+        "partial_sources": failures.partial_source_names(job.files.dir, names),
+    }
     category = collect_failure(collected["sources"], len(collected["failed_sources"]))
     if category is not None:  # 1つも取得できなかった日（US-E6-03・US-E6-04）
         job.log.write("collect", "failure", error_category=category)
-        return job.summary("error", failed_stage="collect", error_category=category, **fields)
+        return _fail(job, "collect", category, fields)
     if job.cadence == "weekly":
         # 週次の ② 〜 ⑤ はまだない。本番はレポートを作れないので実行エラーにする
         if job.files.dry_run:
@@ -548,14 +557,18 @@ def _run_stages(job: Job) -> Summary:
         )
     category, models = _analyze(job)
     if category is not None:
-        return job.summary("error", failed_stage="analyze", error_category=category, **fields)
+        return _fail(job, "analyze", category, fields, models)
     model_args = ["--model", ",".join(models)] if models else []
     verified, category = _worker(job, "verify", job.limits.verify, _verify_summary, model_args)
     if verified is None:
-        return job.summary("error", failed_stage="verify", error_category=category, **fields)
-    if verified["result"] == REJECTED:  # 不合格（US-E7-02）。④ と不合格 Issue は後の Issue で足す
+        return _fail(job, "verify", category, fields)
+    if verified["result"] == REJECTED:  # 不合格（US-E7-02）。不合格の後に再生成はしない
+        reason = _validation_reason(job)
+        failures.handle(job, failures.Outcome(failures.REJECTED, category=reason), MINUTE)
         return job.summary("rejected", **fields)
     if verified["result"] == SECRET_DETECTED:  # 本文を公開しない（US-E7-05）
+        outcome = failures.Outcome(failures.SECRET_STOP, "verify", SECRET_DETECTED)
+        failures.handle(job, outcome, MINUTE)
         return job.summary("error", failed_stage="verify", error_category=SECRET_DETECTED, **fields)
     if job.files.dry_run:  # ドライランは ⑤ だけを飛ばす（D-04）
         return job.summary("dry_run", **fields)
@@ -564,8 +577,35 @@ def _run_stages(job: Job) -> Summary:
     return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
 
 
+def _fail(
+    job: Job,
+    stage: str,
+    category: str | None,
+    fields: Mapping | None = None,
+    models: tuple[str, ...] = (),
+) -> Summary:
+    """日次の ① 〜 ③ の実行エラー：④ の調査・本文・本番の runs の終わりを行い、要約にする。
+
+    週次の失敗の分岐は週次の統合（#47・#48）で足す（いまは要約だけ）。
+    """
+    assert category is not None
+    if job.cadence == "daily":
+        failures.handle(job, failures.Outcome(failures.RUN_ERROR, stage, category, models), MINUTE)
+    return job.summary("error", failed_stage=stage, error_category=category, **(fields or {}))
+
+
+def _validation_reason(job: Job) -> str | None:
+    """③ の不合格の理由（validation.json の reason。runs の error_category に残す）。"""
+    reason = failures.load_validation(job.files.dir).get("reason")
+    return (
+        reason if isinstance(reason, str) and re.fullmatch(r"[A-Za-z0-9_]{1,64}", reason) else None
+    )
+
+
 def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類と、使われたモデルを返す。
+
+    ② が失敗したときも、結果の JSON にモデルが出ていれば返す（失敗の分岐が runs に記録する）。
 
     structured_output はそのまま保存し、形の検査は ③ の D6(a) で行う（違反は全体の不合格。
     D-04、D-07・US-E7-02）。
@@ -614,7 +654,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
             job.log.write("analyze", "failure", error_category=e.category, detail=detail)
             if e.remove_failed:
                 job.log.write("analyze", "failure", error_category="container_remove_failed")
-            return e.category, ()
+            return e.category, e.models  # 結果の JSON にモデルが出ていれば、runs に記録する
         except OSError as e:  # docker を起動できない
             job.log.write("analyze", "failure", error_category="launch_failed", exc=e)
             return "launch_failed", ()

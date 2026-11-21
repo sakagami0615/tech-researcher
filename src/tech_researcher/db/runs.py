@@ -74,8 +74,11 @@ def finish_run(
     failed_stage: str | None = None,
     error_category: str | None = None,
     retry_count: int | None = None,
+    investigation_json: str | None = None,
 ) -> None:
     """実行の終わりを記録する。failed_stage は失敗（failed）のときだけ、必ず持たせる。
+
+    investigation_json は ④ の出力（統括スクリプトが秘匿情報の検査を通したもの）。
 
     同じ実行の中でやり直したときは、同じ行を上書きする。
     """
@@ -94,8 +97,27 @@ def finish_run(
         raise ValueError(f"知らない段階 {failed_stage}")
     cursor = conn.execute(
         "UPDATE runs SET status = ?, finished_at = ?, failed_stage = ?, error_category = ?,"
-        " retry_count = ? WHERE run_id = ?",
-        (status, utc_text(finished_at), failed_stage, error_category, retry_count, run_id),
+        " retry_count = ?, investigation_json = ? WHERE run_id = ?",
+        (
+            status,
+            utc_text(finished_at),
+            failed_stage,
+            error_category,
+            retry_count,
+            investigation_json,
+            run_id,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise LookupError(f"runs に開始の記録がない: {run_id}")
+
+
+def record_investigation(conn: sqlite3.Connection, run_id: str, investigation_json: str) -> None:
+    """④ の出力（検査を通ったもの）だけを記録する。すでに閉じた実行（finish_run）の終わりの値は
+    変えない。④ の出力は統括スクリプトが秘匿情報の検査を通したもの。"""
+    check_writable_run_id(run_id)
+    cursor = conn.execute(
+        "UPDATE runs SET investigation_json = ? WHERE run_id = ?", (investigation_json, run_id)
     )
     if cursor.rowcount != 1:
         raise LookupError(f"runs に開始の記録がない: {run_id}")
@@ -200,7 +222,8 @@ def fetch_incomplete(conn: sqlite3.Connection, source_id: str, target: date) -> 
 class RunHistory:
     """④ の入力の履歴の行の材料（data-model.md 4.4）。値は DB にあるコードの分類と数だけ。
 
-    fetches は取得の状態ごとの情報源の数、failed_sources は失敗した（情報源 ID、分類）。
+    fetches は取得の状態ごとの情報源の数、failed_sources は失敗した（情報源 ID、分類）、
+    partial_sources は一部だけ取れなかった（情報源 ID、取れなかった部分の数。failed_parts_json）。
     rejected_checks は reports の不合格となった検査の名前（レポートを保存していなければ空）。
     """
 
@@ -215,6 +238,7 @@ class RunHistory:
     rejected_checks: tuple[str, ...]
     fetches: dict[str, int]
     failed_sources: tuple[tuple[str, str | None], ...]
+    partial_sources: tuple[tuple[str, int], ...] = ()
 
 
 def recent_runs(
@@ -235,12 +259,12 @@ def recent_runs(
     history = []
     for rid, cadence, target, started, status, stage, category, retries, checks in rows:
         fetches = conn.execute(
-            "SELECT source_id, status, error_category FROM source_fetches WHERE run_id = ?"
-            " ORDER BY source_id",
+            "SELECT source_id, status, error_category, failed_parts_json FROM source_fetches"
+            " WHERE run_id = ? ORDER BY source_id",
             (rid,),
         ).fetchall()
         counts: dict[str, int] = {}
-        for _, fetch_status, _ in fetches:
+        for _, fetch_status, _, _ in fetches:
             counts[fetch_status] = counts.get(fetch_status, 0) + 1
         history.append(
             RunHistory(
@@ -254,10 +278,20 @@ def recent_runs(
                 retry_count=retries,
                 rejected_checks=_check_names(checks),
                 fetches=counts,
-                failed_sources=tuple((s, c) for s, st, c in fetches if st == "failed"),
+                failed_sources=tuple((s, c) for s, st, c, _ in fetches if st == "failed"),
+                partial_sources=tuple(
+                    (s, n)
+                    for s, st, _, parts in fetches
+                    if st != "failed" and (n := _part_count(parts))
+                ),
             )
         )
     return history
+
+
+def _part_count(parts: str | None) -> int:
+    """failed_parts_json（表の CHECK が JSON の配列と保証する）の、取れなかった部分の数。"""
+    return len(json.loads(parts)) if parts else 0
 
 
 def _check_names(checks: str | None) -> tuple[str, ...]:

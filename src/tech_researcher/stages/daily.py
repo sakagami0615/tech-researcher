@@ -6,8 +6,9 @@
   （D-04）。いまは D6(a) のスキーマ、D6(b) の ID、D1、期間内の出来事の欠落、D2・D3、
   文字数と要点数、D4 を検査する
 - 秘匿情報を検出したら Issue の本文を残さない（US-E7-05）。⑤ の直前の検査は ⑤ の Issue で足す
-- 不合格・実行エラーの本文（とその秘匿情報の検査）は #38 で足す。いまは不合格のとき issue.md・
-  secret-scan.json を書かない
+- 不合格・実行エラー・公開停止の本文は、統括スクリプト（failures.py）が render/failure.py で作り、
+  issue.md に書く（④ の調査結果を含めるため）。③ は不合格のとき issue.md・secret-scan.json を
+  書かず、件数・検証項目ごとの合否・不合格となった検査の名前を validation.json に残す
 
 - 項目の ID は ① が item-ids.json に書く（本番は items の `i{主キー}`、ドライランは DB にある項目の
   ID か仮の ID。data-model.md 2.6）。② の入力と ③ の照合は同じ ID を使う
@@ -63,6 +64,7 @@ REPORT = "report"
 REJECTED = "rejected"
 SECRET_DETECTED = "secret_detected"
 RESULTS = frozenset({REPORT, REJECTED, SECRET_DETECTED})
+BODY_LIMIT = 60_000  # GitHub の Issue 本文の上限（report-templates.md 0.3）。超えたら不合格
 
 
 def write_daily_input(config: Config, target: Target, run_dir: Path) -> None:
@@ -99,7 +101,7 @@ def run_verify(
     raw_kinds = sorted({f.kind for text in texts for f in scanner.find(text)})
     if raw_kinds:
         # 原文に秘匿情報があるので、AI の出力も本文も保存しない
-        _save(
+        facts = _save(
             db,
             run_id,
             target,
@@ -114,13 +116,13 @@ def run_verify(
         log.write(
             "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(raw_kinds)
         )
-        return _finish(run_dir, log, SECRET_DETECTED, None, entries=0, excluded=[])
+        return _finish(run_dir, log, SECRET_DETECTED, None, entries=0, excluded=[], facts=facts)
     try:
         entries = parse_daily_output(output)
     except ValueError as e:
         # D6(a)：スキーマに合わない出力全体が不合格（US-E7-02）。不合格の後に再生成はしない
         log.write("verify", "failure", error_category="invalid_output", detail=str(e))
-        _save(
+        facts = _save(
             db,
             run_id,
             target,
@@ -133,7 +135,9 @@ def run_verify(
             scanner=scanner,
             ai_count=_output_count(output),
         )
-        return _finish(run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[])
+        return _finish(
+            run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[], facts=facts
+        )
     kept, excluded, verification, outcomes = _check_entries(entries, data, items, config.quote)
     for category, x in excluded:
         log.write("verify", "excluded", error_category=category, detail=x.reason)
@@ -145,7 +149,7 @@ def run_verify(
     if entries and not kept:  # 除外で0件（US-E7-02）。AI が0件を選んだときはレポートにする
         log.write("verify", "failure", error_category="all_excluded")
         verification["secret_detected"] = "passed"  # 原文の検査は通っている
-        _save(
+        facts = _save(
             db,
             run_id,
             target,
@@ -158,7 +162,9 @@ def run_verify(
             output=output,
             scanner=scanner,
         )
-        return _finish(run_dir, log, REJECTED, "all_excluded", entries=0, excluded=reasons)
+        return _finish(
+            run_dir, log, REJECTED, "all_excluded", entries=0, excluded=reasons, facts=facts
+        )
     unjudged = unjudged_notes(run_dir, config)
     report = render_daily(
         target,
@@ -170,14 +176,34 @@ def run_verify(
         unavailable=unavailable_notes(run_dir, config),
         unjudged=unjudged,
     )
-    kinds = sorted({f.kind for f in scanner.find(_issue_text(report))})
+    if len(report.body) > BODY_LIMIT:  # 投稿できない長さ。掲載を絞って作り直さない（再生成しない）
+        log.write("verify", "failure", error_category="body_too_long")
+        verification.update({"secret_detected": "passed", "body_too_long": "failed"})
+        facts = _save(
+            db,
+            run_id,
+            target,
+            len(items),
+            entries,
+            excluded,
+            verification,
+            ["body_too_long"],
+            outcomes=outcomes,
+            output=output,
+            scanner=scanner,
+            kept=kept,
+        )
+        return _finish(
+            run_dir, log, REJECTED, "body_too_long", entries=0, excluded=reasons, facts=facts
+        )
+    kinds = sorted({f.kind for f in scanner.find(issue_text(report))})
     verification["secret_detected"] = "failed" if kinds else "passed"
     if kinds:
         log.write(
             "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(kinds)
         )
         # 公開しないので、項目と本文は残さない（件数には AI の出力と除外を数える）
-        _save(
+        facts = _save(
             db,
             run_id,
             target,
@@ -189,8 +215,10 @@ def run_verify(
             keep_entries=False,
         )
         _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": kinds}))
-        return _finish(run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons)
-    _save(
+        return _finish(
+            run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons, facts=facts
+        )
+    facts = _save(
         db,
         run_id,
         target,
@@ -206,8 +234,8 @@ def run_verify(
         kept=kept,
     )
     _write(run_dir / SECRET_SCAN, json.dumps({"detected": False, "kinds": []}))
-    _write(run_dir / ISSUE, _issue_text(report))
-    return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons)
+    _write(run_dir / ISSUE, issue_text(report))
+    return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons, facts=facts)
 
 
 def _check_entries(
@@ -306,8 +334,11 @@ def _save(
     keep_entries: bool = True,
     outcomes: Mapping[int, tuple[str, str]] = {},
     ai_count: int | None = None,
-) -> None:
+) -> dict:
     """③ の結果を reports・report_entries に保存する。db がなければ（ドライラン）何もしない。
+
+    保存するかによらず、件数・検証項目ごとの合否・不合格となった検査の名前を返す（validation.json に
+    書き、統括スクリプトが不合格 Issue の本文に使う）。
 
     項目は AI の出力の順に残す。掲載した項目には、本文の通し番号（display_no。カテゴリの固定順、
     同じカテゴリでは rank 順。display_key）を付ける。AI が返した文は、マスクしてから保存する。
@@ -315,8 +346,21 @@ def _save(
     秘匿情報を検出した実行は、AI の出力も本文も保存しない（output・body を渡さない）。
     ai_count は AI の出力の項目の数（entries を渡さないとき、出力の項目の数を数えて渡す）。
     """
+    by_reason = Counter(category for category, _ in excluded)
+    counts = {
+        "collected": collected,
+        "ai_output": len(entries) if ai_count is None else ai_count,
+        "excluded": len(excluded),
+        "excluded_by_reason": dict(by_reason),
+        "published": len(kept),  # 掲載した件数（公開しない不合格は kept を渡さず 0）
+    }
+    facts = {
+        "counts": counts,
+        "verification": dict(verification),
+        "rejected_checks": list(rejected_checks),
+    }
     if db is None:
-        return
+        return facts
     published = [i for i in range(len(entries)) if i not in outcomes]
     ranked = sorted(published, key=lambda i: display_key(entries[i]))
     numbers = {i: n for n, i in enumerate(ranked, start=1)}
@@ -333,14 +377,6 @@ def _save(
                 display_no=numbers.get(index),
             )
         )
-    by_reason = Counter(category for category, _ in excluded)
-    counts = {
-        "collected": collected,
-        "ai_output": len(entries) if ai_count is None else ai_count,
-        "excluded": len(excluded),
-        "excluded_by_reason": dict(by_reason),
-        "published": len(kept),  # 掲載した件数（公開しない不合格は kept を渡さず 0）
-    }
     ai_output = None if output is None else json.dumps(_mask(output, scanner), ensure_ascii=False)
     save_report(
         db,
@@ -357,6 +393,7 @@ def _save(
             body_markdown=body,
         ),
     )
+    return facts
 
 
 def _payload(entry: DailyEntry, excluded: tuple[str, str] | None) -> dict:
@@ -398,14 +435,21 @@ def _finish(
     *,
     entries: int,
     excluded: list[dict],
+    facts: Mapping,
 ) -> dict:
-    validation = {"result": result, "reason": reason, "entries": entries, "excluded": excluded}
+    validation = {
+        "result": result,
+        "reason": reason,
+        "entries": entries,
+        "excluded": excluded,
+        **facts,
+    }
     _write(run_dir / VALIDATION, json.dumps(validation, ensure_ascii=False))
     log.write("verify", "end", count=entries)
     return {"result": result, "entries": entries, "excluded": len(excluded)}
 
 
-def _issue_text(report: Report) -> str:
+def issue_text(report: Report) -> str:
     """作るはずの Issue（タイトル・ラベル・本文）。秘匿情報の検査もこの全体にかける。"""
     return f"{report.title}\n{', '.join(report.labels)}\n\n---\n\n{report.body}"
 
