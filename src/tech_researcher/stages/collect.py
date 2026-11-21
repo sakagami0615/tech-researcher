@@ -28,6 +28,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from pathlib import Path
 
 from tech_researcher.collect.aggregate import aggregate
@@ -193,7 +194,10 @@ def run_collect(
     token = _token(collectors, log) if uses_github else None
     keep(*_collect_last30days(config, target, token, log, collectors))
     results = [r for r, _ in fetched]
-    github = _collect_github(config, target, results, token, db, write, featured, log, collectors)
+    # REST の回数の上限（1回の実行あたり）はクライアントごとに数える。候補集め・README・Releases で
+    # 1つのクライアントを共有し、上限を超えないようにする
+    client = cache(lambda: collectors.github(token, limits))
+    github = _collect_github(config, target, results, client, db, write, featured, log, collectors)
     if github is not None and write:
         assert db is not None
         record_source_fetch(db, log.run_id, github.fetch.to_fetch(github.at))
@@ -202,9 +206,7 @@ def run_collect(
         keep(
             _collect_one(
                 RELEASES_SOURCE_ID,
-                lambda: collectors.releases(
-                    releases, target.period, collectors.github(token, limits)
-                ),
+                lambda: collectors.releases(releases, target.period, client()),
                 log,
                 collectors,
             )
@@ -228,7 +230,7 @@ def run_collect(
     if write:
         assert db is not None
         saved = save_collect(db, log.run_id, target, fetches, observed, holds)
-        refs = dict(zip((i.url for i in observed), saved, strict=False))
+        refs = dict(zip((i.url for i in observed), saved, strict=target.cadence == "daily"))
     elif db is not None and target.cadence == "daily":  # ドライラン：本番の実行が書いた項目の ID
         refs = lookup_item_refs(db, target.cadence, target.key, (i.url for i in items))
     # 途中で止まっても壊れたファイルを残さないよう、一時ファイルに書いてから置き換える
@@ -406,7 +408,7 @@ def _collect_github(
     config: Config,
     target: Target,
     results: list[SourceResult],
-    token: str | None,
+    get_client: Callable[[], GitHubClient],
     db: sqlite3.Connection | None,
     write: bool,
     featured: set[str],
@@ -427,7 +429,7 @@ def _collect_github(
         github = GitHubFetch(0, 0, skipped=True)
     else:
         try:
-            client = collectors.github(token, config.limits)
+            client = get_client()
             stored = load_star_snapshot(db, target.key) if db else {}
             # 最初の実行が測り残した日は、再実行で測れた分も判定に入れる
             resumed = bool(stored) and fetch_incomplete(db, GITHUB_REPOS_SOURCE_ID, target.key)

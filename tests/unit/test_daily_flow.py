@@ -945,7 +945,7 @@ def test_rejected_output_is_saved_with_the_failed_check(host):
     assert (row[1], json.loads(row[2]), json.loads(row[4])) == (
         "rejected",
         ["invalid_output"],
-        {"invalid_output": "failed"},
+        {"secret_detected": "passed", "invalid_output": "failed"},
     )
     assert row[6] is None and entries == []
 
@@ -953,3 +953,76 @@ def test_rejected_output_is_saved_with_the_failed_check(host):
 def test_work_files_are_removed_after_a_production_run(host):
     host.run()
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]
+
+
+def test_all_excluded_is_saved_as_rejected_with_reasons(host):
+    host.ai = lambda data: {"items": [entry("i98", 1), entry("i99", 2)]}
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2])) == ("rejected", ["all_excluded"])
+    assert json.loads(row[4])["secret_detected"] == "passed"
+    assert row[6] is None and row[5] is not None  # 本文はなく、AI の出力は調査用に残る
+    assert [(e[1], json.loads(e[2]), e[3]) for e in entries] == [
+        ("excluded", ["invalid_id"], None),
+        ("excluded", ["invalid_id"], None),
+    ]
+    payload = json.loads(entries[0][5])
+    assert payload["headline"] == "見出し1" and "exclusion_detail" in payload
+
+
+def test_display_no_follows_the_report_order(host):
+    """本文の通し番号は、カテゴリの固定順・rank 順（AI の出力の順ではない）。"""
+    host.ai = lambda data: {
+        "items": [
+            entry("i1", 1, category="oss"),
+            entry("i2", 1, category="ai"),
+        ]
+    }
+    host.run()
+    _, entries, _ = saved_report(host)
+    assert [(e[0], e[3]) for e in entries] == [(1, 2), (2, 1)]
+
+
+def test_secret_in_ai_output_saves_neither_output_nor_body(host):
+    host.ai = lambda data: {
+        "items": [entry("i1", 1, points=["値は " + TOKEN + " です"]), entry("i2", 2)]
+    }
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2]), row[5], row[6]) == (
+        "rejected",
+        ["secret_detected"],
+        None,
+        None,
+    )
+    assert entries == [] and TOKEN not in str(row)
+
+
+def test_secret_found_only_in_the_body_is_not_saved_either(host, monkeypatch):
+    """本文を組み立てた後の検出：項目と本文は残さず、件数に AI の出力と除外を数える。"""
+    from tech_researcher.validate.secret_scan import SecretScanner
+
+    original = SecretScanner.find
+    calls = []
+
+    def find(self, text):
+        calls.append(text)
+        # 原文の検査（最初の呼び出し群）は通し、本文の検査だけ検出させる
+        return (
+            original(self, text)
+            if "tech-researcher kind=report" not in text
+            else [type("F", (), {"kind": "known"})()]
+        )
+
+    monkeypatch.setattr(SecretScanner, "find", find)
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2]), row[5], row[6]) == (
+        "rejected",
+        ["secret_detected"],
+        None,
+        None,
+    )
+    counts = json.loads(row[3])
+    assert (counts["ai_output"], counts["published"]) == (2, 0)
+    assert entries == []

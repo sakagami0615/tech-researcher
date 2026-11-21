@@ -86,7 +86,7 @@ def run_verify(
     validation.json（合否と除外の理由）と secret-scan.json（検出の有無と種類）を書く。
     合格して秘匿情報もなければ、作るはずの Issue を issue.md に書く。
     db は本番の接続で、渡されたら結果を reports・report_entries に保存する（ドライランは渡さない）。
-    保存できなければ例外にし、ファイルは書かない。
+    保存できなければ例外にし、結果のファイルは書かない（secret-scan.json は先に書く場合がある）。
     """
     log.write("verify", "start")
     items = _numbered(run_dir)
@@ -127,7 +127,7 @@ def run_verify(
             len(items),
             (),
             (),
-            {"invalid_output": "failed"},
+            {"secret_detected": "passed", "invalid_output": "failed"},
             ["invalid_output"],
             output=output,
             scanner=scanner,
@@ -143,6 +143,7 @@ def run_verify(
     ]
     if entries and not kept:  # 除外で0件（US-E7-02）。AI が0件を選んだときはレポートにする
         log.write("verify", "failure", error_category="all_excluded")
+        verification["secret_detected"] = "passed"  # 原文の検査は通っている
         _save(
             db,
             run_id,
@@ -169,12 +170,23 @@ def run_verify(
     )
     kinds = sorted({f.kind for f in scanner.find(_issue_text(report))})
     verification["secret_detected"] = "failed" if kinds else "passed"
-    _write(run_dir / SECRET_SCAN, json.dumps({"detected": bool(kinds), "kinds": kinds}))
     if kinds:
         log.write(
             "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(kinds)
         )
-        _save(db, run_id, target, len(items), (), excluded, verification, ["secret_detected"])
+        # 公開しないので、項目と本文は残さない（件数には AI の出力と除外を数える）
+        _save(
+            db,
+            run_id,
+            target,
+            len(items),
+            entries,
+            excluded,
+            verification,
+            ["secret_detected"],
+            keep_entries=False,
+        )
+        _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": kinds}))
         return _finish(run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons)
     _save(
         db,
@@ -190,6 +202,7 @@ def run_verify(
         body=report.body,
         kept=kept,
     )
+    _write(run_dir / SECRET_SCAN, json.dumps({"detected": False, "kinds": []}))
     _write(run_dir / ISSUE, _issue_text(report))
     return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons)
 
@@ -267,6 +280,7 @@ def _save(
     scanner: SecretScanner | None = None,
     body: str | None = None,
     kept: Sequence[DailyEntry] = (),
+    keep_entries: bool = True,
 ) -> None:
     """③ の結果を reports・report_entries に保存する。db がなければ（ドライラン）何もしない。
 
@@ -280,7 +294,7 @@ def _save(
     shown = sorted(kept, key=lambda e: (CATEGORIES.index(e.category), e.rank))
     numbers = {id(e): n for n, e in enumerate(shown, start=1)}
     rows = []
-    for entry in entries:
+    for entry in entries if keep_entries else ():
         found = reasons.get(id(entry))
         rows.append(
             EntryRow(
@@ -298,7 +312,7 @@ def _save(
         "ai_output": len(entries),
         "excluded": len(excluded),
         "excluded_by_reason": dict(by_reason),
-        "published": len(kept),
+        "published": len(kept),  # 掲載した件数（公開しない不合格は kept を渡さず 0）
     }
     ai_output = None if output is None else json.dumps(_mask(output, scanner), ensure_ascii=False)
     save_report(

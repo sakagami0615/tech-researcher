@@ -233,3 +233,25 @@ def test_weekly_writes_no_item_ids(tmp_path):
     )
     assert not (tmp_path / ITEM_IDS).exists()
     assert not (tmp_path / UNAVAILABLE).exists()
+
+
+def test_one_github_client_is_shared_so_the_rest_limit_counts_everything(tmp_path):
+    """候補集め・README・Releases で、REST の回数を数えるクライアントを1つにする。"""
+    made, used = [], []
+    github = FakeGitHub([], search_repos=())
+
+    def make(token, limits):
+        client = github.client(token, limits)
+        made.append(client)
+        return client
+
+    cfg = replace(
+        config(), github_repos=replace(FULL.github_repos, search_topics=(), watch_repos=())
+    )
+    collected = replace(
+        all_collectors([], github=github),
+        github=make,
+        releases=lambda s, p, c: used.append(c) or SourceResult("github_releases", (), 1),
+    )
+    run_collect(cfg, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
+    assert len(made) == 1 and used == made
