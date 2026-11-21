@@ -2,6 +2,8 @@
 report-templates.md 3章）。
 
 日次の ① 〜 ③ の実行エラー・不合格・秘匿情報の検出（公開停止）のあとに、次を行う。
+（公開停止にした本文の runs は、元の結果のまま閉じる。公開停止はログの `post` の
+`secret_detected` に残す。issues の `blocked_secret` に残すのは ⑤ で行う。data-model.md 3.4）
 
 1. ④ 失敗時の調査を1回だけ呼ぶ（agent/investigate.py）。呼ばないのは、② がイメージにスキルがない・
    docker を起動できないで失敗したとき（AI を利用できない。D-04）と、秘匿情報の検出（3.6 の定型は
@@ -14,7 +16,7 @@ report-templates.md 3章）。
 4. 本番だけ、runs を worker の `finish` で閉じる（failed・rejected、終了時刻、④ の出力、
    ② が失敗したときのモデル）。DB に書くのは worker だけ（D-04）。ドライランは DB に書かない。
    ① の worker がすでに閉じた実行（取得の全失敗・① の例外）は、worker の finish が終わりの値を
-   上書きせず、④ の出力だけを足す
+   上書きせず、再試行回数（worker は書かない）と ④ の出力だけを補う
 
 後始末の失敗（④ の失敗、本文を書けない、runs を閉じられない）は実行の結果を変えない。ログに残し、
 要約は元の失敗のまま出す。⑤ の投稿（Issue を作ること）はここでは行わない。
@@ -112,7 +114,7 @@ class Outcome:
 def handle(job: Job, outcome: Outcome, minute: float) -> None:
     """失敗の後始末を行う（モジュールの説明）。例外は出さない。minute は設定の上限（分）の秒数。"""
     try:
-        outcome = _write_issue(job, outcome, minute)
+        _write_issue(job, outcome, minute)
     except Exception as e:
         _quiet(job, "investigate", "failure", error_category=type(e).__name__, exc=e)
     if job.files.dry_run:
@@ -123,19 +125,12 @@ def handle(job: Job, outcome: Outcome, minute: float) -> None:
         _quiet(job, "job", "failure", error_category="run_close_failed", exc=e)
 
 
-def _write_issue(job: Job, outcome: Outcome, minute: float) -> Outcome:
-    """④ の調査・本文を作り、investigation.json・issue.md を書く（先に ④ の出力を残す）。
-
-    本文の全体の検査で公開停止にしたときは、runs を閉じる結果を failed・post・secret_detected
-    に変えて返す（元の結果のまま残さない）。
-    """
-    report, result, stopped = _report(job, outcome, minute)
+def _write_issue(job: Job, outcome: Outcome, minute: float) -> None:
+    """④ の調査・本文を作り、investigation.json・issue.md を書く（先に ④ の出力を残す）。"""
+    report, result = _report(job, outcome, minute)
     if result.output is not None:
         _write(job.files.dir / INVESTIGATION, json.dumps(result.output, ensure_ascii=False))
     _write(job.files.dir / ISSUE, issue_text(report))
-    if stopped:
-        return Outcome(SECRET_STOP, "post", "secret_detected", outcome.models)
-    return outcome
 
 
 def partial_source_names(run_dir: Path, names: Mapping[str, str]) -> list[str]:
@@ -228,12 +223,12 @@ def retries(config: Config, stage: str, fetches: Sequence[Mapping]) -> tuple[int
     return 0, ANALYZE_RETRY_LIMIT if stage == "analyze" else 0
 
 
-def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, InvestigateResult, bool]:
-    """本文と ④ の結果と、本文の全体の検査で公開停止にしたか。"""
+def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, InvestigateResult]:
+    """本文と ④ の結果。本文の全体の検査で公開停止にしたときは、公開停止の定型にする。"""
     target = job.target
     if outcome.kind == SECRET_STOP:
         assert outcome.stage is not None
-        return secret_stop_report(target, outcome.stage), InvestigateResult(None), False
+        return secret_stop_report(target, outcome.stage), InvestigateResult(None)
     validation = load_validation(job.files.dir)
     fetches = load_fetches(job.files.dir)
     names = source_names(job.config)
@@ -253,7 +248,7 @@ def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, Investig
         )
     result = _investigate(job, failure, validation, minute)
 
-    def build(investigation: Investigation | None) -> Report:
+    def build(investigation: Investigation | None, shown: int | None = None) -> Report:
         if outcome.kind == REJECTED:
             return rejected_report(
                 target,
@@ -275,21 +270,39 @@ def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, Investig
             failure.failed_stage,
             failure.error_category,
             retries(job.config, failure.failed_stage, fetches),
-            source_results(fetches, names),
+            rows[:shown],
             investigation,
+            0 if shown is None else len(rows) - shown,
         )
 
+    rows = source_results(fetches, names)
     report = build(result.investigation)
     # 本文の全体も投稿前の検査にかける（report-templates.md 3.2・US-E7-05）。秘匿情報を先に見る
     kinds = _secret_kinds(job.scanner, issue_text(report))
     if kinds:
         _quiet(job, "post", "secret_detected", error_category="secret_detected", detail=kinds)
-        stop = secret_stop_report(target, "post")
-        return stop, InvestigateResult(None, "secret_detected"), True
-    if body_too_long(report.body):  # 調査結果を載せずに 3.5 の定型にする（結果は残さない）
+        return secret_stop_report(target, "post"), InvestigateResult(None, "secret_detected")
+    if body_too_long(report.body):
+        # まず取得結果の表の後ろを「ほか N 件」に縮めて収める。収まらなければ調査結果を載せずに
+        # 3.5 の定型にする（結果は残さない）
+        fitted = shrink_sources(len(rows), lambda keep: build(result.investigation, keep))
+        if fitted is not None and outcome.kind == RUN_ERROR:
+            return fitted, result
         _quiet(job, "investigate", "failure", error_category="body_too_long")
-        return build(None), InvestigateResult(None, "body_too_long"), False
-    return report, result, False
+        return build(None), InvestigateResult(None, "body_too_long")
+    return report, result
+
+
+def shrink_sources(count: int, build: Callable[[int], Report]) -> Report | None:
+    """表の行数を半分ずつ減らし、本文が上限に収まる最初の本文を返す。収まらなければ None。"""
+    keep = count // 2
+    while True:
+        report = build(keep)
+        if not body_too_long(report.body):
+            return report
+        if keep == 0:
+            return None
+        keep //= 2
 
 
 def _investigate(
@@ -378,7 +391,9 @@ def _close_run(job: Job, outcome: Outcome, minute: float) -> None:
         args += ["--failed-stage", outcome.stage]
     if outcome.category:
         args += ["--error-category", outcome.category]
-    if outcome.kind == RUN_ERROR and outcome.stage is not None:
+    if outcome.kind == REJECTED:  # ③ の不合格に再試行はない（再生成しない）
+        args += ["--retry-count", "0"]
+    elif outcome.kind == RUN_ERROR and outcome.stage is not None:
         count = retries(job.config, outcome.stage, load_fetches(job.files.dir))[0]
         args += ["--retry-count", str(count)]
     if outcome.models:

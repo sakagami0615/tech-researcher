@@ -354,3 +354,9 @@ def test_run_error_without_fetch_results_does_not_show_an_empty_table():
         report.body
     )
     assert "| 情報源 |" not in report.body
+
+
+def test_run_error_shows_how_many_rows_were_left_out():
+    sources = [SourceResult("Hacker News", False, "名前解決の失敗", 3)]
+    report = run_error_report(DAILY, RUN, RUN_AT, "collect", "x", (0, 2), sources, INV, 7)
+    assert "| ほか 7 件 | — | — | — |" in report.body

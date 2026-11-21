@@ -1118,6 +1118,11 @@ def test_secret_found_only_in_the_body_is_not_saved_either(host, monkeypatch):
 # 日次の失敗の分岐（failures.py）：④ の調査・本文・本番の runs の終わり
 
 
+def retry_count(host) -> int | None:
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        return conn.execute("SELECT retry_count FROM runs").fetchone()[0]
+
+
 def investigation_json(host) -> str | None:
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         return conn.execute("SELECT investigation_json FROM runs").fetchone()[0]
@@ -1363,8 +1368,11 @@ def test_failure_body_over_the_limit_falls_back_to_the_template(host, monkeypatc
     assert [r["error_category"] for r in log if r.get("error_category") == "body_too_long"]
 
 
-def test_secret_in_failure_body_closes_run_as_stopped(host, monkeypatch):
-    """本文全体の検査で公開停止にしたら、runs も failed・post・secret_detected で閉じる。"""
+def test_secret_in_failure_body_keeps_the_original_result_in_runs(host, monkeypatch):
+    """本文全体の検査で公開停止にしても、runs は元の結果のまま閉じる。
+
+    公開停止の記録先は issues の blocked_secret（⑤）。それまではログの post の secret_detected。
+    """
     monkeypatch.setattr(
         failures,
         "_secret_kinds",
@@ -1375,6 +1383,32 @@ def test_secret_in_failure_body_closes_run_as_stopped(host, monkeypatch):
 
     assert (code, summary["result"]) == (1, "rejected")  # 要約は元の結果のまま
     [run] = host.runs()
-    assert run[3:] == ("failed", "post", "secret_detected", 1)
+    assert run[3:] == ("rejected", None, "all_excluded", 1)
+    assert retry_count(host) == 0
     log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
     assert ("post", "secret_detected") in stages_of(log)
+
+
+def test_production_rejected_records_retry_count_zero(host):
+    host.ai = lambda data: {"items": [entry("i99", 1)]}
+    host.run()
+    assert retry_count(host) == 0  # 不合格に再試行はない
+
+
+def test_production_agent_failure_records_retry_count_zero(host):
+    def broken(data):
+        raise invoke.AgentError("agent_failed")
+
+    host.ai = broken
+    host.run()
+    assert retry_count(host) == 0  # ② の再試行は別の Issue で行う
+
+
+def test_body_too_long_day_is_saved_as_rejected_with_zero_published(host, monkeypatch):
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2])) == ("rejected", ["body_too_long"])
+    assert json.loads(row[3])["published"] == 0
+    # Issue を作らないので、項目の状態が published でも「載せた」の導出には入らない（issues がない）
+    assert [e[1] for e in entries] == ["published", "published"]

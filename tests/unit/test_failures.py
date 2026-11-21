@@ -111,3 +111,20 @@ def test_retries_per_stage():
     # ② の再試行はまだ行わない（上限は structure.md 6.3）。③ は再試行しない
     assert failures.retries(CONFIG, "analyze", fetches) == (0, 1)
     assert failures.retries(CONFIG, "verify", fetches) == (0, 0)
+
+
+def test_shrink_sources_halves_the_table_until_the_body_fits(monkeypatch):
+    from tech_researcher.render.common import Report
+
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
+    built = []
+
+    def build(keep):
+        built.append(keep)
+        return Report("t", "x" * (keep * 10 + 20), ())
+
+    report = failures.shrink_sources(40, build)
+    assert report is not None and len(report.body) <= 100
+    assert built == [20, 10, 5]  # 5 行（70 字）で収まる
+    # 0 行でも収まらなければ None（調査結果を載せない定型にする）
+    assert failures.shrink_sources(3, lambda keep: Report("t", "x" * 500, ())) is None
