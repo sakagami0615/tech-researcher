@@ -240,9 +240,15 @@ def recent_runs(conn: sqlite3.Connection, since: datetime, run_id: str) -> list[
                 failed_stage=stage,
                 error_category=category,
                 retry_count=retries,
-                rejected_checks=tuple(json.loads(checks)) if checks else (),
+                rejected_checks=_check_names(checks),
                 fetches=counts,
                 failed_sources=tuple((s, c) for s, st, c in fetches if st == "failed"),
             )
         )
     return history
+
+
+def _check_names(checks: str | None) -> tuple[str, ...]:
+    """reports の rejected_checks（文字列の JSON 配列）。形が違う値は捨てる。"""
+    names = json.loads(checks) if checks else []
+    return tuple(n for n in names if isinstance(n, str)) if isinstance(names, list) else ()

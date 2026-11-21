@@ -313,7 +313,9 @@ def investigate(
             **sent,
         )
     except OSError as e:  # docker を起動できない
-        return InvestigateResult(None, "launch_failed", detail=type(e).__name__, **sent)
+        return InvestigateResult(
+            None, "launch_failed", detail=type(e).__name__, wall_ms=_elapsed(started), **sent
+        )
     except Exception as e:
         # AI を呼んだ後の想定外の失敗。④ は失敗しても定型にする（structure.md 6.3）
         return InvestigateResult(
@@ -331,24 +333,38 @@ def investigate(
         "wall_ms": _elapsed(started),
         **sent,
     }
-    output = result.output
+    try:
+        investigation, reason, kinds = _check_output(result.output, lines, scanner)
+    except Exception:
+        # 検査できない出力（深すぎる入れ子など）。載せずに定型にする（structure.md 6.3）
+        return InvestigateResult(None, "invalid_output", **done)
+    if investigation is None:
+        return InvestigateResult(None, reason, secret_kinds=kinds, **done)
+    return InvestigateResult(investigation, output=result.output, **done)
+
+
+def _check_output(
+    output: object, lines: Sequence[Line], scanner: SecretScanner
+) -> tuple[Investigation | None, str | None, tuple[str, ...]]:
+    """出力を検査し、（調査結果、載せない理由、秘匿情報の分類）を返す。秘匿情報を先に見る。"""
     # 無害化の前の全文と、1つずつの文字列を検査する（③ と同じ。stages/daily.py）。形の検査より
     # 先に行い、スキーマに合わない出力の中の秘匿値も見落とさない
     texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
     if kinds := _secret_kinds(scanner, texts):
-        return InvestigateResult(None, "secret_detected", secret_kinds=kinds, **done)
+        return None, "secret_detected", kinds
     try:
         investigation = parse_investigation(output, lines)
     except ValueError:
-        return InvestigateResult(None, "invalid_output", **done)
-    if reason := investigation_violation(investigation):
-        return InvestigateResult(None, reason, **done)
+        return None, "invalid_output", ()
     # 行はマスクしてから入れているので、通常は見つからない。抜粋も投稿前の検査の対象とする
-    # 決まり（report-templates.md 3.2・US-E7-05）の保険として残す
+    # 決まり（report-templates.md 3.2・US-E7-05）の保険として残す。分類をログに残せるよう、
+    # 文章の違反より先に見る
     evidence = [line for block in investigation.evidence for line in block]
     if kinds := _secret_kinds(scanner, evidence):
-        return InvestigateResult(None, "secret_detected", secret_kinds=kinds, **done)
-    return InvestigateResult(investigation, output=output, **done)
+        return None, "secret_detected", kinds
+    if reason := investigation_violation(investigation):
+        return None, reason, ()
+    return investigation, None, ()
 
 
 def _elapsed(started: float) -> int:

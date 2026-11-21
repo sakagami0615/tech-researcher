@@ -373,7 +373,7 @@ def test_failures_before_claude_runs_are_not_counted_as_calls(tmp_path, category
     assert got.reason == category and not got.called
 
 
-def test_unexpected_error_after_the_call_falls_back():
+def test_unexpected_error_during_the_call_falls_back():
     class Strange:
         def run(self, *args, **kwargs):
             raise RuntimeError("想定外")
@@ -433,3 +433,19 @@ def test_repository_has_the_investigate_skill():
     assert all(f"| `{t}` |" in text for t in TARGETS)
     assert all(f"| `{c}` |" in text for c in inv.CONFIDENCE_LABELS)
     assert f"1かたまり{MAX_EVIDENCE_LINES}行まで・{MAX_EVIDENCE_BLOCKS}かたまりまで" in text
+
+
+def test_output_that_cannot_be_checked_falls_back():
+    """呼び出しの後の検査で想定外の例外が出ても（深すぎる入れ子など）、定型にする（6.3）。"""
+    deep: list = []
+    for _ in range(5000):
+        deep = [deep]
+    got, _ = run({**OUTPUT, "investigation": deep})
+    assert got.investigation is None and got.reason == "invalid_output" and got.called
+
+
+def test_secret_in_evidence_is_reported_even_with_text_violations():
+    lines = [inv.Line("L001", "log", f"x {TOKEN}")]
+    output = {**OUTPUT, "cause": "https://example.com", "evidence_line_ids": ["L001"]}
+    got, _ = run(output, lines=lines)
+    assert got.reason == "secret_detected" and got.secret_kinds == ("github_token",)
