@@ -18,14 +18,32 @@ GitHub の情報源（リポジトリの候補集め、Star 数の測定、Relea
 import json
 import os
 import re
-import socket
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
-from tech_researcher.collect.http import FetchError, Response, fetch
+# 失敗の分類の語と classify は http.py にある。この名前（AUTH など）でも使えるよう再公開する
+from tech_researcher.collect.http import (  # noqa: F401
+    AUTH,
+    BUDGET,
+    DNS,
+    FORBIDDEN,
+    GRAPHQL,
+    HTTP_4XX,
+    HTTP_5XX,
+    INVALID_RESPONSE,
+    NETWORK,
+    NOT_FOUND,
+    RATE_LIMITED,
+    REDIRECT,
+    TIMEOUT,
+    FetchError,
+    Response,
+    classify,
+    fetch,
+)
 from tech_researcher.config import Limits
 
 API_ROOT = "https://api.github.com"
@@ -48,21 +66,6 @@ _END = object()
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
 # リダイレクトの先のクエリに使えない文字（印字できる ASCII 以外と #）
 _UNSAFE_QUERY = re.compile(r"[^\x21-\x7e]|#")
-
-# error_category に使う語
-AUTH = "auth"  # 401。トークンがない・無効
-RATE_LIMITED = "rate_limited"  # 429、または 403 でレート制限の印がある
-FORBIDDEN = "forbidden"  # レート制限以外の 403
-NOT_FOUND = "not_found"
-HTTP_4XX = "http_4xx"
-HTTP_5XX = "http_5xx"
-TIMEOUT = "timeout"
-DNS = "dns"
-NETWORK = "network"
-BUDGET = "budget"  # この実行の利用量の上限に達した
-REDIRECT = "redirect"  # API の外へのリダイレクト、またはリダイレクトが多すぎる
-INVALID_RESPONSE = "invalid_response"
-GRAPHQL = "graphql_error"  # GraphQL の応答の errors（問い合わせ全体の誤り）
 
 
 class GitHubError(Exception):
@@ -297,44 +300,3 @@ def _redirect_target(url: str, headers: Mapping[str, str], search: bool) -> str 
     if _UNSAFE_QUERY.search(query) or _is_search(path) != search:
         return None
     return target
-
-
-def classify(error: FetchError) -> str:
-    """http.fetch の失敗を error_category の語にする。"""
-    status = error.status
-    if status is None:
-        return _network_category(error)
-    headers = {k.lower(): v for k, v in error.headers.items()}
-    if status == 401:
-        return AUTH
-    if status == 429 or (
-        status == 403
-        and (
-            headers.get("x-ratelimit-remaining") == "0"
-            or "retry-after" in headers
-            or b"rate limit" in error.body.lower()
-        )
-    ):
-        # 一次のレート制限は残り0、二次のレート制限は Retry-After か本文の文言で示される
-        return RATE_LIMITED
-    if status == 403:
-        return FORBIDDEN
-    if status == 404:
-        return NOT_FOUND
-    if status >= 500:
-        return HTTP_5XX
-    return HTTP_4XX
-
-
-def _network_category(error: BaseException) -> str:
-    """原因の例外をたどり、タイムアウト・名前解決・それ以外の通信の失敗に分ける。"""
-    seen: BaseException | None = error
-    while seen is not None:
-        reason = getattr(seen, "reason", None)
-        for cause in (seen, reason):
-            if isinstance(cause, TimeoutError):
-                return TIMEOUT
-            if isinstance(cause, socket.gaierror):
-                return DNS
-        seen = seen.__cause__
-    return NETWORK

@@ -173,6 +173,12 @@ MIGRATIONS: tuple[str, ...] = (
         value TEXT NOT NULL
     ) STRICT;
     """,
+    # 一部だけ取れなかった情報源の、取れなかった部分（GitHub Releases の追跡先など。2.8）
+    """
+    ALTER TABLE source_fetches ADD COLUMN failed_parts_json TEXT
+        CHECK (failed_parts_json IS NULL
+            OR (json_valid(failed_parts_json) AND json_type(failed_parts_json) = 'array'));
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

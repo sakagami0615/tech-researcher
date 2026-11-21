@@ -102,7 +102,9 @@ def collect_releases(
     if failed and not fetched:
         categories = sorted({f.error_category for f in failed})
         error = f"すべての追跡先が取れない（{'・'.join(categories)}）"
-        return SourceResult(SOURCE_ID, (), attempts, error, tuple(failed))
+        # 理由が1つに決まるときだけ分類を付ける（なければ呼ぶ側が fetch_failed にする）
+        category = categories[0] if len(categories) == 1 else None
+        return SourceResult(SOURCE_ID, (), attempts, error, tuple(failed), category)
     return SourceResult(SOURCE_ID, tuple(records.values()), attempts, None, tuple(failed))
 
 

@@ -76,6 +76,23 @@ def upsert_items(conn: sqlite3.Connection, run_id: str, rows: Iterable[ItemRow])
         return [item_ref(_upsert(conn, run_id, row)) for row in rows]
 
 
+def lookup_item_refs(
+    conn: sqlite3.Connection, cadence: str, target: date, urls: Iterable[str]
+) -> dict[str, str]:
+    """すでにある項目の URL → ID（i…）。ドライランが、本番の実行が書いた項目の ID を使うため。
+
+    読むだけなので、読み取り専用の接続でも使える。
+    """
+    marks = {
+        url: item_ref(item_id)
+        for url, item_id in conn.execute(
+            "SELECT canonical_url, item_id FROM items WHERE cadence = ? AND target = ?",
+            (cadence, target.isoformat()),
+        )
+    }
+    return {url: marks[url] for url in urls if url in marks}
+
+
 _KEY = ("cadence", "target", "canonical_url")
 # 再試行・再実行で置き換える列。first_run_id は最初の値を残す
 _VALUES = (

@@ -29,6 +29,33 @@ _MARKDOWN = re.compile(r"([\\`*_{}\[\]()<>#+\-.!|~&:])")
 SEPARATOR = " ／ "
 
 
+# 取得の失敗の理由の分類（source_fetches の error_category）の日本語の表記。一覧にない分類
+# （例外の型の名前など）は、名前を本文に出さず「取得に失敗」にする
+FETCH_REASONS = {
+    "timeout": "タイムアウト",
+    "auth": "認証エラー",
+    "rate_limited": "レート制限",
+    "forbidden": "アクセス拒否（HTTP 403）",
+    "not_found": "見つからない（HTTP 404）",
+    "http_4xx": "HTTP 4xx",
+    "http_5xx": "HTTP 5xx",
+    "dns": "名前解決の失敗",
+    "network": "接続の失敗",
+    "budget": "利用量の上限",
+    "redirect": "リダイレクトの異常",
+    "invalid_response": "応答の形の異常",
+    "graphql_error": "GraphQL のエラー",
+    "exit_code": "実行の失敗（終了コード）",
+    "truncated": "取りこぼしたおそれ",
+}
+FETCH_FAILED_TEXT = "取得に失敗"
+
+
+def fetch_reason(category: str | None) -> str:
+    """取得の失敗の理由の分類を、本文に書く日本語にする。"""
+    return FETCH_REASONS.get(category or "", FETCH_FAILED_TEXT)
+
+
 @dataclass(frozen=True)
 class Report:
     """投稿する Issue の中身。labels は D-08（4.2）。"""

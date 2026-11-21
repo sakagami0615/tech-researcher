@@ -203,6 +203,8 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "validation.json",
         "secret-scan.json",
         "unjudged.json",
+        "unavailable.json",
+        "item-ids.json",
         "issue.md",
         "log.jsonl",
     }
@@ -680,7 +682,7 @@ def test_observation_with_all_sources_failed_is_recorded_as_failed(host):
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         assert conn.execute(
             "SELECT source_id, status, error_category, attempts FROM source_fetches"
-        ).fetchall() == [("rss:example", "failed", "fetch_failed", 3)]
+        ).fetchall() == [("rss:example", "failed", "http_5xx", 3)]
 
 
 def test_observation_failure_in_collect_closes_run_as_failed(host, monkeypatch):
@@ -867,3 +869,172 @@ def test_too_large_input_file_is_not_read(host, monkeypatch):
     code, summary, _ = host.run("--dry-run")
     assert (code, summary["error_category"]) == (1, "input_too_large")
     assert host.calls("agent") == []
+
+
+def saved_report(host):
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        report = conn.execute(
+            "SELECT run_id, status, rejected_checks, counts_json, verification_json,"
+            " ai_output_json, body_markdown FROM reports"
+        ).fetchall()
+        entries = conn.execute(
+            "SELECT entry_no, status, exclusion_reasons, display_no, item_ids_json, payload_json"
+            " FROM report_entries ORDER BY entry_no"
+        ).fetchall()
+        items = conn.execute("SELECT item_id FROM items ORDER BY item_id").fetchall()
+    return report, entries, items
+
+
+def test_production_saves_the_report_with_item_ids_from_items(host):
+    """② ③ の項目の ID は items の主キー（i…）。結果は reports・report_entries に残る。"""
+    host.ai = lambda data: {"items": [entry(data["items"][0]["id"], 1), entry("i99999", 2)]}
+    code, summary, _ = host.run()
+
+    assert code == 1  # ⑤ がまだない
+    [data] = host.calls("agent")
+    assert [i["id"] for i in data["items"]] == ["i1", "i2"]
+    [row], entries, items = saved_report(host)
+    run_id, status, rejected, counts, verification, ai_output, body = row
+    assert (run_id, status, json.loads(rejected)) == (summary["run_id"], "passed", [])
+    assert json.loads(counts) == {
+        "collected": 2,
+        "ai_output": 2,
+        "excluded": 1,
+        "excluded_by_reason": {"invalid_id": 1},
+        "published": 1,
+    }
+    assert json.loads(verification)["invalid_id"] == "failed"
+    assert json.loads(verification)["secret_detected"] == "passed"
+    assert "見出し1" in ai_output and "> **掲載**：1 件" in body
+    assert [(e[0], e[1], json.loads(e[2]), e[3], json.loads(e[4])) for e in entries] == [
+        (1, "published", [], 1, ["i1"]),
+        (2, "excluded", ["invalid_id"], None, ["i99999"]),
+    ]
+    assert len(items) == 2
+
+
+def test_dry_run_item_ids_are_tentative_without_a_db_and_nothing_is_saved(host):
+    host.run("--dry-run")
+    [data] = host.calls("agent")
+    assert [i["id"] for i in data["items"]] == ["d1", "d2"]
+    assert not (host.data / "db").exists()
+
+
+def test_verify_rerun_in_the_same_run_replaces_the_saved_report(host, monkeypatch):
+    """同じ実行の ③ のやり直しは、レポートと項目を置き換える（重複しない）。"""
+    original = cli.main
+
+    def twice(args, environ):
+        code = original(args, environ)
+        if args[0] == "verify":  # 同じ入力で ③ をもう一度動かす
+            code = original(args, environ)
+        return code
+
+    monkeypatch.setattr(cli, "main", twice)
+    code, _, _ = host.run()
+    assert code == 1
+    [row], entries, items = saved_report(host)
+    assert row[1] == "passed" and [e[0] for e in entries] == [1, 2]
+    assert [i[0] for i in items] == [1, 2]
+
+
+def test_rejected_output_is_saved_with_the_failed_check(host):
+    host.ai = lambda data: {"items": "bad"}
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2]), json.loads(row[4])) == (
+        "rejected",
+        ["invalid_output"],
+        {"secret_detected": "passed", "invalid_output": "failed"},
+    )
+    assert row[6] is None and entries == []
+
+
+def test_work_files_are_removed_after_a_production_run(host):
+    host.run()
+    assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]
+
+
+def test_all_excluded_is_saved_as_rejected_with_reasons(host):
+    host.ai = lambda data: {"items": [entry("i98", 1), entry("i99", 2)]}
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2])) == ("rejected", ["all_excluded"])
+    assert json.loads(row[4])["secret_detected"] == "passed"
+    assert row[6] is None and row[5] is not None  # 本文はなく、AI の出力は調査用に残る
+    assert [(e[1], json.loads(e[2]), e[3]) for e in entries] == [
+        ("excluded", ["invalid_id"], None),
+        ("excluded", ["invalid_id"], None),
+    ]
+    payload = json.loads(entries[0][5])
+    assert payload["headline"] == "見出し1" and "exclusion_detail" in payload
+
+
+def test_display_no_follows_the_report_order(host):
+    """本文の通し番号は、カテゴリの固定順・rank 順（AI の出力の順ではない）。"""
+    host.ai = lambda data: {
+        "items": [
+            entry("i1", 1, category="oss"),
+            entry("i2", 1, category="ai"),
+        ]
+    }
+    host.run()
+    _, entries, _ = saved_report(host)
+    assert [(e[0], e[3]) for e in entries] == [(1, 2), (2, 1)]
+
+
+def test_secret_in_ai_output_saves_neither_output_nor_body(host):
+    host.ai = lambda data: {
+        "items": [entry("i1", 1, points=["値は " + TOKEN + " です"]), entry("i2", 2)]
+    }
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2]), row[5], row[6]) == (
+        "rejected",
+        ["secret_detected"],
+        None,
+        None,
+    )
+    assert entries == [] and TOKEN not in str(row)
+    assert json.loads(row[3])["ai_output"] == 2  # 保存しなくても、出力の項目の数は残す
+
+
+def test_excluded_entries_keep_their_own_position_even_when_equal(host):
+    """同じ内容の項目が並んでも、除外の理由は AI の出力の順の番号で結び付ける。"""
+    host.ai = lambda data: {"items": [entry("i1", 1), entry("i1", 1)]}
+    host.run()
+    _, entries, _ = saved_report(host)
+    assert [(e[0], e[1], json.loads(e[2]), e[3]) for e in entries] == [
+        (1, "published", [], 1),
+        (2, "excluded", ["duplicate_id"], None),
+    ]
+
+
+def test_secret_found_only_in_the_body_is_not_saved_either(host, monkeypatch):
+    """本文を組み立てた後の検出：項目と本文は残さず、件数に AI の出力と除外を数える。"""
+    from tech_researcher.validate.secret_scan import SecretScanner
+
+    original = SecretScanner.find
+    calls = []
+
+    def find(self, text):
+        calls.append(text)
+        # 原文の検査（最初の呼び出し群）は通し、本文の検査だけ検出させる
+        return (
+            original(self, text)
+            if "tech-researcher kind=report" not in text
+            else [type("F", (), {"kind": "known"})()]
+        )
+
+    monkeypatch.setattr(SecretScanner, "find", find)
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2]), row[5], row[6]) == (
+        "rejected",
+        ["secret_detected"],
+        None,
+        None,
+    )
+    counts = json.loads(row[3])
+    assert (counts["ai_output"], counts["published"]) == (2, 0)
+    assert entries == []

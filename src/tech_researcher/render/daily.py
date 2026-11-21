@@ -41,6 +41,14 @@ FOOTER = (
 )
 
 
+def display_key(entry: DailyEntry) -> tuple[int, int]:
+    """本文の並び（カテゴリの固定順、同じカテゴリでは rank 順）。通し番号はこの順の位置（1.2）。
+
+    ③ が display_no を保存するときも、この関数で並べる（本文と同じ番号にするため）。
+    """
+    return CATEGORIES.index(entry.category), entry.rank
+
+
 def render_daily(
     target: Target,
     run_id: str,
@@ -59,7 +67,7 @@ def render_daily(
     - unjudged は前日の記録がなく判定しなかった急上昇の (判定の名前, 記録がなかった情報源の表示名)
       （1.6）。情報源が1つだけの判定は、表示名を空にしてよい
     """
-    ordered = sorted(entries, key=lambda e: (CATEGORIES.index(e.category), e.rank))
+    ordered = sorted(entries, key=display_key)
     sections = [_header(target, run_id, len(ordered), unjudged)]
     if ordered:
         sections += [_toc(ordered), *_categories(ordered, target, items, names)]

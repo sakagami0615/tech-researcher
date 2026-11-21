@@ -37,6 +37,13 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 
+from tech_researcher.collect.http import (
+    AUTH,
+    EXIT_CODE,
+    INVALID_RESPONSE,
+    NETWORK,
+    TIMEOUT,
+)
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.config import Config, Limits, Subquery
 from tech_researcher.periods import Period, last30days_window
@@ -52,6 +59,26 @@ SOURCE_NAMES = {"hackernews": "hackernews", "github_search": "github"}
 # 注目度の metric の接頭辞（data-model.md 2.4）
 METRIC_PREFIXES = {"hackernews": "hn", "github": "github"}
 OK_STATES = frozenset({"ok", "no-results"})
+# 情報源の状態の取り決め：固定の SHA の third_party/last30days の
+# skills/last30days/scripts/lib/schema.py の RunOutcomeState（11種類）。OK_STATES 以外は失敗として
+# 扱い、理由の分類（source_fetches の error_category）を付けられるものだけ付ける。
+# rate-limited は付けない：GitHub は名前解決の失敗・接続拒否・タイムアウトでも rate-limited と
+# 表示し（decisions.md）、レート制限と書くと誤ることがあるため。payment-required・error・
+# skipped-unconfigured は理由が分からない。partial（項目を返したうえで一部が失敗した）も失敗として
+# 扱う（返ってきた項目は使わない。使う扱いは別の Issue）
+STATE_CATEGORIES: dict[str, str | None] = {
+    "partial": None,
+    "rate-limited": None,
+    "auth-failed": AUTH,
+    "payment-required": None,
+    "unreachable": NETWORK,
+    "timeout": TIMEOUT,
+    "schema-drift": INVALID_RESPONSE,
+    "skipped-unconfigured": None,
+    "error": None,
+}
+# 取り決めにある状態のすべて。ここにない値は、出力の契約に合わないものとして invalid_response
+KNOWN_STATES = OK_STATES | STATE_CATEGORIES.keys()
 EXIT_PARTIAL = 3  # LAST30DAYS_STRICT_EXIT=1 で、一部の情報源が失敗した
 EXIT_USAGE = 2  # 引数・設定の誤り。再試行しても直らない
 STDERR_TAIL_CHARS = 2000  # 失敗の原因の分類に使う stderr の末尾（D-01）
@@ -65,9 +92,10 @@ class ContractError(ValueError):
 
 
 class _CliError(Exception):
-    def __init__(self, message: str, attempts: int):
+    def __init__(self, message: str, attempts: int, category: str | None = None):
         super().__init__(message)
         self.attempts = attempts
+        self.category = category
 
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -128,17 +156,32 @@ def _collect(
             )
             data = parse_agent_json(stdout)
         except _CliError as e:
-            return {sid: SourceResult(sid, (), e.attempts, str(e)) for sid in source_ids}
+            return {
+                sid: SourceResult(sid, (), e.attempts, str(e), error_category=e.category)
+                for sid in source_ids
+            }
         except ContractError as e:
             error = f"契約に合わない出力：{e}"
-            return {sid: SourceResult(sid, (), attempts, error) for sid in source_ids}
+            return {
+                sid: SourceResult(sid, (), attempts, error, error_category=INVALID_RESPONSE)
+                for sid in source_ids
+            }
     fetched_at = now()
     results = {}
     for sid, name in zip(source_ids, names, strict=True):
         state = data["source_status"].get(name)
         if state not in OK_STATES:
             reason = f"状態が {state}" if state is not None else "状態が出力にない"
-            results[sid] = SourceResult(sid, (), attempts, f"{name} の{reason}：{_tail(stderr)}")
+            # 取り決めにない状態（ない・知らない値）は出力の契約違反。取り決めにある失敗の状態には
+            # 理由が付かない（分類なし）
+            known = isinstance(state, str) and state in KNOWN_STATES
+            results[sid] = SourceResult(
+                sid,
+                (),
+                attempts,
+                f"{name} の{reason}：{_tail(stderr)}",
+                error_category=STATE_CATEGORIES[state] if known else INVALID_RESPONSE,
+            )
             continue
         records = tuple(_record(sid, r, fetched_at) for r in data["results"] if r["source"] == name)
         if not records:
@@ -221,16 +264,17 @@ def _run(
             )
         except subprocess.TimeoutExpired:
             # 外側から止めると stdout は空になるので、部分結果は使えない（D-01）
-            error = f"{limits.last30days_timeout_s} 秒の上限を超えた"
+            error, category = f"{limits.last30days_timeout_s} 秒の上限を超えた", TIMEOUT
         else:
             if done.returncode in (0, EXIT_PARTIAL):
                 return done.stdout, done.stderr, attempt
             error = f"終了コード {done.returncode}：{_tail(done.stderr)}"
+            category = EXIT_CODE
             if done.returncode == EXIT_USAGE:
-                raise _CliError(error, attempt)
+                raise _CliError(error, attempt, category)
         if attempt < attempts:
             log.warning("last30days-skill を再試行する（%d 回目の失敗）：%s", attempt, error)
-    raise _CliError(error, attempts)
+    raise _CliError(error, attempts, category)
 
 
 def parse_agent_json(stdout: str) -> dict:

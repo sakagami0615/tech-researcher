@@ -134,6 +134,8 @@ class SourceFetch:
     in_period_count: int
     fetched_at: datetime
     error_category: str | None = None
+    # 取れなかった部分の（名前、理由の分類）。内訳のある情報源（GitHub Releases の追跡先）だけ
+    failed_parts: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         if self.status not in FETCH_STATUSES:
@@ -155,11 +157,12 @@ def record_source_fetch(conn: sqlite3.Connection, run_id: str, fetch: SourceFetc
     check_writable_run_id(run_id)
     conn.execute(
         "INSERT INTO source_fetches (run_id, source_id, status, error_category, attempts,"
-        " record_count, in_period_count, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        " record_count, in_period_count, fetched_at, failed_parts_json)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT (run_id, source_id) DO UPDATE SET status = excluded.status,"
         " error_category = excluded.error_category, attempts = excluded.attempts,"
         " record_count = excluded.record_count, in_period_count = excluded.in_period_count,"
-        " fetched_at = excluded.fetched_at",
+        " fetched_at = excluded.fetched_at, failed_parts_json = excluded.failed_parts_json",
         (
             run_id,
             fetch.source_id,
@@ -169,6 +172,9 @@ def record_source_fetch(conn: sqlite3.Connection, run_id: str, fetch: SourceFetc
             fetch.record_count,
             fetch.in_period_count,
             utc_text(fetch.fetched_at),
+            json.dumps([list(p) for p in fetch.failed_parts], ensure_ascii=False)
+            if fetch.failed_parts
+            else None,
         ),
     )
 
