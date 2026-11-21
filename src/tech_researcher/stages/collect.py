@@ -16,6 +16,9 @@ fetches.json にも書く（実行エラー Issue の表と、部分的な失敗
 Star 数の測定の後に、急上昇・新規のリポジトリを判定し（github_spikes）、載せる分の README を取る。
 まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
 に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
+時間の上限（structure.md 6.4）：① 全体の上限（段階の上限から collect_wrapup_s を引いた時刻）を
+過ぎたら、残りの情報源は取得せずに timeout の失敗にして、終わった情報源の分で続ける。情報源ごとの
+上限は last30days-skill・Qiita・GitHub Releases に、全体の上限は README の取得に渡す（Deadlines）。
 外部由来の文（タイトル・本文）はファイルにだけ書き、戻り値（標準出力に出す要約）には件数と
 情報源の ID だけを入れる（structure.md 3.2）。
 前日の記録がなく判定しなかった急上昇は unjudged.json に書き、③ がヘッダの定型文にする。
@@ -114,7 +117,8 @@ class Collectors:
     github: Callable[[str | None, Limits], GitHubClient] = GitHubClient
     token: Callable[[], str | None] = collect_token
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
-    # 時間の上限の判定に使う時計（テストで偽物に差し替える）
+    # 時間の上限の判定に使う時計（テストで偽物に差し替える）。既定の収集器は自分で time.monotonic
+    # を使うので、収集器を差し替えずに clock だけを変えると食い違う
     clock: Callable[[], float] = time.monotonic
 
 
@@ -155,6 +159,9 @@ class Deadlines:
 
     def expired(self) -> bool:
         return self.clock() >= self.overall
+
+    def left(self) -> float:
+        return self.overall - self.clock()
 
     def source(self) -> float:
         return min(self.clock() + self.per_source_s, self.overall)
@@ -510,9 +517,12 @@ def _collect_github(
         return None
     records: tuple[Record, ...] = ()
     star_unjudged = False
+    until = deadlines.source()  # 情報源ごとの上限（README の取得に渡す）
     if target.cadence != "daily":
         github = GitHubFetch(0, 0, skipped=True)
-    elif deadlines.expired():  # ① 全体の上限を過ぎた。GitHub の候補集めは取得せず失敗にする
+    elif deadlines.left() < _github_min_seconds(config):
+        # 残りの時間が Search の最短の所要時間より短い（途中で止められず ① 全体が落ちるため）。
+        # 取得せず失敗にする
         log.write(
             "collect",
             "failure",
@@ -565,7 +575,7 @@ def _collect_github(
                 assert db is not None
                 record_source_fetch(db, log.run_id, fetch(0).to_fetch(collectors.now()))
             records, readme_calls = _with_readmes(
-                spikes.records, client, featured, log, deadlines, collectors.clock
+                spikes.records, client, featured, log, until, collectors.clock
             )
             github = fetch(readme_calls)
         except Exception as e:
@@ -589,6 +599,17 @@ def _collect_github(
     return GitHubOutcome(github, at, records, star_unjudged)
 
 
+def _github_min_seconds(config: Config) -> float:
+    """GitHub の候補集めを始めるのに要る残りの時間（秒）。Search を使い切るまでにかかる時間
+    （1分あたりの回数で間隔をあける。途中では止めない）。Search を使わなければ 0 で、上限を
+    過ぎていなければ始める。"""
+    settings = config.github_repos
+    if settings is None or not (settings.search_topics or settings.search_without_topic):
+        return 0.0
+    limits = config.limits
+    return limits.github_search_calls / limits.github_search_per_minute * MINUTE
+
+
 def _by_repo(snapshots):
     return {s.repo: s for s in snapshots}
 
@@ -598,7 +619,7 @@ def _with_readmes(
     client: GitHubClient,
     featured: set[str],
     log: RunLog,
-    deadlines: Deadlines,
+    deadline: float,
     clock: Callable[[], float],
 ) -> tuple[tuple[Record, ...], int]:
     """載せるリポジトリ（すでに載せたものを除く）の README を、一次情報の本文にする。
@@ -606,7 +627,8 @@ def _with_readmes(
     README の失敗は項目の補足が欠けるだけなので、止めずに続ける（失敗の分類は fetch_readmes が
     ログに残す）。（README を足したレコード、使った要求の回数）を返す。
     想定外の例外のときも、それまでに使った要求の回数を返す。
-    ① 全体の上限（deadlines.overall）を過ぎたら、残りの README は取らない（README なしで載る）。
+    deadline（github_repos の情報源ごとの上限。① 全体の上限で切る）を過ぎたら、残りの README は
+    取らない（README なしで載る）。
     """
     wanted = [
         r for r in records if r.github is not None and repo_url(r.github.full_name) not in featured
@@ -618,7 +640,7 @@ def _with_readmes(
         found = fetch_readmes(
             [r.github.full_name for r in wanted if r.github],
             client,
-            deadline=deadlines.overall,
+            deadline=deadline,
             clock=clock,
         )
     except Exception as e:  # README は補足。想定外でも急上昇の判定は残す

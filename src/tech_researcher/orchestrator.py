@@ -94,6 +94,7 @@ UID_ENV = {"TR_UID": lambda: os.getuid(), "TR_GID": lambda: os.getgid()}
 DOCKER_CONFIG_DIR = Path("tech-researcher") / "docker"
 
 MINUTE = 60.0  # 設定の上限（分）を秒にする。テストで縮める
+RETRY_MIN_MINUTES = 1  # ② の再試行を始めるのに要る、合計の上限の残りの時間（分）
 _now = time.monotonic  # ② の再試行の残り時間の計算に使う時計。テストで偽物に差し替える
 STOP_GRACE_S = 10.0  # 止めるとき、SIGTERM から SIGKILL までの猶予
 DOCKER_TIMEOUT_S = 60.0  # コンテナを探す・消す docker の呼び出しの上限
@@ -672,10 +673,12 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
                     e.category in invoke.TRANSIENT
                     and not e.remove_failed
                     and retries < job.config.limits.analyze_retries
-                    and _now() - began < total
+                    and total - (_now() - began) >= RETRY_MIN_MINUTES * MINUTE
                 ):
                     retries += 1
-                    job.log.write("analyze", "retry", error_category=e.category, count=retries)
+                    job.log.write(
+                        "analyze", "retry", error_category=e.category, attempt=retries + 1
+                    )
                     continue
                 # 結果の JSON にモデルが出ていれば、runs に記録する
                 return e.category, e.models, retries

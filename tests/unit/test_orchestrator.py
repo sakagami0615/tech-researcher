@@ -1396,7 +1396,11 @@ def test_transient_failure_is_retried_once_and_run_completes(host, capfd, monkey
     assert summary["result"] == "dry_run"
     assert len(agent.timeouts) == 2
     [retry] = _retry_events(host, summary["run_id"])
-    assert (retry["stage"], retry["error_category"], retry["count"]) == ("analyze", "overloaded", 1)
+    assert (retry["stage"], retry["error_category"], retry["attempt"]) == (
+        "analyze",
+        "overloaded",
+        2,
+    )
     usage = [r for r in host.log(summary["run_id"]) if r["event"] == "usage"]
     assert len(usage) == 2  # 呼び出しごとに残す
 
@@ -1484,3 +1488,49 @@ def test_auth_failure_skips_the_investigation_agent(agent, capfd):
     compose = [c for c in agent.calls() if c["argv"][0] == "compose"]
     assert [_service(c) for c in compose] == ["worker", "agent"]
     assert not _retry_events(agent, summary["run_id"])
+
+
+def test_retry_is_not_started_with_less_than_the_minimum_time_left(
+    host, capfd, monkeypatch, tmp_path
+):
+    clock = [0.0]
+    monkeypatch.setattr(orchestrator, "_now", lambda: clock[0])
+    # 1 回目の後の残りが 0.04 秒（最低 1 分 = 0.05 秒に足りない）。分類は本当の原因のまま
+    agent = Agent(tmp_path / "timeouts", _fail("overloaded"), OK, clock=clock, spend=0.96)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    assert summary_of(capfd)["error_category"] == "overloaded"
+    assert len(agent.timeouts) == 1
+
+
+def test_no_retry_when_the_container_could_not_be_removed(host, capfd, monkeypatch, tmp_path):
+    failed = invoke.AgentError("overloaded", "d", remove_failed=True)
+    agent = Agent(tmp_path / "timeouts", failed, OK)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    assert len(agent.timeouts) == 1
+
+
+def test_launch_failure_on_the_retry_keeps_the_retry_count(host, capfd, monkeypatch, tmp_path):
+    agent = Agent(tmp_path / "timeouts", _fail("network"), OSError("docker"))
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["error_category"] == "launch_failed"
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "| 再試行回数 | 1 回（上限 1 回） |" in issue
+
+
+def test_production_run_closes_runs_with_the_retry_count(host, capfd, monkeypatch, tmp_path):
+    agent = Agent(tmp_path / "timeouts", _fail("overloaded"), _fail("overloaded"))
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily"], host.environ) == 1
+    finish = [c["argv"] for c in host.calls() if "finish" in c["argv"]]
+    assert len(finish) == 1
+    argv = finish[0]
+    assert argv[argv.index("--retry-count") + 1] == "1"
+    assert argv[argv.index("--error-category") + 1] == "overloaded"

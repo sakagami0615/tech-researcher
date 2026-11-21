@@ -1,4 +1,4 @@
-"""① の時間の上限と、GitHub の要求の上限の共有（#37。structure.md 6.4・6.5）。
+"""① の時間の上限と、GitHub の要求の上限の共有（#42。structure.md 6.4・6.5）。
 
 時計は偽物（情報源の取得で進める）にして、実時間を待たずに確かめる。
 """
@@ -162,7 +162,8 @@ def test_readmes_stop_at_the_overall_limit(tmp_path, monkeypatch):
     collected = replace(all_collectors([]), clock=clock)
     config = limited(all_sources_config(), collect=10, per_source=4, wrapup=60)
     run_collect(config, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
-    assert given == {"deadline": 1000.0 + 10 * 60 - 60, "clock": clock}
+    # github_repos の情報源ごとの上限（4 分）。① 全体の上限（9 分）より前
+    assert given == {"deadline": 1000.0 + 4 * 60, "clock": clock}
 
 
 def test_readmes_after_the_limit_are_skipped_but_items_stay(tmp_path):
@@ -217,3 +218,21 @@ def test_rest_budget_is_shared_between_github_sources(tmp_path):
     assert entry["status"] != "failed"
     assert entry["parts"] == [{"name": "c/three", "category": "budget"}]
     assert "github_releases" not in summary["failed_sources"]
+
+
+def test_github_is_not_started_without_time_for_its_searches(tmp_path):
+    """Search を使い切る時間（4 分）がなければ、始めずに timeout の失敗にする。"""
+    clock = Clock()
+    calls = []
+    base = all_collectors(calls)
+
+    def slow_feed(f, limits):
+        clock.now += 7 * 60  # 全体の上限（10 分）まで残り 3 分
+        return base.feed(f, limits)
+
+    collected = replace(base, feed=slow_feed, clock=clock)
+    config = limited(all_sources_config(), collect=10, per_source=10)
+    summary = run_collect(config, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
+    assert "github_repos" in summary["failed_sources"]
+    assert "github_search" not in calls and "github_graphql" not in calls
+    assert fetched_status(tmp_path)["github_repos"] == ("failed", "timeout")

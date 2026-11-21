@@ -418,3 +418,15 @@ def test_claude_exit_78_with_result_is_parsed_normally(schema):
     with pytest.raises(invoke.AgentError) as e:
         call(runner, schema)
     assert e.value.category == "agent_failed"
+
+
+def test_status_is_not_read_unless_is_error():
+    data = {**json.loads(NOT_LOGGED_IN), "is_error": False, "api_error_status": 529}
+    assert invoke.classify_failure(data) == "agent_failed"
+
+
+@pytest.mark.parametrize("reason", ["max_turns", "completed", None])
+def test_result_text_is_read_only_for_api_errors(reason):
+    # スキーマに合わない出力・ターン数の超過などの文は、手がかりに合っても読まない
+    data = {**json.loads(NOT_LOGGED_IN), "terminal_reason": reason, "result": "limit reached"}
+    assert invoke.classify_failure(data) == "agent_failed"

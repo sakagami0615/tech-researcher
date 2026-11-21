@@ -424,7 +424,7 @@ last30days-skill は `--days N --as-of YYYY-MM-DD` で期間を受け取り、�
 
 - 段階（① 〜 ⑤）やジョブ全体の再試行はしない。失敗の後は次の定時の実行から再開する（US-E6-05）
 - 実行エラー Issue の「再試行回数」には、失敗した処理での回数を書く。② は行った再試行の回数（上限は設定の `analyze_retries`）、① は失敗した情報源の再試行の回数
-- ② の失敗の分類：Claude Code の結果の JSON が `is_error` で `structured_output` がないときだけ、HTTP の状態（`api_error_status`。あれば）か `result` の文の手がかりで分ける。過負荷（`overloaded`。529）・サーバーエラー（`server_error`。5xx）・通信の失敗（`network`）は一時的として再試行する。利用上限（`usage_limit`。429）・認証（`auth`。401・403、トークンなしの「Not logged in」）は再試行せず、④ も動かせないので ④ を飛ばす。分からない失敗は `agent_failed` で、再試行しない。`result` の文はログに残さない。実際の文は PoC（3.8 の8）で確かめて足す
+- ② の失敗の分類：Claude Code の結果の JSON が `is_error` で `structured_output` がないときだけ、HTTP の状態（`api_error_status`。あれば）か `result` の文の手がかりで分ける。過負荷（`overloaded`。529）・サーバーエラー（`server_error`。5xx）・通信の失敗（`network`）は一時的として再試行する。利用上限（`usage_limit`。429）・認証（`auth`。401・403、トークンなしの「Not logged in」）は再試行せず、④ も動かせないので ④ を飛ばす。文を読むのは `terminal_reason` が `api_error` のときだけ（スキーマに合わない出力・ターン数の超過の文は読まない）。分からない失敗は `agent_failed` で、再試行しない。`result` の文はログに残さない。実際の文は PoC（3.8 の8）で確かめて足す
 - ② の再試行は、再試行を含めた合計の上限（日次 20 分・週次 40 分）の残りの時間の中で行い、残りがなければ行わない。上限の時間の超過（`timeout`）は再試行しない
 
 ### 6.4 実行時間
@@ -442,7 +442,7 @@ last30days-skill は `--days N --as-of YYYY-MM-DD` で期間を受け取り、�
 | 段階の合計 | 55 分 | 83 分 | — |
 | ジョブ全体 | 60 分（6:00 に始めて 7:00 まで。月曜の週次 7:00 と重ならない） | 90 分 | `bin/tr-run` が統括スクリプトを止める。止めたことはログに残す |
 
-- ① の上限は worker が自分で守る。設定の `collect_wrapup_s`（初期値 60 秒）だけ早く情報源の取得をやめ、まとめて書く時間を残す。上限の後の情報源は取得せずに `timeout` の失敗とし、終わった情報源の分で続ける。情報源ごとの上限は、last30days-skill の CLI の上限時間・Qiita のページの間・GitHub Releases のリポジトリとページの間・README の取得で確かめる（RSS・Atom は1回の要求が HTTP の上限で終わる）。GitHub の候補集め・Star 数の測定は途中で止めず、始める前に確かめる
+- ① の上限は worker が自分で守る。設定の `collect_wrapup_s`（初期値 60 秒）だけ早く情報源の取得をやめ、まとめて書く時間を残す。上限の後の情報源は取得せずに `timeout` の失敗とし、終わった情報源の分で続ける。情報源ごとの上限は、last30days-skill の CLI の上限時間・Qiita のページの間・GitHub Releases のリポジトリとページの間・README の取得で確かめる（RSS・Atom は1回の要求が HTTP の上限で終わる）。GitHub の候補集め・Star 数の測定は途中で止めないので、残りの時間が Search を使い切る時間（`github_search_calls` ÷ `github_search_per_minute` 分）より短ければ始めずに `timeout` の失敗にする。README の取得は github_repos の情報源ごとの上限で止める。② の再試行は、残りが1分より短ければ行わない
 - `bin/tr-run` に止められた統括スクリプトは実行エラー Issue を作れない。ジョブ全体の上限は、統括スクリプトの不具合で止まらないときの最後の歯止めとし、段階の合計との差（日次 5 分・週次 7 分）をコンテナの起動などの余裕とする
 
 ### 6.5 API 利用量（1回の実行あたり）
