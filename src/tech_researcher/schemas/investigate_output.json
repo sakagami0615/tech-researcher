@@ -1,0 +1,35 @@
+{
+  "title": "④ 失敗時の調査の出力（data-model.md 4.4）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event",
+    "cause",
+    "confidence",
+    "investigation",
+    "countermeasures",
+    "evidence_line_ids"
+  ],
+  "properties": {
+    "event": {"type": "string"},
+    "cause": {"type": "string"},
+    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "investigation": {"type": "array", "items": {"type": "string"}},
+    "countermeasures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "text"],
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": ["prompt", "collect_config", "code", "environment"]
+          },
+          "text": {"type": "string"}
+        }
+      }
+    },
+    "evidence_line_ids": {"type": "array", "items": {"type": "string"}}
+  }
+}

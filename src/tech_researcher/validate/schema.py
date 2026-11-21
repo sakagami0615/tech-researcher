@@ -20,6 +20,7 @@ from importlib import resources
 from jsonschema import Draft202012Validator
 
 DAILY_OUTPUT_SCHEMA = "daily_output.json"
+INVESTIGATE_OUTPUT_SCHEMA = "investigate_output.json"  # ④ の出力（data-model.md 4.4）
 
 
 @cache

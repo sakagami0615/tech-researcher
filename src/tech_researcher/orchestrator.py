@@ -564,11 +564,6 @@ def _run_stages(job: Job) -> Summary:
     return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
 
 
-# claude を動かさずに終わった失敗（上限の超過、スキーマの誤り、イメージにスキルがない）。
-# usage の行を残さない
-_NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
-
-
 def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類と、使われたモデルを返す。
 
@@ -612,7 +607,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
                 max_input_bytes=limit,
             )
         except invoke.AgentError as e:
-            if e.category not in _NOT_CALLED:
+            if e.category not in invoke.NOT_CALLED:  # claude を動かさずに終わった失敗
                 _log_usage(job, data, body, started, e.models, e.usage)
             # 先に切るとトークンの頭が欠けて検出できなくなるので、マスクしてから末尾を残す
             detail = job.scanner.mask(e.detail)[-STDERR_TAIL_CHARS:]

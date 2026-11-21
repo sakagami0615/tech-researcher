@@ -3,7 +3,14 @@ import json
 import pytest
 
 from tech_researcher.agent.daily import CATEGORIES, DEPTHS
-from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA, check_schema, schema_text
+from tech_researcher.agent.investigate import CONFIDENCE_LABELS
+from tech_researcher.render.failure import TARGETS
+from tech_researcher.validate.schema import (
+    DAILY_OUTPUT_SCHEMA,
+    INVESTIGATE_OUTPUT_SCHEMA,
+    check_schema,
+    schema_text,
+)
 
 ITEM = {
     "item_ids": ["i1"],
@@ -103,6 +110,54 @@ def test_schema_has_no_url_property():
     """出典は ID だけで、URL を書かせない（D-06）。"""
     item = json.loads(schema_text(DAILY_OUTPUT_SCHEMA))["properties"]["items"]["items"]
     assert not [k for k in item["properties"] if "url" in k]
+
+
+# --- ④ 失敗時の調査（data-model.md 4.4） ---
+
+INVESTIGATION = {
+    "event": "事象",
+    "cause": "原因",
+    "confidence": "high",
+    "investigation": ["確認したこと"],
+    "countermeasures": [{"target": "code", "text": "対策"}],
+    "evidence_line_ids": ["L001"],
+}
+
+
+def test_investigate_schema_uses_only_allowed_keywords():
+    schema = json.loads(schema_text(INVESTIGATE_OUTPUT_SCHEMA))
+    names = set(INVESTIGATION) | {"target", "text"}
+    assert _keys(schema) - ALLOWED_KEYWORDS - names == set()
+    assert not [k for k in schema["properties"] if "url" in k]
+    # 文字数・要素数・ID の存在は入れない（空の配列・存在しない ID・長い文もスキーマは通す）
+    check_schema(
+        {**INVESTIGATION, "investigation": [], "evidence_line_ids": ["x"], "event": "あ" * 9999},
+        INVESTIGATE_OUTPUT_SCHEMA,
+    )
+
+
+def test_investigate_schema_enums_match_code_constants():
+    props = json.loads(schema_text(INVESTIGATE_OUTPUT_SCHEMA))["properties"]
+    assert props["confidence"]["enum"] == list(CONFIDENCE_LABELS)
+    target = props["countermeasures"]["items"]["properties"]["target"]
+    assert target["enum"] == list(TARGETS)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        None,
+        {**INVESTIGATION, "extra": 1},
+        {**INVESTIGATION, "confidence": "高"},
+        {**INVESTIGATION, "cause": None},
+        {**INVESTIGATION, "countermeasures": [{"target": "code"}]},
+        {**INVESTIGATION, "countermeasures": [{"target": "code", "text": "x", "url": "y"}]},
+        {k: v for k, v in INVESTIGATION.items() if k != "investigation"},
+    ],
+)
+def test_investigation_not_matching_schema_is_rejected(output):
+    with pytest.raises(ValueError):
+        check_schema(output, INVESTIGATE_OUTPUT_SCHEMA)
 
 
 def _keys(node):

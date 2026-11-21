@@ -33,9 +33,13 @@ from typing import Protocol
 AGENT_SERVICE = "agent"
 AGENT_RUN = "agent-run"  # イメージの中のラッパー（docker/agent-run.sh）
 MISSING_SKILL_EXIT = 78  # agent-run がスキルを見つけられなかったときの終了コード
+# claude を動かさずに終わった失敗の分類（上限の超過、スキーマの誤り、イメージにスキルがない）。
+# 呼び出し側は使用量（usage）の行を残さない
+NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
 # 内側のスキル（structure.md 3.5）。リポジトリの agent/skills/<名前>/SKILL.md を、agent のイメージの
 # 作業ディレクトリの .claude/skills/ にコピーする（docker/agent.Dockerfile）
 DAILY_SKILL = "tr-daily-evaluate"
+INVESTIGATE_SKILL = "tr-investigate"  # ④ 失敗時の調査（日次・週次で共通）
 
 # Claude Code が結果の JSON に書く分類（subtype・terminal_reason）。ログに残す前に形を確かめる
 _CODE = re.compile(r"[a-z0-9_]{1,64}")
