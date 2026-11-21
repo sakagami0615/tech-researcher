@@ -25,6 +25,7 @@ from tech_researcher.agent import invoke
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.rss import collect_feed
 from tech_researcher.db.feed_snapshots import fetch_recorded
+from tech_researcher.db.history import featured_urls, shown_urls
 from tech_researcher.db.runs import SourceFetch, finish_run, record_source_fetch, start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.orchestrator import StageResult
@@ -1242,6 +1243,7 @@ def test_production_secret_stop_closes_run_without_investigation(host):
     assert (code, summary["error_category"]) == (1, "secret_detected")
     [run] = host.runs()
     assert run[3:] == ("failed", "verify", "secret_detected", 1)
+    assert retry_count(host) == 0
     assert investigation_json(host) is None
     assert [c["task"] for c in host.calls("agent")] == ["daily"]
 
@@ -1412,3 +1414,6 @@ def test_body_too_long_day_is_saved_as_rejected_with_zero_published(host, monkey
     assert json.loads(row[3])["published"] == 0
     # Issue を作らないので、項目の状態が published でも「載せた」の導出には入らない（issues がない）
     assert [e[1] for e in entries] == ["published", "published"]
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert featured_urls(conn) == set()
+        assert shown_urls(conn, date(2026, 10, 23)) == set()

@@ -391,7 +391,7 @@ def _close_run(job: Job, outcome: Outcome, minute: float) -> None:
         args += ["--failed-stage", outcome.stage]
     if outcome.category:
         args += ["--error-category", outcome.category]
-    if outcome.kind == REJECTED:  # ③ の不合格に再試行はない（再生成しない）
+    if outcome.kind in (REJECTED, SECRET_STOP):  # ③ の不合格・公開停止に再試行はない
         args += ["--retry-count", "0"]
     elif outcome.kind == RUN_ERROR and outcome.stage is not None:
         count = retries(job.config, outcome.stage, load_fetches(job.files.dir))[0]
