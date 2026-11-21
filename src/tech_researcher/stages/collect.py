@@ -10,7 +10,9 @@
 Search を使うので、並行させずに順に動かす（候補集めの言及の経路は、それより前の情報源のレコードを
 使う）。GitHub Releases は最後に集める（追跡先のリリースを、候補集めの「言及」にしないため）。
 取れなかった追跡先は source_fetches の failed_parts_json に残し、取れなかった情報源と一緒に
-unavailable.json に書く（③ が末尾の「取得できなかった情報源」にする）。
+unavailable.json に書く（③ が末尾の「取得できなかった情報源」にする）。情報源ごとの取得結果は
+fetches.json にも書く（実行エラー Issue の表と、部分的な失敗の情報源の名前の元。統括スクリプトが
+読む）。
 Star 数の測定の後に、急上昇・新規のリポジトリを判定し（github_spikes）、載せる分の README を取る。
 まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
 に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
@@ -66,6 +68,7 @@ from tech_researcher.render.common import fetch_reason
 from tech_researcher.stages.collect_store import (
     GITHUB_REPOS_SOURCE_ID,
     GitHubFetch,
+    fetch_entries,
     in_period_counts,
     save_collect,
     source_fetch,
@@ -75,6 +78,7 @@ from tech_researcher.stages.collect_store import (
 COLLECTED = "collected.json"
 ITEM_IDS = "item-ids.json"  # collected.json の項目と同じ順の ID（② の入力と ③ の照合で使う）
 UNAVAILABLE = "unavailable.json"  # 取得できなかった情報源と、取れなかった部分（末尾の表示の元）
+FETCHES = "fetches.json"  # 情報源ごとの取得結果（実行エラー Issue の表と、部分的な失敗の元）
 UNJUDGED = "unjudged.json"  # 前日の記録がなく判定しなかった急上昇（ヘッダの定型文の元。1.6）
 FEED_JUDGMENT = "人気型フィードへの初登場"
 STAR_JUDGMENT = "GitHub の Star の急増"
@@ -240,10 +244,13 @@ def run_collect(
         encoding="utf-8",
     )
     partial.replace(run_dir / COLLECTED)
-    unjudged_star = github is not None and github.star_unjudged
+    # Star 数の測定に失敗した日は、失敗を「取得できなかった情報源」に出すので、ヘッダの
+    # 「前日の記録がないため判定していません」は出さない（理由が前日の記録でなく測定の失敗になる）
+    unjudged_star = github is not None and github.star_unjudged and not github.fetch.failed
     if target.cadence == "daily":
         _write_unjudged(run_dir, judged.unjudged, unjudged_star)
         _write_json(run_dir / UNAVAILABLE, unavailable_sources(fetches))
+        _write_json(run_dir / FETCHES, fetch_entries(fetches))
         _write_item_ids(run_dir, items, refs)
     log.write("collect", "end", count=len(items))
     failed = [r.source_id for r in results if r.error]
@@ -504,8 +511,7 @@ def _with_readmes(
 
     README の失敗は項目の補足が欠けるだけなので、止めずに続ける（失敗の分類は fetch_readmes が
     ログに残す）。（README を足したレコード、使った要求の回数）を返す。
-    想定外の例外のときも、それまでに使った要求の回数を返す。測定が失敗した日のヘッダの扱いは
-    #41（部分失敗の分岐）で扱う。
+    想定外の例外のときも、それまでに使った要求の回数を返す。
     """
     wanted = [
         r for r in records if r.github is not None and repo_url(r.github.full_name) not in featured

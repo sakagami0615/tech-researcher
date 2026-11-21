@@ -1,5 +1,6 @@
 import json
 from contextlib import closing
+from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
 
@@ -8,7 +9,9 @@ import pytest
 from tech_researcher import cli
 from tech_researcher.collect.http import Response
 from tech_researcher.collect.rss import collect_feed
+from tech_researcher.db.runs import finish_run, start_run
 from tech_researcher.db.schema import open_db
+from tech_researcher.periods import daily_target
 from tech_researcher.stages.collect import Collectors, run_collect
 
 ROOT = Path(__file__).parents[2]
@@ -211,3 +214,107 @@ def test_verify_failure_is_logged_as_verify(env, capsys):
         "failure",
         "FileNotFoundError",
     )
+
+
+# finish：本番の失敗した実行を runs で閉じる（failures.py が呼ぶ）
+
+PROD = "20261024-060000-abcd"
+INVESTIGATION = {"event": "処理が失敗した", "confidence": "high"}
+STARTED = datetime(2026, 10, 24, tzinfo=UTC)
+
+
+def production_run(env, investigation=INVESTIGATION):
+    data = Path(env["TR_DATA_DIR"])
+    run_dir = data / "work" / PROD
+    run_dir.mkdir(parents=True)
+    if investigation is not None:
+        (run_dir / "investigation.json").write_text(json.dumps(investigation), encoding="utf-8")
+    with closing(open_db(data / "db" / "tech-researcher.sqlite3")) as conn:
+        start_run(conn, PROD, daily_target(date(2026, 10, 24), 1), STARTED)
+    return data
+
+
+def run_row(data):
+    with closing(open_db(data / "db" / "tech-researcher.sqlite3")) as conn:
+        return conn.execute(
+            "SELECT status, failed_stage, error_category, retry_count, investigation_json,"
+            " model, finished_at IS NOT NULL FROM runs"
+        ).fetchone()
+
+
+def test_finish_closes_failed_run_with_investigation_and_model(env, capsys):
+    data = production_run(env)
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "analyze"]
+    args += ["--error-category", "agent_failed", "--retry-count", "0", "--model", "claude-x"]
+    assert cli.main(args, env) == 0
+
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
+    status, stage, category, retries, text, model, finished = run_row(data)
+    assert (status, stage, category, retries, model, finished) == (
+        "failed",
+        "analyze",
+        "agent_failed",
+        0,
+        "claude-x",
+        1,
+    )
+    assert json.loads(text) == INVESTIGATION
+
+
+def test_finish_rejected_without_investigation(env):
+    data = production_run(env, investigation=None)
+    args = ["finish", "daily", "--run-id", PROD, "--status", "rejected"]
+    assert cli.main([*args, "--error-category", "all_excluded"], env) == 0
+    assert run_row(data) == ("rejected", None, "all_excluded", None, None, None, 1)
+
+
+def test_finish_rejects_dry_run_and_bad_arguments(env, capsys):
+    args = ["finish", "daily", "--run-id", DRY, "--status", "failed", "--failed-stage", "analyze"]
+    assert cli.main(args, env) == 2  # ドライランは DB に書かない
+    assert "ドライラン" in capsys.readouterr().err
+    for bad in (
+        ["--error-category", "bad category"],
+        ["--error-category", "a" * 65],
+        ["--retry-count", "-1"],
+        ["--failed-stage", "nowhere"],
+    ):
+        with pytest.raises(SystemExit) as e:
+            cli.main(["finish", "daily", "--run-id", PROD, "--status", "failed", *bad], env)
+        assert e.value.code == 2
+
+
+def test_finish_keeps_the_values_of_a_run_already_closed_and_adds_investigation(env):
+    data = production_run(env)
+    with closing(open_db(data / "db" / "tech-researcher.sqlite3")) as conn:
+        finish_run(
+            conn,
+            PROD,
+            "failed",
+            STARTED,
+            failed_stage="collect",
+            error_category="all_sources_failed",
+            retry_count=2,
+        )
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "analyze"]
+    args += ["--error-category", "agent_failed", "--retry-count", "2", "--model", "claude-x"]
+    assert cli.main(args, env) == 0
+    status, stage, category, retries, text, _, _ = run_row(data)
+    # 状態・分類は変えず、再試行回数（① の worker は書かない）と ④ の出力を補う
+    assert (status, stage, category, retries) == ("failed", "collect", "all_sources_failed", 2)
+    assert json.loads(text) == INVESTIGATION
+
+
+def test_finish_without_a_start_row_does_nothing(env, capsys):
+    (Path(env["TR_DATA_DIR"]) / "work" / PROD).mkdir(parents=True)
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
+    assert cli.main(args, env) == 0  # ① が開始の行を書く前に止まった実行。閉じるものがない
+    assert json.loads(capsys.readouterr().out)["status"] == "not_started"
+
+
+def test_finish_for_a_run_not_started_does_not_read_the_investigation(env, capsys):
+    run_dir = Path(env["TR_DATA_DIR"]) / "work" / PROD
+    run_dir.mkdir(parents=True)
+    (run_dir / "investigation.json").write_text("{broken")  # 開始の行がなければ読まない
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
+    assert cli.main(args, env) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "not_started"

@@ -65,6 +65,14 @@ class Report:
     labels: tuple[str, ...]
 
 
+BODY_LIMIT = 60_000  # GitHub の Issue 本文の上限（report-templates.md 0.3）
+
+
+def body_too_long(body: str) -> bool:
+    """本文が上限を超えているか（超えたら投稿せず、不合格などの定型にする）。"""
+    return len(body) > BODY_LIMIT
+
+
 def day_label(day: date) -> str:
     """`YYYY-MM-DD（曜）`（0.4）。"""
     return f"{day.isoformat()}（{_WEEKDAYS[day.weekday()]}）"

@@ -78,6 +78,10 @@ elif command == "compose":
             run_dir = Path(os.environ["TR_DATA_DIR"]) / kind / run_id
             data = {{"task": "daily", "items": [{{"id": "d1"}}]}}
             (run_dir / "agent-input.json").write_text(json.dumps(data))
+        if "fetches" in behavior:
+            kind = "dry-run" if run_id.startswith("dry-") else "work"
+            run_dir = Path(os.environ["TR_DATA_DIR"]) / kind / run_id
+            (run_dir / "fetches.json").write_text(json.dumps(behavior["fetches"]))
         sources = behavior.get("sources", 3)
         print(json.dumps({{"items": 3, "sources": sources, "failed_sources": behavior["failed"]}}))
     elif mode == "fail":
@@ -641,6 +645,7 @@ def test_dry_run_prints_summary_only_and_keeps_it(host, capfd):
         "error_category": None,
         "items": 3,
         "failed_sources": ["Example", "Qiita"],  # 設定ファイルの表示名にする
+        "partial_sources": [],
         "output_dir": str(out_dir),
     }
     assert json.loads((out_dir / "summary.json").read_text(encoding="utf-8")) == summary
@@ -653,6 +658,26 @@ def test_dry_run_prints_summary_only_and_keeps_it(host, capfd):
     ]
     assert json.loads((out_dir / "agent-output.json").read_text()) == {"items": []}
     assert all(c["locked"] for c in host.calls())  # 段階の間はロックを持っている
+
+
+def test_partial_sources_are_reported_apart_from_failed_sources(host, capfd):
+    """一部だけ取れなかった情報源（取れた分は使った部分レポート）は、全失敗の情報源に入れない。"""
+    parts = [{"name": "a/one", "category": "timeout"}]
+    fetches = [
+        {
+            "source_id": "rss:example",
+            "status": "ok",
+            "category": None,
+            "attempts": 1,
+            "parts": parts,
+        }
+    ]
+    host.behave("ok", lock="daily-dry-run", failed=["qiita"], sources=3, fetches=fetches)
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+
+    summary = summary_of(capfd)
+    assert (summary["result"], summary["failed_sources"]) == ("dry_run", ["Qiita"])
+    assert summary["partial_sources"] == ["Example"]  # 設定ファイルの表示名
 
 
 def test_weekly_target_is_monday(host, capfd):
@@ -802,7 +827,7 @@ def test_agent_failure_keeps_usage_log(agent, capfd):
     run_id = summary_of(capfd)["run_id"]
     events = [(r["event"], r.get("error_category")) for r in agent.log(run_id)]
     assert events.index(("usage", None)) < events.index(("failure", "agent_failed"))
-    [usage] = [r for r in agent.log(run_id) if r["event"] == "usage"]
+    [usage] = [r for r in agent.log(run_id) if r["event"] == "usage" and r["stage"] == "analyze"]
     assert "duration_ms=43 " in usage["detail"]  # 失敗の結果の JSON の値も残す
 
 
@@ -816,7 +841,8 @@ def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
     summary = json.loads(out)
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
     compose = [c for c in agent.calls() if c["argv"][0] == "compose"]
-    assert [_service(c) for c in compose] == ["worker", "agent"]  # ③ に進まない
+    # ③ に進まない。② の後に ④ を1回だけ呼ぶ（再試行しない）
+    assert [_service(c) for c in compose] == ["worker", "agent", "agent"]
     log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
     assert AGENT_SECRET not in out + err + log_text  # agent.env の値も伏せる
     assert TOKEN not in out + err + log_text
@@ -858,8 +884,11 @@ def test_broken_schema_is_analyze_error_without_ai(agent, capfd, monkeypatch, tm
     assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
     summary = summary_of(capfd)
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "bad_schema")
-    assert [_service(c) for c in agent.calls()] == ["worker"]  # AI を呼ばない
-    assert not [r for r in agent.log(summary["run_id"]) if r["event"] == "usage"]
+    # ② は呼ばない。claude を呼ばずに止めた失敗は ④ を呼べる（④ の呼び出しだけが agent に行く）
+    assert [_service(c) for c in agent.calls()] == ["worker", "agent"]
+    assert not [
+        r for r in agent.log(summary["run_id"]) if r["event"] == "usage" and r["stage"] == "analyze"
+    ]
 
 
 def test_missing_skill_in_image_leaves_no_usage(agent, capfd):
@@ -915,7 +944,8 @@ def test_all_sources_failed_is_error_without_ai(host, capfd, monkeypatch):
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
     summary = summary_of(capfd)
     assert (summary["failed_stage"], summary["error_category"]) == ("collect", "all_sources_failed")
-    assert [c["argv"][-4] for c in host.calls()] == ["collect"]  # ② ③ を呼ばない
+    worker = [c for c in host.calls() if c["argv"][0] == "compose" and _service(c) == "worker"]
+    assert [c["argv"][-4] for c in worker] == ["collect"]  # ② ③ を呼ばない（④ だけ agent に行く）
 
 
 def test_no_enabled_source_is_error_not_empty_report(host, capfd):
@@ -953,7 +983,10 @@ def test_stage_failure_is_error_without_leaking_output(host, capfd, mode, catego
     assert summary["error_category"] == category
     assert summary["items"] is None
     failure = [r for r in host.log(summary["run_id"]) if r["event"] == "failure"]
-    assert [(r["stage"], r["error_category"]) for r in failure] == [("collect", category)]
+    assert [(r["stage"], r["error_category"]) for r in failure] == [
+        ("collect", category),
+        ("investigate", "invalid_output"),  # この検査の偽の AI は項目のない ② の出力を返す
+    ]
     log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
     assert TOKEN not in log_text
     if mode == "fail":

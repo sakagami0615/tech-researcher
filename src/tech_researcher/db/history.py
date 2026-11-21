@@ -12,7 +12,9 @@ from datetime import date, timedelta
 
 # 作成済みの日次レポート Issue に掲載した項目（issues i、report_entries e、items it）。
 # items は主キーで引く（'i' || item_id と比べると全件を走査し、履歴が増えると遅くなる）。
-# 掲載した項目の ID は `i[1-9]\d*` の形に限るので、先頭の i を除いた数が主キーになる
+# 掲載した項目の ID は `i[1-9]\d*` の形に限るので、先頭の i を除いた数が主キーになる。
+# 必ず issues（作成済みの Issue）を起点にする。report_entries の status だけで数えない
+# （本文が長すぎて投稿しない日の項目は published のまま残るため）
 _PUBLISHED_DAILY = (
     "FROM issues i"
     " JOIN report_entries e ON e.run_id = i.run_id AND e.section = 'daily_item'"

@@ -121,6 +121,26 @@ def unavailable_sources(fetches: Iterable[SourceFetch]) -> list[dict]:
     return found
 
 
+def fetch_entries(fetches: Iterable[SourceFetch]) -> list[dict]:
+    """実行エラー Issue の「情報源ごとの取得結果」（report-templates.md 3.4）と、部分的な失敗の
+    情報源の名前の元。取得結果（source_fetches の行）のうち、取得しなかった（skipped）ものを除く。
+
+    category は失敗（failed）のときだけ持つ（ok の行の error_category は測り残しの印で、失敗の
+    理由ではない）。attempts は初回を含めた試行回数、parts は取れなかった部分。
+    """
+    return [
+        {
+            "source_id": f.source_id,
+            "status": f.status,
+            "category": f.error_category if f.status == "failed" else None,
+            "attempts": f.attempts,
+            "parts": [{"name": n, "category": c} for n, c in f.failed_parts],
+        }
+        for f in fetches
+        if f.status != "skipped"
+    ]
+
+
 def in_period_counts(items: Iterable[Item]) -> Counter[str]:
     """期間内に残った項目に入ったレコードの数を、情報源ごとに数える。"""
     return Counter(r.source_id for item in items for r in item.sources)

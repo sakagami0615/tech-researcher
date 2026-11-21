@@ -505,3 +505,23 @@ def test_secret_in_evidence_is_reported_even_with_text_violations():
     output = {**OUTPUT, "cause": "https://example.com", "evidence_line_ids": ["L001"]}
     got, _ = run(output, lines=lines)
     assert got.reason == "secret_detected" and got.secret_kinds == ("github_token",)
+
+
+def test_history_lines_show_partial_sources_by_count_only(tmp_path):
+    """一部だけ取れなかった情報源は failed_sources と別に、部分の数だけを出す（名前は出さない）。"""
+    conn = open_db(tmp_path / "db.sqlite3")
+    now = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
+    start_run(conn, "20261023-060000-0000", daily_target(date(2026, 10, 22), 1), now)
+    parts = (("a/one", "timeout"), ("b/two", "truncated"))
+    record_source_fetch(
+        conn,
+        "20261023-060000-0000",
+        SourceFetch("github_releases", "ok", 3, 5, 2, now, None, parts),
+    )
+    record_source_fetch(conn, "20261023-060000-0000", SourceFetch("qiita", "ok", 1, 1, 1, now))
+    (run,) = recent_runs(conn, now, now + timedelta(hours=1), RUN_ID)
+    assert run.partial_sources == (("github_releases", 2),)
+    assert run.failed_sources == ()
+    line = inv.history_lines([run])[0]
+    assert "partial_sources=github_releases:2" in line and "failed_sources" not in line
+    assert "a/one" not in line

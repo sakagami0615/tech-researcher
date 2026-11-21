@@ -14,20 +14,22 @@
 import contextlib
 import io
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
 import pytest
 
-from tech_researcher import cli, observe, orchestrator
+from tech_researcher import cli, failures, observe, orchestrator
 from tech_researcher.agent import invoke
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.rss import collect_feed
 from tech_researcher.db.feed_snapshots import fetch_recorded
+from tech_researcher.db.history import featured_urls, shown_urls
+from tech_researcher.db.runs import SourceFetch, finish_run, record_source_fetch, start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.orchestrator import StageResult
-from tech_researcher.periods import JST
+from tech_researcher.periods import JST, daily_target
 from tech_researcher.runfiles import db_path, new_run_id
 from tech_researcher.stages.collect import Collectors, run_collect
 
@@ -70,6 +72,19 @@ def select_all(data: dict) -> dict:
     }
 
 
+def investigation(data: dict) -> dict:
+    """④ の出力の例（検査を通る形）。根拠は入力の最初の行。"""
+    lines = data["lines"]
+    return {
+        "event": "処理が失敗した",
+        "cause": "原因の推定",
+        "confidence": "medium",
+        "investigation": ["ログを確認した"],
+        "countermeasures": [{"target": "code", "text": "コードを確認する"}],
+        "evidence_line_ids": [lines[0]["id"]] if lines else [],
+    }
+
+
 class Host:
     def __init__(self, tmp_path: Path):
         self.repo = tmp_path / "repo"
@@ -86,6 +101,7 @@ class Host:
         self.worker_env = {"TR_DATA_DIR": str(self.data), "GITHUB_TOKEN": TOKEN}
         self.feed = FEED
         self.ai = select_all
+        self.investigator = investigation  # ④ の偽の AI
 
     def write_config(self, limits: str = LIMITS, kind: str = "new") -> None:
         (self.repo / "config" / "tech-researcher.toml").write_text(
@@ -115,6 +131,8 @@ class Host:
         assert timeout_s > 0  # 段階の上限を渡している
         data = json.loads(body)
         self._append("agent", data)
+        if data["task"] == "investigate":
+            return invoke.AgentResult(self.investigator(data))
         return invoke.AgentResult(self.ai(data))
 
     def calls(self, kind: str) -> list:
@@ -176,6 +194,14 @@ def stages_of(log_path: Path) -> list[tuple[str, str]]:
     return [(r["stage"], r["event"]) for r in map(json.loads, log_path.read_text().splitlines())]
 
 
+def assert_secret_stop(out_dir: Path) -> None:
+    """秘匿情報を検出した実行は、公開停止の定型（R 3.6）だけを残す。値も検出の内容も入れない。"""
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert "（公開停止）" in issue.splitlines()[0]
+    assert "公開を停止しました" in issue and "調査結果" not in issue
+    assert "Pw0rd" not in issue and TOKEN not in issue and "sk-ant-" not in issue
+
+
 def test_dry_run_goes_round_and_keeps_results(host):
     code, summary, out = host.run("--dry-run")
 
@@ -191,6 +217,7 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "error_category": None,
         "items": 2,
         "failed_sources": [],
+        "partial_sources": [],
         "output_dir": str(out_dir),
     }
     assert "モデル" not in out  # 収集した文は標準出力に出さない
@@ -204,6 +231,7 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "secret-scan.json",
         "unjudged.json",
         "unavailable.json",
+        "fetches.json",
         "item-ids.json",
         "issue.md",
         "log.jsonl",
@@ -238,6 +266,26 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "reason": None,
         "entries": 2,
         "excluded": [],
+        "counts": {
+            "collected": 2,
+            "ai_output": 2,
+            "excluded": 0,
+            "excluded_by_reason": {},
+            "published": 2,
+        },
+        "verification": {
+            "invalid_output": "passed",
+            "invalid_id": "passed",
+            "invalid_source": "passed",
+            "missing_period_event": "passed",
+            "forbidden_link": "passed",
+            "forbidden_html": "passed",
+            "too_long": "passed",
+            "long_quote": "passed",
+            "duplicate_id": "passed",
+            "secret_detected": "passed",
+        },
+        "rejected_checks": [],
     }
     assert json.loads((out_dir / "secret-scan.json").read_text()) == {
         "detected": False,
@@ -420,7 +468,15 @@ def test_rejected_output_makes_no_report(host, output, reason):
     assert (summary["result"], summary["failed_stage"]) == ("rejected", None)
     out_dir = Path(summary["output_dir"])
     assert json.loads((out_dir / "validation.json").read_text())["reason"] == reason
-    assert not (out_dir / "issue.md").exists()
+    # 不合格 Issue の本文を残す。AI の出力の全文も、除外した項目の中身も入れない（R 3.2）
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert issue.startswith("[不合格][日次] 2026-10-23（金）のレポート（2026-10-24 06:00 実行）\n")
+    assert "type:rejected, cadence:daily" in issue
+    assert "## 調査結果" in issue and "検証結果の詳細" in issue
+    assert "見出し1" not in issue
+    # 不合格の後に ② を呼び直さず（再生成しない）、④ を1回だけ呼び、結果を残す
+    assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
+    assert json.loads((out_dir / "investigation.json").read_text())["confidence"] == "medium"
 
 
 def test_secret_in_report_is_not_published(host):
@@ -439,7 +495,13 @@ def test_secret_in_report_is_not_published(host):
         "secret_detected",
     )
     out_dir = Path(summary["output_dir"])
-    assert not (out_dir / "issue.md").exists()
+    # 公開停止の定型だけを残す（3.6）。④ は呼ばず、調査結果・実行 ID・日時を載せない
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert issue.startswith("[実行エラー][日次] 2026-10-23（金）（公開停止）\n")
+    assert "秘匿情報の可能性がある文字列を検出したため、Issue の公開を停止しました。" in issue
+    assert "調査結果" not in issue and summary["run_id"] not in issue and TOKEN not in issue
+    assert [c["task"] for c in host.calls("agent")] == ["daily"]
+    assert not (out_dir / "investigation.json").exists()
     assert json.loads((out_dir / "secret-scan.json").read_text()) == {
         "detected": True,
         "kinds": ["known"],
@@ -455,8 +517,11 @@ def test_too_large_input_does_not_call_ai(host):
 
     assert code == 1
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "input_too_large")
-    assert host.calls("agent") == []
+    # ② は呼ばない。claude を呼ばずに止めた失敗なので ④ は呼べる（調査結果を載せる）
+    assert [c["task"] for c in host.calls("agent")] == ["investigate"]
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "AI への入力が上限を超えた" in issue and "## 調査結果" in issue
 
 
 def test_ai_failure_stops_before_verify(host):
@@ -476,7 +541,7 @@ def test_ai_failure_stops_before_verify(host):
     log = [
         json.loads(x) for x in (Path(summary["output_dir"]) / "log.jsonl").read_text().splitlines()
     ]
-    [usage] = [r for r in log if r["event"] == "usage"]
+    [usage] = [r for r in log if r["event"] == "usage" and r["stage"] == "analyze"]
     assert usage["detail"].startswith("model=unknown input_bytes=")
     assert "num_turns=unknown" in usage["detail"]
 
@@ -512,9 +577,20 @@ def test_all_sources_failed_is_error_not_empty_report(host):
         "all_sources_failed",
     )
     assert summary["failed_sources"] == ["Example"]
-    assert host.calls("agent") == []
-    assert not (Path(summary["output_dir"]) / "issue.md").exists()
-    assert not (Path(summary["output_dir"]) / "agent-input.json").exists()  # ② に進まない
+    assert [c["task"] for c in host.calls("agent")] == ["investigate"]  # ② は呼ばない
+    out_dir = Path(summary["output_dir"])
+    assert not (out_dir / "agent-input.json").exists()  # ② に進まない
+    # 実行エラー Issue の本文（AI の調査あり）。取得結果の表に、失敗した情報源と理由を出す
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert issue.startswith(
+        "[実行エラー][日次] 2026-10-23（金）（① 収集・2026-10-24 06:00 実行）\n"
+    )
+    assert "| エラーの概要 | すべての情報源の取得に失敗した（HTTP 5xx） |" in issue
+    assert "| Example | 失敗 | HTTP 5xx | 2 回 |" in issue
+    assert "## 調査結果" in issue and (out_dir / "investigation.json").exists()
+    assert "collect failure error_category=all_sources_failed" in (
+        json.dumps(host.calls("agent")[0]["lines"], ensure_ascii=False)
+    )
 
 
 def test_production_collect_failure_closes_run_as_failed(host, monkeypatch):
@@ -602,7 +678,7 @@ def test_secret_in_raw_ai_output_stops_the_report(host, secret):
     assert code == 1
     assert summary["error_category"] == "secret_detected"
     out_dir = Path(summary["output_dir"])
-    assert not (out_dir / "issue.md").exists()
+    assert_secret_stop(out_dir)
     assert json.loads((out_dir / "secret-scan.json").read_text())["detected"] is True
     assert secret not in out
     assert secret not in (out_dir / "log.jsonl").read_text()
@@ -617,7 +693,7 @@ def test_double_escaped_secret_in_ai_string_is_detected(host):
     code, summary, out = host.run("--dry-run")
 
     assert code == 1 and summary["error_category"] == "secret_detected"
-    assert not (Path(summary["output_dir"]) / "issue.md").exists()
+    assert_secret_stop(Path(summary["output_dir"]))
 
 
 def test_secret_in_ai_ids_is_masked_in_results(host):
@@ -627,7 +703,7 @@ def test_secret_in_ai_ids_is_masked_in_results(host):
 
     assert code == 1 and summary["error_category"] == "secret_detected"
     out_dir = Path(summary["output_dir"])
-    assert not (out_dir / "issue.md").exists()
+    assert_secret_stop(out_dir)
     assert TOKEN not in out
     for name in ("validation.json", "log.jsonl"):
         assert TOKEN not in (out_dir / name).read_text(encoding="utf-8"), name
@@ -868,7 +944,7 @@ def test_too_large_input_file_is_not_read(host, monkeypatch):
     monkeypatch.setattr(Path, "read_text", read_text)
     code, summary, _ = host.run("--dry-run")
     assert (code, summary["error_category"]) == (1, "input_too_large")
-    assert host.calls("agent") == []
+    assert [c["task"] for c in host.calls("agent")] == ["investigate"]  # ② は呼ばない
 
 
 def saved_report(host):
@@ -1038,3 +1114,306 @@ def test_secret_found_only_in_the_body_is_not_saved_either(host, monkeypatch):
     counts = json.loads(row[3])
     assert (counts["ai_output"], counts["published"]) == (2, 0)
     assert entries == []
+
+
+# 日次の失敗の分岐（failures.py）：④ の調査・本文・本番の runs の終わり
+
+
+def retry_count(host) -> int | None:
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        return conn.execute("SELECT retry_count FROM runs").fetchone()[0]
+
+
+def investigation_json(host) -> str | None:
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        return conn.execute("SELECT investigation_json FROM runs").fetchone()[0]
+
+
+def test_production_rejected_closes_run_as_rejected_with_investigation(host):
+    host.ai = lambda data: {"items": [entry("i99", 1)]}  # 入力にない ID を除外して0件
+    code, summary, _ = host.run()
+
+    assert (code, summary["result"]) == (1, "rejected")
+    [run] = host.runs()
+    assert run[3:] == ("rejected", None, "all_excluded", 1)  # running のまま残さない
+    assert json.loads(investigation_json(host))["confidence"] == "medium"
+    # ④ は1回だけ。② を呼び直さない
+    assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify", "finish"]
+    log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
+    records = [json.loads(x) for x in log.read_text().splitlines()]
+    assert [(r["stage"], r["event"]) for r in records if r["stage"] == "investigate"] == [
+        ("investigate", "start"),
+        ("investigate", "usage"),
+        ("investigate", "end"),
+    ]
+    [usage] = [r for r in records if r["stage"] == "investigate" and r["event"] == "usage"]
+    assert usage["detail"].startswith("model=unknown ")
+
+
+def test_rejected_issue_body_has_counts_and_checks(host):
+    host.ai = lambda data: {"items": [entry("d9", 1), entry("d1", 2, category="security")]}
+    code, summary, _ = host.run("--dry-run")
+
+    assert code == 1
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "| 不合格となった検証項目 | D6\\(a\\) 出力の形式が不正 |" in issue
+    assert "収集 2 件／AI の出力 2 件／除外 0 件／掲載 0 件" in issue
+    assert "| D6\\(a\\) 出力の形式が不正 | 不合格 |" in issue
+
+
+def test_production_agent_failure_closes_run_and_records_model(host):
+    def broken(data):
+        raise invoke.AgentError("agent_failed", models=("claude-x", "claude-y"))
+
+    host.ai = broken
+    code, summary, _ = host.run()
+
+    assert (code, summary["failed_stage"], summary["error_category"]) == (
+        1,
+        "analyze",
+        "agent_failed",
+    )
+    [run] = host.runs()
+    assert run[3:] == ("failed", "analyze", "agent_failed", 1)
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert conn.execute("SELECT model, retry_count FROM runs").fetchone() == (
+            "claude-x,claude-y",
+            0,
+        )
+    assert investigation_json(host) is not None
+    assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish"]
+
+
+@pytest.mark.parametrize("category", ["missing_skill", "launch_failed"])
+def test_ai_unusable_failure_skips_investigation_but_keeps_the_template(host, category):
+    def broken(data):
+        raise invoke.AgentError(category)
+
+    host.ai = broken
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["error_category"]) == (1, category)
+    assert [c["task"] for c in host.calls("agent")] == ["daily"]  # ④ を呼ばない
+    out_dir = Path(summary["output_dir"])
+    assert not (out_dir / "investigation.json").exists()
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert "AI による調査結果を掲載できませんでした。" in issue and "## 調査結果" not in issue
+    assert "実行ID" not in issue  # 3.5：実行ID・日時・付記・フッタは入れない
+
+
+def test_failed_investigation_falls_back_to_the_template(host):
+    def broken(data):
+        raise invoke.AgentError("timeout", "stderr の文")
+
+    host.investigator = broken
+    host.ai = lambda data: {"items": [entry("d9", 1)]}
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["result"]) == (1, "rejected")
+    out_dir = Path(summary["output_dir"])
+    assert not (out_dir / "investigation.json").exists()
+    assert "AI による調査結果を掲載できませんでした。" in (out_dir / "issue.md").read_text()
+    log = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    failure = [r for r in log if r["stage"] == "investigate" and r["event"] == "failure"]
+    assert [r["error_category"] for r in failure] == ["timeout"]
+
+
+def test_secret_in_investigation_is_not_published(host):
+    def leaky(data):
+        return {**investigation(data), "cause": f"値は {TOKEN}"}
+
+    host.investigator = leaky
+    host.ai = lambda data: {"items": [entry("d9", 1)]}
+    code, summary, out = host.run("--dry-run")
+
+    assert code == 1
+    out_dir = Path(summary["output_dir"])
+    assert "AI による調査結果を掲載できませんでした。" in (out_dir / "issue.md").read_text()
+    assert not (out_dir / "investigation.json").exists()
+    log_text = (out_dir / "log.jsonl").read_text()
+    assert TOKEN not in out + log_text and "secret_detected" in log_text
+
+
+def test_production_secret_stop_closes_run_without_investigation(host):
+    host.ai = lambda data: {"items": [entry("i1", 1, importance=f"値は {TOKEN}")]}
+    code, summary, _ = host.run()
+
+    assert (code, summary["error_category"]) == (1, "secret_detected")
+    [run] = host.runs()
+    assert run[3:] == ("failed", "verify", "secret_detected", 1)
+    assert retry_count(host) == 0
+    assert investigation_json(host) is None
+    assert [c["task"] for c in host.calls("agent")] == ["daily"]
+
+
+def test_production_all_sources_failed_keeps_workers_close_and_adds_investigation(host):
+    host.feed = None
+    code, summary, _ = host.run()
+
+    assert (code, summary["error_category"]) == (1, "all_sources_failed")
+    [run] = host.runs()
+    assert run[3:] == ("failed", "collect", "all_sources_failed", 1)
+    assert json.loads(investigation_json(host))["event"] == "処理が失敗した"
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish"]
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        # ① の worker は再試行回数を書かない。finish が補う（rss の3回の試行は再試行2回）
+        assert conn.execute("SELECT retry_count FROM runs").fetchone() == (2,)
+
+
+def test_dry_run_failure_does_not_write_db_and_reads_history(host):
+    """ドライランは失敗でも DB に書かない。本番の履歴は ④ の入力に読むだけ（D-22）。"""
+    previous = "20261023-060000-abcd"
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        start_run(conn, previous, daily_target(date(2026, 10, 23), 1), STARTED - timedelta(days=1))
+        finish_run(
+            conn, previous, "failed", STARTED, failed_stage="collect", error_category="timeout"
+        )
+        fetch = SourceFetch("github_releases", "ok", 1, 3, 3, STARTED, None, (("a/b", "timeout"),))
+        record_source_fetch(conn, previous, fetch)
+        before = list(conn.iterdump())
+    host.ai = lambda data: {"items": [entry("d9", 1)]}
+    code, _, _ = host.run("--dry-run")
+
+    assert code == 1
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert list(conn.iterdump()) == before
+    lines = host.calls("agent")[-1]["lines"]
+    history = [line["text"] for line in lines if line["kind"] == "history"]
+    assert len(history) == 1 and "status=failed failed_stage=collect" in history[0]
+    assert "partial_sources=github_releases:1" in history[0]  # 一部だけ取れなかった情報源も入れる
+
+
+def test_production_verify_failure_closes_run_as_failed_verify(host, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr(cli, "run_verify", broken)
+    code, summary, _ = host.run()
+
+    assert (code, summary["failed_stage"], summary["error_category"]) == (1, "verify", "exit_1")
+    [run] = host.runs()
+    assert run[3:] == ("failed", "verify", "exit_1", 1)  # running のまま残さない
+
+
+def test_run_close_failure_does_not_change_the_result(host, monkeypatch):
+    """runs を閉じられなくても、要約は元の失敗のまま出す（後始末の失敗はログに残す）。"""
+    real = host.fake_compose_run
+
+    def run(compose, service, args, timeout_s):
+        if args[0] == "finish":
+            raise OSError("docker")
+        return real(compose, service, args, timeout_s)
+
+    monkeypatch.setattr(host, "fake_compose_run", run)
+    host.ai = lambda data: {"items": [entry("i99", 1)]}
+    code, summary, _ = host.run()
+
+    assert (code, summary["result"]) == (1, "rejected")
+    log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
+    assert ("job", "failure") in stages_of(log)
+
+
+def test_body_over_the_limit_is_rejected_not_posted(host, monkeypatch):
+    """本文が 60,000 文字を超える日は不合格にする（R 0.3）。掲載を絞って作り直さない。"""
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["result"]) == (1, "rejected")
+    out_dir = Path(summary["output_dir"])
+    validation = json.loads((out_dir / "validation.json").read_text())
+    assert (validation["reason"], validation["rejected_checks"]) == (
+        "body_too_long",
+        ["body_too_long"],
+    )
+    assert validation["counts"]["published"] == 0  # 投稿しないので、掲載の件数は 0
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert issue.startswith("[不合格]") and "本文が 60,000 文字を超えた" in issue
+    assert "見出し1" not in issue
+    assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
+
+
+def test_secret_in_body_is_checked_before_the_length(host, monkeypatch):
+    """本文が長すぎる日も、本文全体の秘匿情報の検査を先に行い、公開停止にする。"""
+    from tech_researcher.validate.secret_scan import SecretScanner
+
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
+    original = SecretScanner.find
+
+    def find(self, text):
+        if "tech-researcher kind=report" in text:
+            return [type("F", (), {"kind": "known"})()]
+        return original(self, text)
+
+    monkeypatch.setattr(SecretScanner, "find", find)
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["result"], summary["error_category"]) == (1, "error", "secret_detected")
+    out_dir = Path(summary["output_dir"])
+    assert json.loads((out_dir / "validation.json").read_text())["result"] == "secret_detected"
+    assert "公開を停止しました" in (out_dir / "issue.md").read_text(encoding="utf-8")
+
+
+def test_failure_body_over_the_limit_falls_back_to_the_template(host, monkeypatch):
+    """不合格・実行エラーの本文も 60,000 文字の上限を守る。超えたら調査結果を載せない定型にする。"""
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 400)
+    host.feed = None
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["error_category"]) == (1, "all_sources_failed")
+    out_dir = Path(summary["output_dir"])
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert "AI による調査結果を掲載できませんでした。" in issue and "## 調査結果" not in issue
+    assert not (out_dir / "investigation.json").exists()  # 載せない結果は残さない
+    log = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    assert [r["error_category"] for r in log if r.get("error_category") == "body_too_long"]
+
+
+def test_secret_in_failure_body_keeps_the_original_result_in_runs(host, monkeypatch):
+    """本文全体の検査で公開停止にしても、runs は元の結果のまま閉じる。
+
+    公開停止の記録先は issues の blocked_secret（⑤）。それまではログの post の secret_detected。
+    """
+    monkeypatch.setattr(
+        failures,
+        "_secret_kinds",
+        lambda scanner, text: "known" if "調査結果" in text and "公開を停止" not in text else "",
+    )
+    host.ai = lambda data: {"items": [entry("i99", 1)]}  # 不合格
+    code, summary, _ = host.run()
+
+    assert (code, summary["result"]) == (1, "rejected")  # 要約は元の結果のまま
+    [run] = host.runs()
+    assert run[3:] == ("rejected", None, "all_excluded", 1)
+    assert retry_count(host) == 0
+    log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
+    assert ("post", "secret_detected") in stages_of(log)
+
+
+def test_production_rejected_records_retry_count_zero(host):
+    host.ai = lambda data: {"items": [entry("i99", 1)]}
+    host.run()
+    assert retry_count(host) == 0  # 不合格に再試行はない
+
+
+def test_production_agent_failure_records_retry_count_zero(host):
+    def broken(data):
+        raise invoke.AgentError("agent_failed")
+
+    host.ai = broken
+    host.run()
+    assert retry_count(host) == 0  # ② の再試行は別の Issue で行う
+
+
+def test_body_too_long_day_is_saved_as_rejected_with_zero_published(host, monkeypatch):
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2])) == ("rejected", ["body_too_long"])
+    assert json.loads(row[3])["published"] == 0
+    # Issue を作らないので、項目の状態が published でも「載せた」の導出には入らない（issues がない）
+    assert [e[1] for e in entries] == ["published", "published"]
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert featured_urls(conn) == set()
+        assert shown_urls(conn, date(2026, 10, 23)) == set()
