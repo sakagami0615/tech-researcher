@@ -5,8 +5,8 @@ import pytest
 
 from tech_researcher.db.runs import (
     SourceFetch,
+    complete_closed_run,
     finish_run,
-    record_investigation,
     record_model,
     record_source_fetch,
     start_run,
@@ -237,7 +237,7 @@ def test_aware_times_only(conn):
         start_run(conn, "20261025-060000-0123", TARGET, datetime(2026, 10, 24))
 
 
-def test_finish_run_keeps_investigation_and_record_investigation_only_adds_it(conn):
+def test_complete_closed_run_only_adds_retry_count_and_investigation(conn):
     finish_run(
         conn,
         RUN_ID,
@@ -249,16 +249,21 @@ def test_finish_run_keeps_investigation_and_record_investigation_only_adds_it(co
         investigation_json='{"event": "x"}',
     )
     assert run_row(conn)["investigation_json"] == '{"event": "x"}'
-    # ① の worker がすでに閉じた実行には、④ の出力だけを足す（終わりの値は変えない）
-    finish_run(conn, RUN_ID, "failed", FINISHED, failed_stage="collect", retry_count=2)
-    record_investigation(conn, RUN_ID, '{"event": "y"}')
+    # ① の worker がすでに閉じた実行には、再試行回数と ④ の出力だけを補う（終わりの値は変えない）
+    finish_run(conn, RUN_ID, "failed", FINISHED, failed_stage="collect")
+    complete_closed_run(conn, RUN_ID, retry_count=2, investigation_json='{"event": "y"}')
     row = run_row(conn)
     assert (row["status"], row["failed_stage"], row["retry_count"]) == ("failed", "collect", 2)
+    assert row["finished_at"] == "2026-10-23T21:30:00Z"
     assert row["investigation_json"] == '{"event": "y"}'
+    # すでにある再試行回数は残し、None の値は書かない
+    complete_closed_run(conn, RUN_ID, retry_count=5)
+    row = run_row(conn)
+    assert (row["retry_count"], row["investigation_json"]) == (2, '{"event": "y"}')
 
 
-def test_record_investigation_rejects_dry_run_and_unknown_run(conn):
+def test_complete_closed_run_rejects_dry_run_and_unknown_run(conn):
     with pytest.raises(ValueError):
-        record_investigation(conn, "dry-20261024-060000-abcd", "{}")
+        complete_closed_run(conn, "dry-20261024-060000-abcd")
     with pytest.raises(LookupError):
-        record_investigation(conn, "20261024-060000-ffff", "{}")
+        complete_closed_run(conn, "20261024-060000-ffff")

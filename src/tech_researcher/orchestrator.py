@@ -51,6 +51,7 @@ from tech_researcher.agent import invoke
 from tech_researcher.agent.daily import InputTooLarge, encode_input
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, ConfigError, StageLimits, load_config
+from tech_researcher.db.runs import CATEGORY
 from tech_researcher.envfiles import (
     ENV_FILES,
     SECRETS_DIR_ENV,
@@ -537,7 +538,8 @@ def _run_stages(job: Job) -> Summary:
         job, "collect", job.limits.collect, lambda out: _stage_summary(out, names)
     )
     if collected is None:
-        return _fail(job, "collect", category)
+        partial = failures.partial_source_names(job.files.dir, names)
+        return _fail(job, "collect", category, {"partial_sources": partial})
     fields = {
         "items": collected["items"],
         "failed_sources": collected["failed_sources"],
@@ -597,9 +599,7 @@ def _fail(
 def _validation_reason(job: Job) -> str | None:
     """③ の不合格の理由（validation.json の reason。runs の error_category に残す）。"""
     reason = failures.load_validation(job.files.dir).get("reason")
-    return (
-        reason if isinstance(reason, str) and re.fullmatch(r"[A-Za-z0-9_]{1,64}", reason) else None
-    )
+    return reason if isinstance(reason, str) and CATEGORY.fullmatch(reason) else None
 
 
 def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:

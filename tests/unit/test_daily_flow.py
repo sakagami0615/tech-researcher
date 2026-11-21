@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tech_researcher import cli, observe, orchestrator
+from tech_researcher import cli, failures, observe, orchestrator
 from tech_researcher.agent import invoke
 from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.rss import collect_feed
@@ -1250,6 +1250,9 @@ def test_production_all_sources_failed_keeps_workers_close_and_adds_investigatio
     assert run[3:] == ("failed", "collect", "all_sources_failed", 1)
     assert json.loads(investigation_json(host))["event"] == "処理が失敗した"
     assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish"]
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        # ① の worker は再試行回数を書かない。finish が補う（rss の3回の試行は再試行2回）
+        assert conn.execute("SELECT retry_count FROM runs").fetchone() == (2,)
 
 
 def test_dry_run_failure_does_not_write_db_and_reads_history(host):
@@ -1307,7 +1310,7 @@ def test_run_close_failure_does_not_change_the_result(host, monkeypatch):
 
 def test_body_over_the_limit_is_rejected_not_posted(host, monkeypatch):
     """本文が 60,000 文字を超える日は不合格にする（R 0.3）。掲載を絞って作り直さない。"""
-    monkeypatch.setattr("tech_researcher.stages.daily.BODY_LIMIT", 100)
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
     code, summary, _ = host.run("--dry-run")
 
     assert (code, summary["result"]) == (1, "rejected")
@@ -1317,7 +1320,61 @@ def test_body_over_the_limit_is_rejected_not_posted(host, monkeypatch):
         "body_too_long",
         ["body_too_long"],
     )
+    assert validation["counts"]["published"] == 0  # 投稿しないので、掲載の件数は 0
     issue = (out_dir / "issue.md").read_text(encoding="utf-8")
     assert issue.startswith("[不合格]") and "本文が 60,000 文字を超えた" in issue
     assert "見出し1" not in issue
     assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
+
+
+def test_secret_in_body_is_checked_before_the_length(host, monkeypatch):
+    """本文が長すぎる日も、本文全体の秘匿情報の検査を先に行い、公開停止にする。"""
+    from tech_researcher.validate.secret_scan import SecretScanner
+
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 100)
+    original = SecretScanner.find
+
+    def find(self, text):
+        if "tech-researcher kind=report" in text:
+            return [type("F", (), {"kind": "known"})()]
+        return original(self, text)
+
+    monkeypatch.setattr(SecretScanner, "find", find)
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["result"], summary["error_category"]) == (1, "error", "secret_detected")
+    out_dir = Path(summary["output_dir"])
+    assert json.loads((out_dir / "validation.json").read_text())["result"] == "secret_detected"
+    assert "公開を停止しました" in (out_dir / "issue.md").read_text(encoding="utf-8")
+
+
+def test_failure_body_over_the_limit_falls_back_to_the_template(host, monkeypatch):
+    """不合格・実行エラーの本文も 60,000 文字の上限を守る。超えたら調査結果を載せない定型にする。"""
+    monkeypatch.setattr("tech_researcher.render.common.BODY_LIMIT", 400)
+    host.feed = None
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["error_category"]) == (1, "all_sources_failed")
+    out_dir = Path(summary["output_dir"])
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert "AI による調査結果を掲載できませんでした。" in issue and "## 調査結果" not in issue
+    assert not (out_dir / "investigation.json").exists()  # 載せない結果は残さない
+    log = [json.loads(x) for x in (out_dir / "log.jsonl").read_text().splitlines()]
+    assert [r["error_category"] for r in log if r.get("error_category") == "body_too_long"]
+
+
+def test_secret_in_failure_body_closes_run_as_stopped(host, monkeypatch):
+    """本文全体の検査で公開停止にしたら、runs も failed・post・secret_detected で閉じる。"""
+    monkeypatch.setattr(
+        failures,
+        "_secret_kinds",
+        lambda scanner, text: "known" if "調査結果" in text and "公開を停止" not in text else "",
+    )
+    host.ai = lambda data: {"items": [entry("i99", 1)]}  # 不合格
+    code, summary, _ = host.run()
+
+    assert (code, summary["result"]) == (1, "rejected")  # 要約は元の結果のまま
+    [run] = host.runs()
+    assert run[3:] == ("failed", "post", "secret_detected", 1)
+    log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
+    assert ("post", "secret_detected") in stages_of(log)

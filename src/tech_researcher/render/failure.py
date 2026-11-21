@@ -213,7 +213,11 @@ def run_error_report(
     results = [
         (s.name, "成功" if s.ok else "失敗", s.reason or "—", f"{s.retries} 回") for s in sources
     ]
-    table = _table(("情報源", "結果", "理由", "再試行"), results, plain_text)
+    table = (
+        _table(("情報源", "結果", "理由", "再試行"), results, plain_text)
+        if results
+        else "取得結果を読めなかった。"
+    )
     details = _details("情報源ごとの取得結果", table)
     body = [_overview(rows), _investigation(investigation), details, _footer(FOOTER_ERROR)]
     return Report(title, "\n\n".join(body) + "\n", labels)

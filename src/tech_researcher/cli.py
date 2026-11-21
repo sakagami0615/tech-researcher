@@ -37,9 +37,10 @@ from tech_researcher.agent.invoke import split_models
 from tech_researcher.config import Config, ConfigError, load_config
 from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.runs import (
+    CATEGORY,
     STAGES,
+    complete_closed_run,
     finish_run,
-    record_investigation,
     record_model,
     start_run,
 )
@@ -52,7 +53,6 @@ from tech_researcher.stages.daily import run_verify, write_daily_input
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
-_CATEGORY = re.compile(r"[A-Za-z0-9_]{1,64}")
 _TARGETS = {"daily": daily_target, "weekly": weekly_target}
 
 
@@ -173,26 +173,28 @@ def _finish(conn: sqlite3.Connection, run_id: str, category: str | None) -> None
 def _finish_stage(args: argparse.Namespace, files: RunFiles, log: RunLog) -> dict:
     """本番の失敗した実行（② 以降の失敗、不合格、公開停止）を runs で閉じる。
 
-    すでに閉じた実行（① の worker が閉じたもの）は、④ の出力だけを足して終わりの値を変えない。
     統括スクリプトが失敗の分岐の終わりに呼ぶ。④ の調査結果（実行のフォルダの
     investigation.json。検査を通ったもの）があれば investigation_json に入れる。② が失敗した
-    ときに結果の JSON に出ていたモデルも記録する。同じ実行の中でやり直したときは同じ行を上書きする。
+    ときに結果の JSON に出ていたモデルも記録する。まだ閉じていない（running の）実行だけを閉じる。
+    すでに閉じた実行（① の worker が閉じたもの）は、状態・終了時刻・分類を変えず、再試行回数と
+    ④ の出力だけを補う。開始の行がない実行（① が開始の前に止まった）は何もしない。
     """
+    with closing(open_db(files.db)) as conn:
+        row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (files.run_id,)).fetchone()
+    if row is None:
+        return {"status": "not_started"}
     text = None
     path = files.dir / INVESTIGATION
     if path.is_file():
         text = path.read_text(encoding="utf-8")
         if not isinstance(json.loads(text), dict):
             raise ValueError("investigation.json が JSON のオブジェクトでない")
-    with closing(open_db(files.db)) as conn:
-        row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (files.run_id,)).fetchone()
-        if row is None:  # 開始の行がない（① が start_run の前に止まった）。閉じるものがない
-            return {"status": "not_started"}
-        if row[0] != "running":
-            # ① の worker がすでに閉じた実行（取得の全失敗・① の例外）は、終わりの値を上書きしない
-            if text is not None:
-                record_investigation(conn, files.run_id, text)
-            return {"status": row[0]}
+    if row[0] != "running":
+        with closing(open_db(files.db)) as conn:
+            complete_closed_run(
+                conn, files.run_id, retry_count=args.retry_count, investigation_json=text
+            )
+        return {"status": row[0]}
     if args.model is not None:
         _record_model(files, args.model, log)
     with closing(open_db(files.db)) as conn:
@@ -261,7 +263,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _category(value: str) -> str:
-    if not _CATEGORY.fullmatch(value):  # ログと DB にコードの分類以外を入れない
+    if not CATEGORY.fullmatch(value):  # ログと DB にコードの分類以外を入れない
         raise argparse.ArgumentTypeError(f"分類の名前の形が違う: {value!r}")
     return value
 

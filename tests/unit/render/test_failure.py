@@ -345,3 +345,12 @@ def test_naive_run_at_is_refused():
     odd = datetime(2026, 10, 24, 6, 0, tzinfo=NoOffset())
     with pytest.raises(ValueError):
         run_error_report(DAILY, RUN, odd, "collect", "x", (0, 1), [], None)
+
+
+def test_run_error_without_fetch_results_does_not_show_an_empty_table():
+    """取得結果を読めなかったとき、見出しだけの表を出さずに1行で伝える。"""
+    report = run_error_report(DAILY, RUN, RUN_AT, "collect", "x", (0, 2), [], INV)
+    assert "<summary>情報源ごとの取得結果</summary>\n\n取得結果を読めなかった。\n\n</details>" in (
+        report.body
+    )
+    assert "| 情報源 |" not in report.body

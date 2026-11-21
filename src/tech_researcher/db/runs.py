@@ -7,6 +7,7 @@ runs は実行ごとに1行足し、同じ実行の中では同じ行を更新�
 """
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -19,6 +20,8 @@ from tech_researcher.runfiles import DRY_RUN_PREFIX, OBSERVATION_PREFIX
 # running は開始時に書く。observed は D-13 の観測（① だけの実行。実行 ID の先頭は obs-）
 FINISHED_STATUSES = frozenset({"succeeded", "rejected", "failed", "observed"})
 STAGES = LOG_STAGES - {"job"}  # failed_stage にする段階（D-04 の ① 〜 ⑤）
+# runs の error_category・不合格の検査名など、コードが決める分類の名前の形
+CATEGORY = re.compile(r"[A-Za-z0-9_]{1,64}")
 FETCH_STATUSES = frozenset({"ok", "no_results", "failed", "skipped"})
 
 
@@ -112,12 +115,22 @@ def finish_run(
         raise LookupError(f"runs に開始の記録がない: {run_id}")
 
 
-def record_investigation(conn: sqlite3.Connection, run_id: str, investigation_json: str) -> None:
-    """④ の出力（検査を通ったもの）だけを記録する。すでに閉じた実行（finish_run）の終わりの値は
-    変えない。④ の出力は統括スクリプトが秘匿情報の検査を通したもの。"""
+def complete_closed_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    retry_count: int | None = None,
+    investigation_json: str | None = None,
+) -> None:
+    """すでに閉じた実行（① の worker が閉じたもの）に、再試行回数と ④ の出力を補う。
+
+    状態・終了時刻・段階・分類は変えない。すでにある再試行回数は残し、None の値は書かない。
+    ④ の出力は統括スクリプトが秘匿情報の検査を通したもの。"""
     check_writable_run_id(run_id)
     cursor = conn.execute(
-        "UPDATE runs SET investigation_json = ? WHERE run_id = ?", (investigation_json, run_id)
+        "UPDATE runs SET retry_count = COALESCE(retry_count, ?),"
+        " investigation_json = COALESCE(?, investigation_json) WHERE run_id = ?",
+        (retry_count, investigation_json, run_id),
     )
     if cursor.rowcount != 1:
         raise LookupError(f"runs に開始の記録がない: {run_id}")

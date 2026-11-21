@@ -216,7 +216,7 @@ def test_verify_failure_is_logged_as_verify(env, capsys):
     )
 
 
-# finish・record-investigation：本番の失敗した実行を runs で閉じる（failures.py が呼ぶ）
+# finish：本番の失敗した実行を runs で閉じる（failures.py が呼ぶ）
 
 PROD = "20261024-060000-abcd"
 INVESTIGATION = {"event": "処理が失敗した", "confidence": "high"}
@@ -296,8 +296,10 @@ def test_finish_keeps_the_values_of_a_run_already_closed_and_adds_investigation(
             retry_count=2,
         )
     args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "analyze"]
-    assert cli.main([*args, "--error-category", "agent_failed", "--model", "claude-x"], env) == 0
+    args += ["--error-category", "agent_failed", "--retry-count", "2", "--model", "claude-x"]
+    assert cli.main(args, env) == 0
     status, stage, category, retries, text, _, _ = run_row(data)
+    # 状態・分類は変えず、再試行回数（① の worker は書かない）と ④ の出力を補う
     assert (status, stage, category, retries) == ("failed", "collect", "all_sources_failed", 2)
     assert json.loads(text) == INVESTIGATION
 
@@ -306,4 +308,13 @@ def test_finish_without_a_start_row_does_nothing(env, capsys):
     (Path(env["TR_DATA_DIR"]) / "work" / PROD).mkdir(parents=True)
     args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
     assert cli.main(args, env) == 0  # ① が開始の行を書く前に止まった実行。閉じるものがない
+    assert json.loads(capsys.readouterr().out)["status"] == "not_started"
+
+
+def test_finish_for_a_run_not_started_does_not_read_the_investigation(env, capsys):
+    run_dir = Path(env["TR_DATA_DIR"]) / "work" / PROD
+    run_dir.mkdir(parents=True)
+    (run_dir / "investigation.json").write_text("{broken")  # 開始の行がなければ読まない
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
+    assert cli.main(args, env) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "not_started"
