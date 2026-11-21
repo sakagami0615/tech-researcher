@@ -191,7 +191,7 @@ def test_strict_types_and_foreign_keys(tmp_path):
     with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
         conn.execute(
             "INSERT INTO source_fetches VALUES ('20261024-060000-abcd', 'rss:a', 'ok', NULL,"
-            " 1, 0, 0, '2026-10-23T21:00:00Z')"
+            " 1, 0, 0, '2026-10-23T21:00:00Z', NULL)"
         )
     with pytest.raises(sqlite3.IntegrityError, match="cannot store"):
         conn.execute(

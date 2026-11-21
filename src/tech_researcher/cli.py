@@ -9,7 +9,8 @@
 実行（実行 ID の先頭が obs-。日次の ① だけ）は、それ以外なら observed で閉じる。通常の日次・週次の
 ② 以降の終わりは、その失敗の分岐と ⑤ を実装する Issue で書く。③ は、本番では統括スクリプトから
 渡された ② のモデルの名前を runs の model に記録し、前回の本番から変わっていればログで知らせる
-（structure.md 3.3。ドライランは記録せず比べない）。
+（structure.md 3.3。ドライランは記録せず比べない）。本番の ③ は、結果（レポート案・掲載と除外の
+項目・検証結果）を reports・report_entries に保存する（ドライランは書かない）。
 標準出力には、コードが作る要約（件数・情報源の ID・結果の種別）だけを JSON で出す。外部由来の文と
 例外の中身は出さず、ログ（秘匿情報をマスクする）にだけ残す（structure.md 3.2・7.3）。
 相対パスは作業ディレクトリ（ホストではリポジトリ、worker では /app）から解く。
@@ -91,9 +92,12 @@ def _run(
     scanner: SecretScanner,
 ) -> dict:
     if args.stage == "verify":
-        if args.model is not None and not files.dry_run:
+        if files.dry_run:
+            return run_verify(config, target, files.run_id, files.dir, log, scanner)
+        if args.model is not None:
             _record_model(files, args.model, log)
-        return run_verify(config, target, files.run_id, files.dir, log, scanner)
+        with closing(open_db(files.db)) as db:  # 本番は結果を DB に保存する
+            return run_verify(config, target, files.run_id, files.dir, log, scanner, db)
     conn = open_readonly(files.db) if files.dry_run else open_db(files.db)
 
     def daily_input() -> None:

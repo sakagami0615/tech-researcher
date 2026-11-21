@@ -94,7 +94,31 @@ def source_fetch(result: SourceResult, fetched_at: datetime, in_period: int) -> 
     else:
         status, category = ("ok" if count else "no_results"), None
     kept = min(in_period, count)
-    return SourceFetch(result.source_id, status, result.attempts, count, kept, fetched_at, category)
+    parts = tuple((p.name, p.error_category) for p in result.failed_parts)
+    return SourceFetch(
+        result.source_id, status, result.attempts, count, kept, fetched_at, category, parts
+    )
+
+
+def unavailable_sources(fetches: Iterable[SourceFetch]) -> list[dict]:
+    """レポート末尾の「取得できなかった情報源」の元。取得結果（source_fetches の行）から作る。
+
+    判定は status が failed かどうかと、取れなかった部分（failed_parts）の有無だけで行う。
+    ok の行の error_category は測り残しの印（github_repos）なので見ない。内訳のある情報源は、
+    部分ごとに出し、情報源の行を重ねない。
+    """
+    found = []
+    for f in fetches:
+        if f.failed_parts:
+            found.append(
+                {
+                    "source_id": f.source_id,
+                    "parts": [{"name": n, "category": c} for n, c in f.failed_parts],
+                }
+            )
+        elif f.status == "failed":
+            found.append({"source_id": f.source_id, "category": f.error_category})
+    return found
 
 
 def in_period_counts(items: Iterable[Item]) -> Counter[str]:

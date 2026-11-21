@@ -198,7 +198,7 @@ def test_success_fixture_parses_and_passes_checks():
     check_schema(result.output)  # 製品のスキーマ（--json-schema に渡すもの）
     entries = parse_daily_output(result.output)
     items = {f"d{n}": item for n, item in enumerate(aggregate(records()), start=1)}
-    kept, excluded = _check_entries(entries, data, items, QuoteLimits())
+    kept, excluded, _ = _check_entries(entries, data, items, QuoteLimits())
     assert excluded == []
     assert len(kept) == len(entries) == 3
     # スキルの決まりどおり、長さは目安（2倍ではなく目安そのもの）に収まり、一次情報は片方だけ

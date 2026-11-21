@@ -9,17 +9,23 @@
 - 不合格・実行エラーの本文（とその秘匿情報の検査）は #38 で足す。いまは不合格のとき issue.md・
   secret-scan.json を書かない
 
-項目の ID は、DB への保存（items）を実装するまで、本番も仮の ID（d1, d2, …）にする。
-取得できなかった情報源の本文への記載は、③ の保存と全情報源の接続（#40）または部分失敗の分岐
-（#41）で足す（① の要約にはすでにある）。急上昇を判定しなかった情報源は、① が書く unjudged.json
-から本文のヘッダに入れる（report-templates.md 1.6）。
+- 項目の ID は ① が item-ids.json に書く（本番は items の `i{主キー}`、ドライランは DB にある項目の
+  ID か仮の ID。data-model.md 2.6）。② の入力と ③ の照合は同じ ID を使う
+- 取得できなかった情報源は、① が書く unavailable.json から本文の末尾に入れる。急上昇を判定しなかった
+  情報源は、unjudged.json から本文のヘッダに入れる（report-templates.md 1.4・1.6）
+- 本番は、結果（合格・不合格・秘匿情報の検出）を reports・report_entries に保存する（除外した
+  項目も、理由つきで残す。D-18、data-model.md 3.4）。同じ実行の ③ のやり直しは置き換える。
+  ドライランは DB に書かない（D-22）
 """
 
 import json
-from collections.abc import Iterator, Mapping
+import sqlite3
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from tech_researcher.agent.daily import (
+    CATEGORIES,
     DailyEntry,
     InputItem,
     build_daily_input,
@@ -28,12 +34,18 @@ from tech_researcher.agent.daily import (
 from tech_researcher.collect.records import Item
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config, QuoteLimits
-from tech_researcher.db.readonly import tentative_ids
+from tech_researcher.db.reports import EntryRow, ReportRow, save_report
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
 from tech_researcher.render.common import Report
 from tech_researcher.render.daily import render_daily
-from tech_researcher.stages.collect import COLLECTED, load_collected, unjudged_notes
+from tech_researcher.stages.collect import (
+    COLLECTED,
+    load_collected,
+    load_item_ids,
+    unavailable_notes,
+    unjudged_notes,
+)
 from tech_researcher.validate.ids import Excluded, check_daily_duplicates, check_daily_ids
 from tech_researcher.validate.period_event import check_period_events
 from tech_researcher.validate.quote import check_daily_quotes, meta_terms_by_id
@@ -67,11 +79,14 @@ def run_verify(
     run_dir: Path,
     log: RunLog,
     scanner: SecretScanner,
+    db: sqlite3.Connection | None = None,
 ) -> dict:
     """agent-output.json を検査し、通った項目から本文を作る。結果と件数を返す。
 
     validation.json（合否と除外の理由）と secret-scan.json（検出の有無と種類）を書く。
     合格して秘匿情報もなければ、作るはずの Issue を issue.md に書く。
+    db は本番の接続で、渡されたら結果を reports・report_entries に保存する（ドライランは渡さない）。
+    保存できなければ例外にし、ファイルは書かない。
     """
     log.write("verify", "start")
     items = _numbered(run_dir)
@@ -84,6 +99,17 @@ def run_verify(
     texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
     raw_kinds = sorted({f.kind for text in texts for f in scanner.find(text)})
     if raw_kinds:
+        # 原文に秘匿情報があるので、AI の出力も本文も保存しない
+        _save(
+            db,
+            run_id,
+            target,
+            len(items),
+            (),
+            (),
+            {"secret_detected": "failed"},
+            ["secret_detected"],
+        )
         _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
         log.write(
             "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(raw_kinds)
@@ -94,8 +120,20 @@ def run_verify(
     except ValueError as e:
         # D6(a)：スキーマに合わない出力全体が不合格（US-E7-02）。不合格の後に再生成はしない
         log.write("verify", "failure", error_category="invalid_output", detail=str(e))
+        _save(
+            db,
+            run_id,
+            target,
+            len(items),
+            (),
+            (),
+            {"invalid_output": "failed"},
+            ["invalid_output"],
+            output=output,
+            scanner=scanner,
+        )
         return _finish(run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[])
-    kept, excluded = _check_entries(entries, data, items, config.quote)
+    kept, excluded, verification = _check_entries(entries, data, items, config.quote)
     for category, x in excluded:
         log.write("verify", "excluded", error_category=category, detail=x.reason)
     # ID と理由には AI が返した文字列が入るので、マスクしてから残す（ログは RunLog がマスクする）
@@ -105,18 +143,53 @@ def run_verify(
     ]
     if entries and not kept:  # 除外で0件（US-E7-02）。AI が0件を選んだときはレポートにする
         log.write("verify", "failure", error_category="all_excluded")
+        _save(
+            db,
+            run_id,
+            target,
+            len(items),
+            entries,
+            excluded,
+            verification,
+            ["all_excluded"],
+            output=output,
+            scanner=scanner,
+        )
         return _finish(run_dir, log, REJECTED, "all_excluded", entries=0, excluded=reasons)
     unjudged = unjudged_notes(run_dir, config)
     report = render_daily(
-        target, run_id, kept, items, source_names(config), collected=len(items), unjudged=unjudged
+        target,
+        run_id,
+        kept,
+        items,
+        source_names(config),
+        collected=len(items),
+        unavailable=unavailable_notes(run_dir, config),
+        unjudged=unjudged,
     )
     kinds = sorted({f.kind for f in scanner.find(_issue_text(report))})
+    verification["secret_detected"] = "failed" if kinds else "passed"
     _write(run_dir / SECRET_SCAN, json.dumps({"detected": bool(kinds), "kinds": kinds}))
     if kinds:
         log.write(
             "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(kinds)
         )
+        _save(db, run_id, target, len(items), (), excluded, verification, ["secret_detected"])
         return _finish(run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons)
+    _save(
+        db,
+        run_id,
+        target,
+        len(items),
+        entries,
+        excluded,
+        verification,
+        [],
+        output=output,
+        scanner=scanner,
+        body=report.body,
+        kept=kept,
+    )
     _write(run_dir / ISSUE, _issue_text(report))
     return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons)
 
@@ -126,13 +199,16 @@ def _check_entries(
     data: dict,
     items: Mapping[str, Item],
     quote: QuoteLimits,
-) -> tuple[list[DailyEntry], list[tuple[str, Excluded]]]:
+) -> tuple[list[DailyEntry], list[tuple[str, Excluded]], dict[str, str]]:
     """項目単位の検査を順に行う。違反した項目は除外し、検査の分類と一緒に返す。
+
+    3つ目は検査ごとの合否（passed・failed。reports の verification）。
 
     ID の存在（D6(b)）を先に確かめる。後ろの検査は ID から値を引くので、存在する ID だけを渡す。
     ID の重複は最後に判定する。
     """
     excluded: list[tuple[str, Excluded]] = []
+    verification = {"invalid_output": "passed"}  # スキーマ（D6(a)）は、ここに来る前に通っている
     for category, check in (
         ("invalid_id", lambda e: check_daily_ids(e, data)),
         ("invalid_source", lambda e: check_daily_sources(e, items)),
@@ -146,7 +222,8 @@ def _check_entries(
     ):
         entries, rejected = check(entries)
         excluded += [(category, x) for x in rejected]
-    return entries, excluded
+        verification[category] = "failed" if rejected else "passed"
+    return entries, excluded, verification
 
 
 def _strings(value: object) -> Iterator[str]:
@@ -163,14 +240,113 @@ def _strings(value: object) -> Iterator[str]:
 
 
 def _numbered(run_dir: Path) -> dict[str, Item]:
-    """collected.json の項目に、並びの順で ID を付ける（② の入力と ③ で同じ ID になる）。"""
-    # tentative_ids は終わりのない並びなので、項目の数で止める
-    return dict(zip(tentative_ids(), load_collected(run_dir / COLLECTED), strict=False))
+    """collected.json の項目に、① が書いた ID（item-ids.json）を付ける（② の入力と ③ で同じ）。"""
+    items = load_collected(run_dir / COLLECTED)
+    ids = load_item_ids(run_dir)
+    if len(ids) != len(items):
+        raise ValueError(f"項目の数 {len(items)} と ID の数 {len(ids)} が違う")
+    return dict(zip(ids, items, strict=True))
 
 
 def _input(config: Config, target: Target, items: Mapping[str, Item]) -> dict:
     inputs = [InputItem(item_id, item) for item_id, item in items.items()]
     return build_daily_input(target, inputs, source_names(config))
+
+
+def _save(
+    db: sqlite3.Connection | None,
+    run_id: str,
+    target: Target,
+    collected: int,
+    entries: Sequence[DailyEntry],
+    excluded: Sequence[tuple[str, Excluded]],
+    verification: Mapping[str, str],
+    rejected_checks: Sequence[str],
+    *,
+    output: object = None,
+    scanner: SecretScanner | None = None,
+    body: str | None = None,
+    kept: Sequence[DailyEntry] = (),
+) -> None:
+    """③ の結果を reports・report_entries に保存する。db がなければ（ドライラン）何もしない。
+
+    項目は AI の出力の順に残す。掲載した項目には、本文の通し番号（display_no。カテゴリの固定順、
+    同じカテゴリでは rank 順）を付ける。AI が返した文は、マスクしてから保存する。
+    秘匿情報を検出した実行は、AI の出力も本文も保存しない（output・body を渡さない）。
+    """
+    if db is None:
+        return
+    reasons = {id(x.entry): (category, x.reason) for category, x in excluded}
+    shown = sorted(kept, key=lambda e: (CATEGORIES.index(e.category), e.rank))
+    numbers = {id(e): n for n, e in enumerate(shown, start=1)}
+    rows = []
+    for entry in entries:
+        found = reasons.get(id(entry))
+        rows.append(
+            EntryRow(
+                section="daily_item",
+                status="published" if found is None else "excluded",
+                item_ids=tuple(entry.item_ids),
+                payload=_mask(_payload(entry, found), scanner),
+                exclusion_reasons=() if found is None else (found[0],),
+                display_no=numbers.get(id(entry)),
+            )
+        )
+    by_reason = Counter(category for category, _ in excluded)
+    counts = {
+        "collected": collected,
+        "ai_output": len(entries),
+        "excluded": len(excluded),
+        "excluded_by_reason": dict(by_reason),
+        "published": len(kept),
+    }
+    ai_output = None if output is None else json.dumps(_mask(output, scanner), ensure_ascii=False)
+    save_report(
+        db,
+        run_id,
+        ReportRow(
+            cadence=target.cadence,
+            target=target.key,
+            status="rejected" if rejected_checks else "passed",
+            counts=counts,
+            verification=dict(verification),
+            entries=rows,
+            rejected_checks=tuple(rejected_checks),
+            ai_output=ai_output,
+            body_markdown=body,
+        ),
+    )
+
+
+def _payload(entry: DailyEntry, excluded: tuple[str, str] | None) -> dict:
+    """AI の文章の部品と選んだ値（除外した項目には、除外の詳細も）。"""
+    payload = {
+        "category": entry.category,
+        "rank": entry.rank,
+        "depth": entry.depth,
+        "headline": entry.headline,
+        "points": list(entry.points),
+        "importance": entry.importance,
+        "period_event": entry.period_event,
+        "primary_item_id": entry.primary_item_id,
+        "primary_link_id": entry.primary_link_id,
+    }
+    if excluded is not None:
+        payload["exclusion_detail"] = excluded[1]
+    return payload
+
+
+def _mask(value, scanner: SecretScanner | None):
+    """JSON の値の、すべての文字列（と辞書のキー）をマスクする。"""
+    if scanner is None:
+        return value
+    if isinstance(value, str):
+        return scanner.mask(value)
+    if isinstance(value, dict):
+        return {scanner.mask(str(k)): _mask(v, scanner) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask(v, scanner) for v in value]
+    return value
 
 
 def _finish(

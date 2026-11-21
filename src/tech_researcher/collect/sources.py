@@ -18,6 +18,7 @@ def source_names(config: Config) -> dict[str, str]:
         ("github_search", config.github_search),
         (QIITA_SOURCE_ID, config.qiita),
         (GITHUB_REPOS_SOURCE_ID, config.github_repos),
+        ("github_releases", config.github_releases),
     ):
         if source is not None:
             names[source_id] = source.display_name

@@ -36,6 +36,7 @@ CONFIG = replace(
     hackernews=None,
     github_search=None,
     github_repos=None,
+    github_releases=None,
 )
 TARGET = daily_target(date(2026, 10, 24), 1)  # 2026-10-23 0:00〜10-24 0:00（JST）
 FETCHED = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)

@@ -203,6 +203,8 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "validation.json",
         "secret-scan.json",
         "unjudged.json",
+        "unavailable.json",
+        "item-ids.json",
         "issue.md",
         "log.jsonl",
     }
@@ -867,3 +869,87 @@ def test_too_large_input_file_is_not_read(host, monkeypatch):
     code, summary, _ = host.run("--dry-run")
     assert (code, summary["error_category"]) == (1, "input_too_large")
     assert host.calls("agent") == []
+
+
+def saved_report(host):
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        report = conn.execute(
+            "SELECT run_id, status, rejected_checks, counts_json, verification_json,"
+            " ai_output_json, body_markdown FROM reports"
+        ).fetchall()
+        entries = conn.execute(
+            "SELECT entry_no, status, exclusion_reasons, display_no, item_ids_json, payload_json"
+            " FROM report_entries ORDER BY entry_no"
+        ).fetchall()
+        items = conn.execute("SELECT item_id FROM items ORDER BY item_id").fetchall()
+    return report, entries, items
+
+
+def test_production_saves_the_report_with_item_ids_from_items(host):
+    """② ③ の項目の ID は items の主キー（i…）。結果は reports・report_entries に残る。"""
+    host.ai = lambda data: {"items": [entry(data["items"][0]["id"], 1), entry("i99999", 2)]}
+    code, summary, _ = host.run()
+
+    assert code == 1  # ⑤ がまだない
+    [data] = host.calls("agent")
+    assert [i["id"] for i in data["items"]] == ["i1", "i2"]
+    [row], entries, items = saved_report(host)
+    run_id, status, rejected, counts, verification, ai_output, body = row
+    assert (run_id, status, json.loads(rejected)) == (summary["run_id"], "passed", [])
+    assert json.loads(counts) == {
+        "collected": 2,
+        "ai_output": 2,
+        "excluded": 1,
+        "excluded_by_reason": {"invalid_id": 1},
+        "published": 1,
+    }
+    assert json.loads(verification)["invalid_id"] == "failed"
+    assert json.loads(verification)["secret_detected"] == "passed"
+    assert "見出し1" in ai_output and "> **掲載**：1 件" in body
+    assert [(e[0], e[1], json.loads(e[2]), e[3], json.loads(e[4])) for e in entries] == [
+        (1, "published", [], 1, ["i1"]),
+        (2, "excluded", ["invalid_id"], None, ["i99999"]),
+    ]
+    assert len(items) == 2
+
+
+def test_dry_run_item_ids_are_tentative_without_a_db_and_nothing_is_saved(host):
+    host.run("--dry-run")
+    [data] = host.calls("agent")
+    assert [i["id"] for i in data["items"]] == ["d1", "d2"]
+    assert not (host.data / "db").exists()
+
+
+def test_verify_rerun_in_the_same_run_replaces_the_saved_report(host, monkeypatch):
+    """同じ実行の ③ のやり直しは、レポートと項目を置き換える（重複しない）。"""
+    original = cli.main
+
+    def twice(args, environ):
+        code = original(args, environ)
+        if args[0] == "verify":  # 同じ入力で ③ をもう一度動かす
+            code = original(args, environ)
+        return code
+
+    monkeypatch.setattr(cli, "main", twice)
+    code, _, _ = host.run()
+    assert code == 1
+    [row], entries, items = saved_report(host)
+    assert row[1] == "passed" and [e[0] for e in entries] == [1, 2]
+    assert [i[0] for i in items] == [1, 2]
+
+
+def test_rejected_output_is_saved_with_the_failed_check(host):
+    host.ai = lambda data: {"items": "bad"}
+    host.run()
+    [row], entries, _ = saved_report(host)
+    assert (row[1], json.loads(row[2]), json.loads(row[4])) == (
+        "rejected",
+        ["invalid_output"],
+        {"invalid_output": "failed"},
+    )
+    assert row[6] is None and entries == []
+
+
+def test_work_files_are_removed_after_a_production_run(host):
+    host.run()
+    assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]

@@ -8,7 +8,9 @@
 集める順：RSS・Atom → Qiita → last30days-skill（HN・GitHub Search）→ GitHub の候補集め（Search）
 → Star 数の測定（GraphQL）。last30days-skill と候補集めはどちらも同じ収集用トークンで GitHub の
 Search を使うので、並行させずに順に動かす（候補集めの言及の経路は、それより前の情報源のレコードを
-使う）。GitHub Releases の接続は #40 で足す。
+使う）。GitHub Releases は最後に集める（追跡先のリリースを、候補集めの「言及」にしないため）。
+取れなかった追跡先は source_fetches の failed_parts_json に残し、取れなかった情報源と一緒に
+unavailable.json に書く（③ が末尾の「取得できなかった情報源」にする）。
 Star 数の測定の後に、急上昇・新規のリポジトリを判定し（github_spikes）、載せる分の README を取る。
 まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
 に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
@@ -16,6 +18,9 @@ Star 数の測定の後に、急上昇・新規のリポジトリを判定し（
 情報源の ID だけを入れる（structure.md 3.2）。
 前日の記録がなく判定しなかった急上昇は unjudged.json に書き、③ がヘッダの定型文にする。
 collected.json は load_collected で収集項目に戻せる（② の入力の用意と ③ の照合に使う）。
+日次は、collected.json の項目と同じ順の ID を item-ids.json に書く。本番は items の主キーから
+作る ID（i48213）、ドライランは DB にすでにある項目はその ID、新しい項目は仮の ID（d1, d2, …。
+data-model.md 2.6）にする。
 """
 
 import json
@@ -28,7 +33,8 @@ from pathlib import Path
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.github_api import GitHubClient, GitHubError, collect_token
 from tech_researcher.collect.github_candidates import collect_candidates
-from tech_researcher.collect.github_releases import fetch_readmes, with_readme
+from tech_researcher.collect.github_releases import SOURCE_ID as RELEASES_SOURCE_ID
+from tech_researcher.collect.github_releases import collect_releases, fetch_readmes, with_readme
 from tech_researcher.collect.github_spikes import judge_star_spikes, repo_url
 from tech_researcher.collect.github_stars import measure_stars
 from tech_researcher.collect.holds import hold_reasons, strip_featured
@@ -47,21 +53,27 @@ from tech_researcher.collect.records import (
 )
 from tech_researcher.collect.rss import collect_feed, feed_source_id
 from tech_researcher.collect.sources import source_names
-from tech_researcher.config import Config, Feed, Limits, Qiita
+from tech_researcher.config import Config, Feed, GitHubReleases, Limits, Qiita
 from tech_researcher.db.history import featured_urls, shown_urls
+from tech_researcher.db.items import lookup_item_refs
+from tech_researcher.db.readonly import tentative_ids
 from tech_researcher.db.runs import fetch_incomplete, record_source_fetch
 from tech_researcher.db.star_snapshots import load_star_snapshot
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Period, Target
+from tech_researcher.render.common import fetch_reason
 from tech_researcher.stages.collect_store import (
     GITHUB_REPOS_SOURCE_ID,
     GitHubFetch,
     in_period_counts,
     save_collect,
     source_fetch,
+    unavailable_sources,
 )
 
 COLLECTED = "collected.json"
+ITEM_IDS = "item-ids.json"  # collected.json の項目と同じ順の ID（② の入力と ③ の照合で使う）
+UNAVAILABLE = "unavailable.json"  # 取得できなかった情報源と、取れなかった部分（末尾の表示の元）
 UNJUDGED = "unjudged.json"  # 前日の記録がなく判定しなかった急上昇（ヘッダの定型文の元。1.6）
 FEED_JUDGMENT = "人気型フィードへの初登場"
 STAR_JUDGMENT = "GitHub の Star の急増"
@@ -72,6 +84,7 @@ CollectFeed = Callable[[Feed, Limits], SourceResult]
 CollectQiita = Callable[[Qiita, Period, Limits], SourceResult]
 # （設定, 対象期間, 収集用トークン）→ 有効な情報源（hackernews・github_search）ごとの結果
 CollectLast30Days = Callable[[Config, Period, str | None], list[SourceResult]]
+CollectReleases = Callable[[GitHubReleases, Period, GitHubClient], SourceResult]
 
 
 def _last30days(config: Config, period: Period, token: str | None) -> list[SourceResult]:
@@ -85,6 +98,7 @@ class Collectors:
     feed: CollectFeed = collect_feed
     qiita: CollectQiita = collect_qiita
     last30days: CollectLast30Days = _last30days
+    releases: CollectReleases = collect_releases
     github: Callable[[str | None, Limits], GitHubClient] = GitHubClient
     token: Callable[[], str | None] = collect_token
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
@@ -169,7 +183,12 @@ def run_collect(
     # GitHub を使う情報源があるときだけ読む（使わないのに形の誤りで止めないように）
     uses_github = any(
         s is not None and s.enabled
-        for s in (config.hackernews, config.github_search, config.github_repos)
+        for s in (
+            config.hackernews,
+            config.github_search,
+            config.github_repos,
+            config.github_releases,
+        )
     )
     token = _token(collectors, log) if uses_github else None
     keep(*_collect_last30days(config, target, token, log, collectors))
@@ -178,6 +197,19 @@ def run_collect(
     if github is not None and write:
         assert db is not None
         record_source_fetch(db, log.run_id, github.fetch.to_fetch(github.at))
+    releases = config.github_releases
+    if releases is not None and releases.enabled:
+        keep(
+            _collect_one(
+                RELEASES_SOURCE_ID,
+                lambda: collectors.releases(
+                    releases, target.period, collectors.github(token, limits)
+                ),
+                log,
+                collectors,
+            )
+        )
+        results = [r for r, _ in fetched]
     popular = {feed_source_id(f) for f in feeds if f.kind == "popular"}
     judged = judge_feed_entries(results, popular, target, db, write=write)
     records = mark_thresholds(judged.records, config.attention_thresholds)
@@ -188,13 +220,17 @@ def run_collect(
     # すでに載せたリポジトリが別の出来事（リリースなど）で渡るときは、急上昇・新規の出来事と
     # 増分を外す（再び急上昇として載せないため。DB の観測には元の値を残す）
     items = [strip_featured(i) if i.url in featured else i for i in observed if i.url not in holds]
+    counts = in_period_counts(observed)
+    fetches = [source_fetch(r, at, counts[r.source_id]) for r, at in fetched]
+    if github is not None:
+        fetches.append(github.fetch.to_fetch(github.at, counts[GITHUB_REPOS_SOURCE_ID]))
+    refs: dict[str, str] = {}
     if write:
         assert db is not None
-        counts = in_period_counts(observed)
-        fetches = [source_fetch(r, at, counts[r.source_id]) for r, at in fetched]
-        if github is not None:
-            fetches.append(github.fetch.to_fetch(github.at, counts[GITHUB_REPOS_SOURCE_ID]))
-        save_collect(db, log.run_id, target, fetches, observed, holds)
+        saved = save_collect(db, log.run_id, target, fetches, observed, holds)
+        refs = dict(zip((i.url for i in observed), saved, strict=False))
+    elif db is not None and target.cadence == "daily":  # ドライラン：本番の実行が書いた項目の ID
+        refs = lookup_item_refs(db, target.cadence, target.key, (i.url for i in items))
     # 途中で止まっても壊れたファイルを残さないよう、一時ファイルに書いてから置き換える
     partial = run_dir / f"{COLLECTED}.partial"
     partial.write_text(
@@ -205,6 +241,8 @@ def run_collect(
     unjudged_star = github is not None and github.star_unjudged
     if target.cadence == "daily":
         _write_unjudged(run_dir, judged.unjudged, unjudged_star)
+        _write_json(run_dir / UNAVAILABLE, unavailable_sources(fetches))
+        _write_item_ids(run_dir, items, refs)
     log.write("collect", "end", count=len(items))
     failed = [r.source_id for r in results if r.error]
     sources = len(results)
@@ -235,10 +273,46 @@ def _history(db: sqlite3.Connection | None, target: Target) -> tuple[set[str], s
 
 
 def _write_unjudged(run_dir: Path, feeds: tuple[str, ...], star: bool) -> None:
-    text = json.dumps({"feed_sources": list(feeds), "github_stars": star})
-    partial = run_dir / f"{UNJUDGED}.partial"
-    partial.write_text(text, encoding="utf-8")
-    partial.replace(run_dir / UNJUDGED)
+    _write_json(run_dir / UNJUDGED, {"feed_sources": list(feeds), "github_stars": star})
+
+
+def _write_item_ids(run_dir: Path, items: list[Item], refs: dict[str, str]) -> None:
+    """collected.json と同じ順の ID。DB にない項目（ドライラン）は、仮の ID を順に付ける。"""
+    fresh = tentative_ids()
+    _write_json(run_dir / ITEM_IDS, [refs.get(i.url) or next(fresh) for i in items])
+
+
+def _write_json(path: Path, value: object) -> None:
+    # 途中で止まっても壊れたファイルを残さないよう、一時ファイルに書いてから置き換える
+    partial = path.with_name(f"{path.name}.partial")
+    partial.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    partial.replace(path)
+
+
+def load_item_ids(run_dir: Path) -> list[str]:
+    """item-ids.json（collected.json の項目と同じ順の ID）。"""
+    return json.loads((run_dir / ITEM_IDS).read_text(encoding="utf-8"))
+
+
+def unavailable_notes(run_dir: Path, config: Config) -> list[tuple[str, str]]:
+    """末尾の「取得できなかった情報源」の元：（表示名、理由）。なければ空。
+
+    内訳のある情報源は部分ごとに「情報源名（取れなかった部分）」で出す（report-templates.md 1.4）。
+    """
+    path = run_dir / UNAVAILABLE
+    if not path.is_file():
+        return []
+    names = source_names(config)
+    notes: list[tuple[str, str]] = []
+    for entry in json.loads(path.read_text(encoding="utf-8")):
+        name = names.get(entry["source_id"], entry["source_id"])
+        if "parts" in entry:
+            notes += [
+                (f"{name}（{p['name']}）", fetch_reason(p["category"])) for p in entry["parts"]
+            ]
+        else:
+            notes.append((name, fetch_reason(entry["category"])))
+    return notes
 
 
 def unjudged_notes(run_dir: Path, config: Config) -> list[tuple[str, list[str]]]:
@@ -287,6 +361,10 @@ def _unexpected(source_id: str, e: Exception, log: RunLog) -> SourceResult:
 
 def _log_result(result: SourceResult, log: RunLog) -> None:
     category = (result.error_category or "fetch_failed") if result.error else None
+    detail = result.error
+    if detail is None and result.failed_parts:  # 一部だけ取れなかった（名前は設定の値）
+        parts = "、".join(f"{p.name}（{p.error_category}）" for p in result.failed_parts)
+        detail = f"取れなかった追跡先：{parts}"
     log.write(
         "collect",
         "source_result",
@@ -294,7 +372,7 @@ def _log_result(result: SourceResult, log: RunLog) -> None:
         error_category=category,
         count=len(result.records),
         attempt=result.attempts,
-        detail=result.error,
+        detail=detail,
     )
 
 
