@@ -881,6 +881,46 @@ def test_rerun_with_a_failed_search_still_judges_from_the_recorded_day(tmp_path)
     conn.close()
 
 
+def test_failed_rerun_judged_from_records_does_not_mark_the_day_partial(tmp_path):
+    """初回は測り切り、2回目は Search が失敗。3回目に新しい候補を判定に入れない。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    previous_day(conn, hot=["hot/repo"], featured=[])
+    stars = {"hot/repo": 1300, "late/new": 900}
+    created = {"hot/repo": OLD_CREATED, "late/new": "2026-10-20T00:00:00Z"}
+    first_github = FakeGitHub([], search_repos=("hot/repo",), stars=stars, created=created)
+    run_day(conn, tmp_path, PROD, first_github)
+    first = github_urls(tmp_path)
+    second = FakeGitHub([], search_error=401, stars=stars, created=created)
+    run_day(conn, tmp_path, "20261024-070000-beef", second)
+    assert conn.execute(
+        "SELECT error_category FROM source_fetches WHERE run_id = '20261024-070000-beef'"
+        " AND source_id = 'github_repos'"
+    ).fetchone() == (None,)  # 記録だけで判定した。印は付けない
+    third = FakeGitHub([], search_repos=("hot/repo", "late/new"), stars=stars, created=created)
+    run_day(conn, tmp_path, "20261024-080000-cafe", third)
+    assert github_urls(tmp_path) == first
+    assert "https://github.com/late/new" not in first
+    conn.close()
+
+
+def test_partial_mark_is_written_before_the_readmes_are_fetched(tmp_path, monkeypatch):
+    """README の取得中に止められても、測り残しの印が残る。"""
+    conn = open_db(tmp_path / "tech-researcher.sqlite3")
+    previous_day(conn, hot=["hot/repo"], featured=[])
+
+    def stop(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("tech_researcher.stages.collect._with_readmes", stop)
+    github = FakeGitHub([], search_repos=("hot/repo",), graphql_fail={"mentioned/repo"})
+    with pytest.raises(KeyboardInterrupt):
+        run_day(conn, tmp_path, PROD, github)
+    assert conn.execute(
+        "SELECT status, error_category FROM source_fetches WHERE source_id = 'github_repos'"
+    ).fetchall() == [("ok", "partial")]
+    conn.close()
+
+
 def test_featured_repo_with_another_event_is_passed_without_the_spike(tmp_path):
     """載せ済みのリポジトリが別の出来事で渡るときは、急上昇の出来事と増分を外す。"""
     conn = open_db(tmp_path / "tech-researcher.sqlite3")

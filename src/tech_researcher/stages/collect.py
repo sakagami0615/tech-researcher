@@ -369,17 +369,29 @@ def _collect_github(
             rows = stored if stored and not resumed else {**stored, **_by_repo(stars.snapshots)}
             judged = replace(stars, snapshots=tuple(rows[r] for r in sorted(rows)))
             spikes = judge_star_spikes(settings, target, judged, previous, featured)
-            records, readme_calls = _with_readmes(spikes.records, client, featured, log)
             star_unjudged = spikes.star_unjudged
             # 最初の失敗は Search を先に見る
             failure = found if found.error is not None else stars
-            github = GitHubFetch(
-                len(judged.snapshots),
-                found.search_attempts + stars.calls + readme_calls,
-                failure.error,
-                failure.error_category,
-                partial=failure.error is not None or bool(stars.unmeasured),
+            # 印（測り残し）は、この対象日の判定に測り残しがあるかだけを表す。記録だけで判定した
+            # 再実行（resumed でない）は、新しい候補や Search の失敗があっても印を付けない
+            partial = not (stored and not resumed) and (
+                failure.error is not None or bool(stars.unmeasured)
             )
+
+            def fetch(readme_calls: int) -> GitHubFetch:
+                return GitHubFetch(
+                    len(judged.snapshots),
+                    found.search_attempts + stars.calls + readme_calls,
+                    failure.error,
+                    failure.error_category,
+                    partial=partial,
+                )
+
+            if write:  # README の取得中に止められても、測り残しの印を残す
+                assert db is not None
+                record_source_fetch(db, log.run_id, fetch(0).to_fetch(collectors.now()))
+            records, readme_calls = _with_readmes(spikes.records, client, featured, log)
+            github = fetch(readme_calls)
         except Exception as e:
             name = type(e).__name__
             source = GITHUB_REPOS_SOURCE_ID

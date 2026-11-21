@@ -226,7 +226,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `run_id` | TEXT | runs への参照 |
 | `source_id` | TEXT | 情報源 ID |
 | `status` | TEXT | `ok`・`no_results`・`failed`・`skipped` |
-| `error_category` | TEXT | `timeout`・`auth`・`http_5xx`・`rate_limited`・`dns` など（レポート末尾の「理由の分類」）。一部だけ取れなかった部分（2.8）には `truncated`（ページの上限に達し、取りこぼしたおそれ）も使う |
+| `error_category` | TEXT | `timeout`・`auth`・`http_5xx`・`rate_limited`・`dns` など（レポート末尾の「理由の分類」）。一部だけ取れなかった部分（2.8）には `truncated`（ページの上限に達し、取りこぼしたおそれ）も使う。`ok` の行が持つのは github_repos の測り残しの印（`partial` か分類）で、失敗の表示には使わない |
 | `attempts` | INTEGER | 試行回数 |
 | `record_count`・`in_period_count` | INTEGER | 取得件数・期間内に残った件数 |
 | `fetched_at` | TEXT | 取得を終えた時刻 |
@@ -235,7 +235,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - 実装での対応（`src/tech_researcher/stages/collect_store.py`）
   - 状態：失敗は `failed`、1件以上取れたら `ok`、0件なら `no_results`。取得しなかった情報源は `skipped`（週次の GitHub の新着・急上昇。Star 数は日次だけ測るため）。`error_category` は収集処理が付けた分類（last30days-skill・GitHub の分類など）で、付けていない収集処理（RSS・Qiita）の失敗は `fetch_failed`。想定外の例外は例外の型の名前
   - `fetched_at` は、その情報源の取得を終えた時刻。HN と GitHub Search（last30days-skill）は1回の実行で集めるので同じ時刻
-  - GitHub の新着・急上昇（`source_id` は `github_repos`）は、候補集め（Search）と Star 数の測定（GraphQL）を1つの情報源として残す。`record_count` は Star 数を測った（同じ対象日の記録を使ったものを含む）リポジトリの数、`attempts` は Search と GraphQL の要求の回数の合計。1件でも測れれば `ok` とし、Search が回数の上限で止まった・一部の問い合わせが失敗したなどの部分的な失敗は、ログに残し、行には `ok` のまま `error_category` を持たせる（失敗の分類。分類がなければ `partial`）。測れた分で翌日の判定ができ、レポートの「取得できなかった情報源」に書くほどではないが、同じ対象日の再実行が、最初の実行の測り残しを判定に入れるかを決める印になる（`ok` が `error_category` を持つのは、この一部だけ測れたときだけ）。同じ対象日の最後の実行が、この印を持つか `failed` のとき、再実行は今回新しく測れた分も判定に入れる。そうでなければ最初の記録だけで判定する。再実行で `record_count` に数えるのは、判定に使った測定の数測れたものがなく失敗があれば `failed`（分類は Search の失敗を先に取る）。候補がなければ `no_results`。`in_period_count` は、期間内に残った急上昇・新規の項目に入ったレコードの数
+  - GitHub の新着・急上昇（`source_id` は `github_repos`）は、候補集め（Search）と Star 数の測定（GraphQL）を1つの情報源として残す。`record_count` は Star 数を測った（同じ対象日の記録を使ったものを含む）リポジトリの数、`attempts` は Search と GraphQL の要求の回数の合計。1件でも測れれば `ok` とし、Search が回数の上限で止まった・一部の問い合わせが失敗したなどの部分的な失敗は、ログに残し、行には `ok` のまま `error_category` を持たせる（失敗の分類。分類がなければ `partial`）。測れた分で翌日の判定ができ、レポートの「取得できなかった情報源」に書くほどではないが、同じ対象日の再実行が、最初の実行の測り残しを判定に入れるかを決める印になる（`ok` が `error_category` を持つのは、この一部だけ測れたときだけ）。同じ対象日の最後の実行が、この印を持つか `failed` のとき、再実行は今回新しく測れた分も判定に入れる。そうでなければ最初の記録だけで判定する。印は、その対象日の判定に測り残しがあるかだけを表す。記録だけで判定した再実行は、新しい候補や Search の失敗があっても印を付けない（付けると、次の再実行で判定の対象が変わるため）。Search が1,000件の上限や `incomplete_results` で不完全な日にも印は付けない（上限で切れるのは想定した普通の動きで、トピックごとの検索で補う設計のため。付けると、ほぼ毎日が測り残しの日になり、再実行で結果が変わらない仕組みが崩れる）。再実行で `record_count` に数えるのは、判定に使った測定の数。測れたものがなく失敗があれば `failed`（分類は Search の失敗を先に取る）。候補がなければ `no_results`。`in_period_count` は、期間内に残った急上昇・新規の項目に入ったレコードの数
   - 取得しようとした情報源の数（`skipped` を除く）と、取得に失敗した数が同じなら、その実行は ① の実行エラー（`all_sources_failed`。有効な情報源がなければ `no_sources`）
 
 #### items
