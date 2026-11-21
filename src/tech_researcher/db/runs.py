@@ -250,5 +250,8 @@ def recent_runs(conn: sqlite3.Connection, since: datetime, run_id: str) -> list[
 
 def _check_names(checks: str | None) -> tuple[str, ...]:
     """reports の rejected_checks（文字列の JSON 配列）。形が違う値は捨てる。"""
-    names = json.loads(checks) if checks else []
+    try:
+        names = json.loads(checks) if checks else []
+    except ValueError:
+        return ()
     return tuple(n for n in names if isinstance(n, str)) if isinstance(names, list) else ()
