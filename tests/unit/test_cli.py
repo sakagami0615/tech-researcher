@@ -29,7 +29,7 @@ def env(tmp_path, monkeypatch):
     フィードの取得だけを偽の実装に差し替え、解析から書き出しまでは本物を通す。
     """
 
-    def fetch(url, limits):
+    def fetch(url, limits, **_):
         assert url == "https://blog.example.com/feed.xml"
         return Response(url, 200, FEED, 1)
 

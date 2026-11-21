@@ -710,6 +710,8 @@ def test_production_ends_as_error_until_later_stages_exist(host, capfd):
 # --- ② の AI の呼び出し（agent コンテナ。agent/invoke.py、structure.md 3.3） ---
 
 NOT_LOGGED_IN = (ROOT / "tests" / "fixtures" / "agent" / "not-logged-in.json").read_text()
+# 分類の手がかりのない失敗（agent_failed になる）。NOT_LOGGED_IN は認証の失敗（auth）
+UNCLASSIFIED = json.dumps({**json.loads(NOT_LOGGED_IN), "result": "something went wrong"})
 AGENT_OK = json.dumps(
     {
         "type": "result",
@@ -822,7 +824,7 @@ def test_agent_usage_log_without_model(agent, capfd):
 
 
 def test_agent_failure_keeps_usage_log(agent, capfd):
-    agent.behave("ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "exit": 1})
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": UNCLASSIFIED, "exit": 1})
     assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
     run_id = summary_of(capfd)["run_id"]
     events = [(r["event"], r.get("error_category")) for r in agent.log(run_id)]
@@ -834,7 +836,7 @@ def test_agent_failure_keeps_usage_log(agent, capfd):
 def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
     stderr = f"auth failed for {AGENT_SECRET} and {TOKEN}"
     agent.behave(
-        "ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "stderr": stderr, "exit": 1}
+        "ok", lock="daily-dry-run", agent={"stdout": UNCLASSIFIED, "stderr": stderr, "exit": 1}
     )
     assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
     out, err = capfd.readouterr()
@@ -846,13 +848,13 @@ def test_agent_failure_is_logged_without_output_text_or_secrets(agent, capfd):
     log_text = (Path(summary["output_dir"]) / "log.jsonl").read_text()
     assert AGENT_SECRET not in out + err + log_text  # agent.env の値も伏せる
     assert TOKEN not in out + err + log_text
-    assert "Not logged in" not in log_text  # result の文はログに残さない
+    assert "went wrong" not in log_text  # result の文はログに残さない
     assert "subtype=success terminal_reason=api_error" in log_text
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
 
 
 def test_agent_container_remove_failure_is_logged(agent, capfd, monkeypatch):
-    agent.behave("ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "exit": 1})
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": UNCLASSIFIED, "exit": 1})
 
     def fail(self):
         raise subprocess.CalledProcessError(1, ["docker", "ps"])
@@ -1343,3 +1345,192 @@ def test_bin_tr_run_calls_orchestrator_from_repo(tmp_path):
         ],
         "cwd": str(ROOT),
     }
+
+
+# ② の再試行（structure.md 6.3）：一時的な失敗だけ、合計の上限の残りの中で1回
+class Agent:
+    """call_agent の偽物。結果を順に返し（例外ならそれを投げ）、呼ばれた時の上限を残す。"""
+
+    def __init__(self, path, *outcomes, clock=None, spend=0.0):
+        self.path = path  # ジョブは子プロセスで動くので、呼ばれた上限はファイルに残す
+        self.outcomes = list(outcomes)
+        self.clock = clock
+        self.spend = spend
+
+    @property
+    def timeouts(self) -> list[float]:
+        if not self.path.exists():
+            return []
+        return [float(x) for x in self.path.read_text().split()]
+
+    def __call__(self, body, timeout_s, *, skill, **_):
+        if skill != invoke.DAILY_SKILL:  # ④ の呼び出しは数えない（失敗にして定型の本文にする）
+            raise _fail("agent_failed")
+        with self.path.open("a") as f:
+            f.write(f"{timeout_s!r}\n")
+        if self.clock is not None:
+            self.clock[0] += self.spend  # 呼び出しで進む時間
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _fail(category):
+    return invoke.AgentError(category, "detail", models=("claude-opus-4-5",))
+
+
+OK = invoke.AgentResult({"items": []}, ("claude-opus-4-5",))
+
+
+def _retry_events(host, run_id):
+    return [r for r in host.log(run_id) if r["event"] == "retry"]
+
+
+def test_transient_failure_is_retried_once_and_run_completes(host, capfd, monkeypatch, tmp_path):
+    agent = Agent(tmp_path / "timeouts", _fail("overloaded"), OK)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run")
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+    summary = summary_of(capfd)
+    assert summary["result"] == "dry_run"
+    assert len(agent.timeouts) == 2
+    [retry] = _retry_events(host, summary["run_id"])
+    assert (retry["stage"], retry["error_category"], retry["attempt"]) == (
+        "analyze",
+        "overloaded",
+        2,
+    )
+    usage = [r for r in host.log(summary["run_id"]) if r["event"] == "usage"]
+    assert len(usage) == 2  # 呼び出しごとに残す
+
+
+@pytest.mark.parametrize("category", ["overloaded", "server_error", "network"])
+def test_transient_failure_twice_is_run_error_with_retry_count(
+    host, capfd, monkeypatch, tmp_path, category
+):
+    agent = Agent(tmp_path / "timeouts", _fail(category), _fail(category))
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", category)
+    assert len(agent.timeouts) == 2  # 初回と再試行1回だけ（上限は analyze_retries）
+    assert len(_retry_events(host, summary["run_id"])) == 1
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "| 再試行回数 | 1 回（上限 1 回） |" in issue
+
+
+@pytest.mark.parametrize(
+    "category", ["timeout", "usage_limit", "auth", "agent_failed", "bad_output", "missing_skill"]
+)
+def test_other_failures_are_not_retried(host, capfd, monkeypatch, tmp_path, category):
+    agent = Agent(tmp_path / "timeouts", _fail(category), OK)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["error_category"] == category
+    assert len(agent.timeouts) == 1 and not _retry_events(host, summary["run_id"])
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "| 再試行回数 | 0 回（上限 1 回） |" in issue
+
+
+def test_retry_runs_inside_the_remaining_time_of_the_total_limit(
+    host, capfd, monkeypatch, tmp_path
+):
+    clock = [100.0]
+    monkeypatch.setattr(orchestrator, "_now", lambda: clock[0])
+    agent = Agent(tmp_path / "timeouts", _fail("network"), OK, clock=clock, spend=0.4)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run")
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+    total = 20 * 0.05  # 日次の analyze_minutes（20 分）。テストでは 1 分 = 0.05 秒
+    assert agent.timeouts[0] == pytest.approx(total)
+    assert agent.timeouts[1] == pytest.approx(total - 0.4)  # 合計から使った分を引いた残り
+
+
+def test_no_retry_when_the_total_limit_is_used_up(host, capfd, monkeypatch, tmp_path):
+    clock = [0.0]
+    monkeypatch.setattr(orchestrator, "_now", lambda: clock[0])
+    agent = Agent(
+        tmp_path / "timeouts", _fail("overloaded"), OK, clock=clock, spend=1.0
+    )  # 1 回目で上限をちょうど使う
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["error_category"] == "overloaded"
+    assert len(agent.timeouts) == 1 and not _retry_events(host, summary["run_id"])
+
+
+def test_zero_analyze_retries_disables_the_retry(host, capfd, monkeypatch, tmp_path):
+    config = host.repo / "config" / "tech-researcher.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("analyze_retries = 1", "analyze_retries = 0"),
+        encoding="utf-8",
+    )
+    agent = Agent(tmp_path / "timeouts", _fail("overloaded"), OK)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    assert len(agent.timeouts) == 1
+    issue = (Path(summary_of(capfd)["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "| 再試行回数 | 0 回（上限 0 回） |" in issue
+
+
+def test_auth_failure_skips_the_investigation_agent(agent, capfd):
+    # 実際の出力（トークンなし）。認証の失敗なので ④ も動かせず、agent は ② の1回だけ
+    agent.behave("ok", lock="daily-dry-run", agent={"stdout": NOT_LOGGED_IN, "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], agent.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "auth")
+    compose = [c for c in agent.calls() if c["argv"][0] == "compose"]
+    assert [_service(c) for c in compose] == ["worker", "agent"]
+    assert not _retry_events(agent, summary["run_id"])
+
+
+def test_retry_is_not_started_with_less_than_the_minimum_time_left(
+    host, capfd, monkeypatch, tmp_path
+):
+    clock = [0.0]
+    monkeypatch.setattr(orchestrator, "_now", lambda: clock[0])
+    # 1 回目の後の残りが 0.04 秒（最低 1 分 = 0.05 秒に足りない）。分類は本当の原因のまま
+    agent = Agent(tmp_path / "timeouts", _fail("overloaded"), OK, clock=clock, spend=0.96)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    assert summary_of(capfd)["error_category"] == "overloaded"
+    assert len(agent.timeouts) == 1
+
+
+def test_no_retry_when_the_container_could_not_be_removed(host, capfd, monkeypatch, tmp_path):
+    failed = invoke.AgentError("overloaded", "d", remove_failed=True)
+    agent = Agent(tmp_path / "timeouts", failed, OK)
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    assert len(agent.timeouts) == 1
+
+
+def test_launch_failure_on_the_retry_keeps_the_retry_count(host, capfd, monkeypatch, tmp_path):
+    agent = Agent(tmp_path / "timeouts", _fail("network"), OSError("docker"))
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", lock="daily-dry-run", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["error_category"] == "launch_failed"
+    issue = (Path(summary["output_dir"]) / "issue.md").read_text(encoding="utf-8")
+    assert "| 再試行回数 | 1 回（上限 1 回） |" in issue
+
+
+def test_production_run_closes_runs_with_the_retry_count(host, capfd, monkeypatch, tmp_path):
+    agent = Agent(tmp_path / "timeouts", _fail("overloaded"), _fail("overloaded"))
+    monkeypatch.setattr(invoke, "call_agent", agent)
+    host.behave("ok", agent={"stdout": "{}", "exit": 1})
+    assert orchestrator.main(["daily"], host.environ) == 1
+    finish = [c["argv"] for c in host.calls() if "finish" in c["argv"]]
+    assert len(finish) == 1
+    argv = finish[0]
+    assert argv[argv.index("--retry-count") + 1] == "1"
+    assert argv[argv.index("--error-category") + 1] == "overloaded"

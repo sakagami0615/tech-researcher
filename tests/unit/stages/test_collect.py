@@ -62,7 +62,7 @@ def record(source_id, url, published):
     )
 
 
-def fake_collect(f, limits):
+def fake_collect(f, limits, **_):
     match f.id:
         case "a":
             return SourceResult(
@@ -169,7 +169,7 @@ def test_popularity_is_judged_before_period_filter(tmp_path):
     )
     hot = Attention("hatena_bookmarks", 500.0, FETCHED)
 
-    def popular_collect(f, limits):
+    def popular_collect(f, limits, **_):
         match f.id:
             case "p":
                 records = (
@@ -270,7 +270,7 @@ def test_collected_items_can_be_loaded_back(tmp_path):
         TARGET,
         tmp_path,
         log,
-        collectors=Collectors(feed=lambda f, limits: SourceResult("rss:x", records, 1)),
+        collectors=Collectors(feed=lambda f, limits, **_: SourceResult("rss:x", records, 1)),
     )
 
     items = load_collected(tmp_path / COLLECTED)
@@ -306,7 +306,7 @@ class FakeGitHub:
         self.search_error = search_error  # Search の失敗の HTTP の状態
         self.created = created or {}  # リポジトリ → 作成日時（なければ REPO_CREATED）
 
-    def fetch(self, url, limits, *, headers, sleep, follow_redirects, data=None):
+    def fetch(self, url, limits, *, headers, sleep, follow_redirects, data=None, **_):
         if "/readme" in url:
             repo = url.split("/repos/")[1].removesuffix("/readme")
             self.calls.append(f"readme:{repo}")
@@ -360,15 +360,15 @@ def all_sources_config():
 
 
 def all_collectors(calls, github=None, token=TOKEN, hn_record=None):
-    def rss(f, limits):
+    def rss(f, limits, **_):
         calls.append(f"rss:{f.id}")
         return fake_collect(f, limits)
 
-    def qiita(settings, period, limits):
+    def qiita(settings, period, limits, **_):
         calls.append("qiita")
         return SourceResult("qiita", (), 1)
 
-    def last30days(config, period, given_token):
+    def last30days(config, period, given_token, **_):
         calls.append("last30days")
         assert given_token == token  # 収集用トークンを渡す
         hn = hn_record or record("hackernews", "https://news.example.com/x", IN)
@@ -600,7 +600,7 @@ def test_github_token_is_read_only_when_a_github_source_is_enabled(tmp_path):
 
 
 def test_unexpected_error_in_last30days_fails_its_sources(tmp_path):
-    def broken(config, period, token):
+    def broken(config, period, token, **_):
         raise RuntimeError("想定外 " + TOKEN)
 
     config = replace(CONFIG, hackernews=FULL.hackernews, github_search=FULL.github_search)
@@ -632,7 +632,7 @@ def test_fetches_are_recorded_as_each_source_finishes(tmp_path):
     conn = open_db(tmp_path / "tech-researcher.sqlite3")
     start_run(conn, PROD, TARGET, FETCHED)
 
-    def stopped(settings, period, limits):
+    def stopped(settings, period, limits, **_):
         raise KeyboardInterrupt  # 上限で止められたときの代わり（情報源の失敗にはしない）
 
     config = replace(CONFIG, feeds=(feed("a"), feed("c")), qiita=FULL.qiita)
@@ -956,7 +956,9 @@ def test_featured_repo_with_another_event_is_passed_without_the_spike(tmp_path):
     )
     collectors = all_collectors([], github=github)
     release = record("rss:a", "https://github.com/done/repo", IN)
-    collectors = replace(collectors, feed=lambda f, limits: SourceResult("rss:a", (release,), 1))
+    collectors = replace(
+        collectors, feed=lambda f, limits, **_: SourceResult("rss:a", (release,), 1)
+    )
     summary = run_day(conn, tmp_path, PROD, github, collectors)
     assert summary["held_items"] == 0
     item = {i.url: i for i in load_collected(tmp_path / COLLECTED)}["https://github.com/done/repo"]

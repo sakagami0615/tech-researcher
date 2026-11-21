@@ -18,8 +18,13 @@ claude を動かす）。入力は標準入力の JSON、出力は標準出力�
 - 1回の呼び出しの使用量・所要時間・ターン数を結果の JSON から取り出す（AgentUsage。
   structure.md 3.8 の7・8 の記録に使う）。失敗のときも、結果の JSON があれば取り出す
 
+- 出力がなく終わった失敗は、Claude Code の結果の JSON から分類する（classify_failure）。
+  一時的な失敗（overloaded・server_error・network）は ② が合計の上限の中で1回だけ再試行する
+  （structure.md 6.3。再試行は統括スクリプトの `_analyze`）。利用上限（usage_limit）・認証（auth）の
+  失敗は再試行せず、④ も動かせないので ④ を飛ばす
+
 テストでは runner（Compose）を偽の実装に差し替えるか、call_agent ごと差し替える（製品には偽の AI の
-モードを作らない）。再試行（structure.md 6.3）と、認証の失敗・利用上限の分類は後の Issue で足す。
+モードを作らない）。
 """
 
 import json
@@ -36,6 +41,33 @@ MISSING_SKILL_EXIT = 78  # agent-run がスキルを見つけられなかった�
 # claude を動かさずに終わった失敗の分類（上限の超過、スキーマの誤り、イメージにスキルがない）。
 # 呼び出し側は使用量（usage）の行を残さない
 NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
+# 出力がなく終わった失敗の分類（classify_failure）。TRANSIENT は ② が再試行する一時的な失敗
+OVERLOADED = "overloaded"
+SERVER_ERROR = "server_error"
+NETWORK = "network"
+USAGE_LIMIT = "usage_limit"
+AUTH = "auth"
+TRANSIENT = frozenset({OVERLOADED, SERVER_ERROR, NETWORK})
+# 失敗の文（Claude Code が結果の JSON の result に書く。出力がなく is_error のときだけ読む）の
+# 手がかり。分類の語を決めるためだけに使い、文はログにも残さない。実際の文は PoC（structure.md
+# 3.8 の8）で確かめて足す。順に見て、最初に合った分類にする（利用上限を先に見る）
+_FAILURE_TEXT = (
+    (
+        USAGE_LIMIT,
+        re.compile(r"usage limit|limit reached|rate limit|quota|too many requests", re.I),
+    ),
+    (AUTH, re.compile(r"invalid api key|/login|not logged in|authentication|unauthorized", re.I)),
+    (OVERLOADED, re.compile(r"overloaded", re.I)),
+    (SERVER_ERROR, re.compile(r"internal server error|bad gateway|service unavailable", re.I)),
+    (
+        NETWORK,
+        re.compile(
+            r"unable to connect|connection (error|refused|reset)|econn(reset|refused)|"
+            r"etimedout|enotfound|network error|fetch failed",
+            re.I,
+        ),
+    ),
+)
 # 内側のスキル（structure.md 3.5）。リポジトリの agent/skills/<名前>/SKILL.md を、agent のイメージの
 # 作業ディレクトリの .claude/skills/ にコピーする（docker/agent.Dockerfile）
 DAILY_SKILL = "tr-daily-evaluate"
@@ -98,6 +130,9 @@ class AgentError(Exception):
 
     - timeout：段階の上限の時間を超えた（コンテナは止めて消す）
     - agent_failed：終了コードが0でない、is_error、または構造化出力がない（F6・F8）
+    - overloaded・server_error・network：出力がなく、Claude Code が過負荷・サーバーエラー・通信の
+      失敗を返した（一時的。② が1回だけ再試行する）
+    - usage_limit・auth：出力がなく、利用上限・認証の失敗を返した（再試行しない。④ も飛ばす）
     - bad_output：標準出力に結果の JSON がない
     - bad_schema：スキーマのファイルがない・読めない、または JSON でない
     - missing_skill：イメージに渡すスキルがない（イメージを作り直していない。claude を動かさない）
@@ -242,8 +277,43 @@ def parse_result(returncode: int, stdout: str) -> AgentResult:
             f"terminal_reason={_code(data.get('terminal_reason'))}",
             f"structured_output={str(has_output).lower()}",
         ]
-        raise AgentError("agent_failed", " ".join(fields), models=models, usage=usage)
+        category = classify_failure(data) if not has_output else "agent_failed"
+        if category != "agent_failed":
+            fields.append(f"classified={category}")
+        raise AgentError(category, " ".join(fields), models=models, usage=usage)
     return AgentResult(output=data["structured_output"], models=models, usage=usage)
+
+
+def classify_failure(data: dict) -> str:
+    """出力がなく終わった結果の JSON の失敗の分類。分からなければ agent_failed（再試行しない）。
+
+    HTTP の状態（api_error_status。あれば）を先に見る：401・403 は auth、429 は usage_limit、
+    529 は overloaded、ほかの 5xx は server_error、知らない状態は agent_failed（状態があれば
+    状態だけで決め、文で分類し直さない）。状態がなければ result の文の手がかりで決める
+    （terminal_reason が api_error のときだけ）。is_error が真でなければ agent_failed。
+    一時的と分かるものだけを TRANSIENT にし、迷うものは再試行しない。
+    """
+    if data.get("is_error") is not True:
+        return "agent_failed"
+    status = data.get("api_error_status")
+    if isinstance(status, int) and not isinstance(status, bool):
+        if status in (401, 403):
+            return AUTH
+        if status == 429:
+            return USAGE_LIMIT
+        if status == 529:
+            return OVERLOADED
+        if 500 <= status < 600:
+            return SERVER_ERROR
+        return "agent_failed"  # 知らない状態は、文で分類し直さない（再試行しない）
+    text = data.get("result")
+    # 文を読むのは API の失敗（terminal_reason が api_error）のときだけ。スキーマに合わない出力や
+    # ターン数の超過で終わった結果の文は、AI や入力の外部の文を含みうるので読まない
+    if data.get("terminal_reason") == "api_error" and isinstance(text, str):
+        for category, pattern in _FAILURE_TEXT:
+            if pattern.search(text):
+                return category
+    return "agent_failed"
 
 
 def _last_json(stdout: str) -> dict | None:

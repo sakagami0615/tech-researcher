@@ -48,11 +48,11 @@ KINDS = ("run_error", "rejected")  # 実行エラー・不合格
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}  # 表記はコードが変える（4.4）
 HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の例）
 # ② の失敗のうち、④ も同じく動かせないと分かっている分類。AI 自体を利用できない失敗として ④ を
-# 飛ばす（D-04）。イメージにスキルがない（missing_skill）、docker を起動できない（launch_failed）。
+# 飛ばす（D-04）。イメージにスキルがない（missing_skill）、docker を起動できない（launch_failed）、
+# 利用上限（usage_limit）・認証（auth）の失敗（同じ認証・利用枠を使うので ④ も動かせない）。
 # ほかの ② の失敗（agent_failed・bad_output・timeout、claude を呼ばずに止めた input_too_large など）
 # では ④ を呼び、④ が失敗したら定型にする（調査結果が載る場面を優先する。失敗の日はまれ）。
-# 利用上限・認証の失敗の分類を足したら、その分類もここに入れる
-AGENT_UNUSABLE = frozenset({"missing_skill", "launch_failed"})
+AGENT_UNUSABLE = frozenset({"missing_skill", "launch_failed", invoke.USAGE_LIMIT, invoke.AUTH})
 
 # 検証結果の行に入れてよい項目 ID の形（i{主キー}・ドライランの仮の d{番号}。2.6）
 _ITEM_ID = re.compile(r"[id][0-9]{1,18}")

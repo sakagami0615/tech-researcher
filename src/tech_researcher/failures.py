@@ -5,10 +5,11 @@ report-templates.md 3章）。
 （公開停止にした本文の runs は、元の結果のまま閉じる。公開停止はログの `post` の
 `secret_detected` に残す。issues の `blocked_secret` に残すのは ⑤ で行う。data-model.md 3.4）
 
-1. ④ 失敗時の調査を1回だけ呼ぶ（agent/investigate.py）。呼ばないのは、② がイメージにスキルがない・
-   docker を起動できないで失敗したとき（AI を利用できない。D-04）と、秘匿情報の検出（3.6 の定型は
-   調査結果を載せない）のとき。調査の入力は、この実行のログ・③ の結果・直近の実行の履歴
-   （本番の DB を読み取り専用で開く。ドライランも同じ。開けなければ履歴なしで続ける）
+1. ④ 失敗時の調査を1回だけ呼ぶ（agent/investigate.py。再試行しない）。呼ばないのは、② がイメージに
+   スキルがない・docker を起動できない・利用上限・認証で失敗したとき（AI を利用できない。D-04）と、
+   秘匿情報の検出（3.6 の定型は調査結果を載せない）のとき。調査の入力は、この実行のログ・
+   ③ の結果・直近の実行の履歴（本番の DB を読み取り専用で開く。ドライランも同じ。開けなければ
+   履歴なしで続ける）
 2. 本文を作る（render/failure.py）：AI の調査あり・AI を利用できないときの定型（3.5）・公開停止
    （3.6）。作った本文の全体も秘匿情報の検査にかけ、見つかれば公開停止の定型にする
 3. 本文を issue.md に、検査を通った ④ の出力を investigation.json に書く（実行のフォルダ。
@@ -74,8 +75,6 @@ CHECK_LABELS = {
     "body_too_long": "本文が 60,000 文字を超えた",
     "secret_detected": "秘匿情報の検査",
 }
-# ② の再試行の上限（structure.md 6.3）。再試行は別の Issue で行う。それまでの回数は 0
-ANALYZE_RETRY_LIMIT = 1
 REQUEST_COUNT_SOURCES = frozenset({GITHUB_REPOS_SOURCE_ID, "github_releases", "qiita"})
 _EXIT = re.compile(r"exit_([0-9]+)")
 
@@ -93,6 +92,11 @@ _STAGE_SUMMARIES = {
     "bad_input": "AI への入力を読めなかった",
     "bad_schema": "出力のスキーマを読めなかった",
     "agent_failed": "AI の呼び出しに失敗した",
+    "overloaded": "AI のサービスが過負荷だった（再試行しても回復しなかった）",
+    "server_error": "AI のサービスでサーバーエラーが起きた（再試行しても回復しなかった）",
+    "network": "AI のサービスへの通信に失敗した（再試行しても回復しなかった）",
+    "usage_limit": "AI の利用上限に達した",
+    "auth": "AI の認証に失敗した",
     "output_write_failed": "AI の出力を保存できなかった",
 }
 
@@ -103,12 +107,14 @@ class Outcome:
 
     stage は実行エラー・公開停止で失敗した段階（STAGES のキー）、category は失敗の分類（コードが
     決めた名前。不合格は ③ の分類）。models は ② が失敗したとき結果の JSON に出ていたモデル。
+    retries は ② が失敗したときに行った再試行の回数（Issue の「再試行回数」。6.3）。
     """
 
     kind: str
     stage: str | None = None
     category: str | None = None
     models: tuple[str, ...] = ()
+    retries: int = 0
 
 
 def handle(job: Job, outcome: Outcome, minute: float) -> None:
@@ -209,9 +215,11 @@ def _retry_count(fetch: Mapping) -> int:
     return max(fetch["attempts"] - 1, 0)
 
 
-def retries(config: Config, stage: str, fetches: Sequence[Mapping]) -> tuple[int, int]:
-    """失敗した処理での（再試行回数、上限）。再試行の実装（別の Issue）までは、回数は ① の
-    情報源の再試行だけ（失敗した情報源の試行回数の最大から初回を引いた数。上限で切る）。"""
+def retries(
+    config: Config, stage: str, fetches: Sequence[Mapping], analyzed: int = 0
+) -> tuple[int, int]:
+    """失敗した処理での（再試行回数、上限）。① は情報源の再試行（失敗した情報源の試行回数の
+    最大から初回を引いた数。上限で切る）、② は行った再試行の回数（analyzed）。"""
     limits = config.limits
     if stage == "collect":
         limit = max(len(limits.http_retry_waits_s), limits.last30days_retries)
@@ -220,7 +228,9 @@ def retries(config: Config, stage: str, fetches: Sequence[Mapping]) -> tuple[int
             default=0,
         )
         return min(max(used, 0), limit), limit
-    return 0, ANALYZE_RETRY_LIMIT if stage == "analyze" else 0
+    if stage == "analyze":
+        return min(max(analyzed, 0), limits.analyze_retries), limits.analyze_retries
+    return 0, 0
 
 
 def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, InvestigateResult]:
@@ -244,7 +254,7 @@ def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, Investig
             failed_stage=outcome.stage,
             error_category=summary,
             error_code=outcome.category,
-            retry_count=retries(job.config, outcome.stage, fetches)[0],
+            retry_count=retries(job.config, outcome.stage, fetches, outcome.retries)[0],
         )
     result = _investigate(job, failure, validation, minute)
 
@@ -269,7 +279,7 @@ def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, Investig
             job.files.started_at,
             failure.failed_stage,
             failure.error_category,
-            retries(job.config, failure.failed_stage, fetches),
+            retries(job.config, failure.failed_stage, fetches, outcome.retries),
             rows[:shown],
             investigation,
             0 if shown is None else len(rows) - shown,
@@ -394,7 +404,7 @@ def _close_run(job: Job, outcome: Outcome, minute: float) -> None:
     if outcome.kind in (REJECTED, SECRET_STOP):  # ③ の不合格・公開停止に再試行はない
         args += ["--retry-count", "0"]
     elif outcome.kind == RUN_ERROR and outcome.stage is not None:
-        count = retries(job.config, outcome.stage, load_fetches(job.files.dir))[0]
+        count = retries(job.config, outcome.stage, load_fetches(job.files.dir), outcome.retries)[0]
         args += ["--retry-count", str(count)]
     if outcome.models:
         args += ["--model", ",".join(outcome.models)]

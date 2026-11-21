@@ -4,6 +4,7 @@ import io
 import socket
 import ssl
 import urllib.error
+import urllib.request
 from dataclasses import replace
 from email.message import Message
 
@@ -314,3 +315,219 @@ def test_data_with_redirects_followed_is_refused(limits):
     with pytest.raises(ValueError):
         fetch(URL, limits, open_url=open_url, data=b"{}")
     assert requests == []
+
+
+# ① の時間の上限（deadline。structure.md 6.4）
+def test_expired_deadline_sends_no_request(limits):
+    open_url, requests = scripted(b"x")
+    with pytest.raises(FetchError) as e:
+        fetch(URL, limits, open_url=open_url, deadline=10.0, clock=lambda: 10.0)
+    assert requests == [] and e.value.attempts == 0 and e.value.category == "timeout"
+
+
+def test_retry_that_does_not_fit_in_the_remaining_time_is_not_started(limits):
+    now = [0.0]
+    open_url, requests = scripted(http_error(503), b"ok")
+    waits = []
+    with pytest.raises(FetchError) as e:
+        # 待ち（5 秒）の後に要求する時間が残らない（残り 4 秒）
+        fetch(
+            URL,
+            limits,
+            open_url=open_url,
+            sleep=waits.append,
+            deadline=4.0,
+            clock=lambda: now[0],
+        )
+    assert waits == [] and len(requests) == 1
+    assert e.value.attempts == 1 and e.value.status == 503
+
+
+def test_retry_after_and_min_wait_count_toward_the_deadline(limits):
+    open_url, requests = scripted(http_error(429, "50"), b"ok")
+    with pytest.raises(FetchError):
+        fetch(
+            URL, limits, open_url=open_url, sleep=lambda s: None, deadline=40.0, clock=lambda: 0.0
+        )
+    assert len(requests) == 1  # Retry-After の 50 秒が残り 40 秒に収まらない
+    open_url, requests = scripted(http_error(503), b"ok")
+    with pytest.raises(FetchError):
+        fetch(
+            URL,
+            limits,
+            open_url=open_url,
+            sleep=lambda s: None,
+            deadline=30.0,
+            clock=lambda: 0.0,
+            min_wait=40.0,  # 呼ぶ側が待つ最短の秒数（Search の間隔）
+        )
+    assert len(requests) == 1
+
+
+def test_retry_that_fits_is_made(limits):
+    open_url, requests = scripted(http_error(503), b"ok")
+    waits = []
+    response = fetch(
+        URL, limits, open_url=open_url, sleep=waits.append, deadline=100.0, clock=lambda: 0.0
+    )
+    assert response.body == b"ok" and waits == [5] and len(requests) == 2
+
+
+def test_timeouts_of_one_request_are_cut_to_the_remaining_time(limits):
+    shrunk = tr_http._shrunk(limits, 2.5)
+    assert (shrunk.http_connect_timeout_s, shrunk.http_read_timeout_s) == (2.5, 2.5)
+    same = tr_http._shrunk(limits, 100.0)
+    assert (same.http_connect_timeout_s, same.http_read_timeout_s) == (10, 30)
+
+
+def test_real_request_to_a_silent_server_is_cut_at_the_deadline(limits):
+    """応答しない相手に対し、応答の上限（30 秒）ではなく残りの時間で打ち切る。"""
+    import time
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    try:
+        started = time.monotonic()
+        with pytest.raises(FetchError):
+            fetch(
+                f"http://127.0.0.1:{server.getsockname()[1]}/",
+                limits,
+                deadline=started + 0.3,
+            )
+        assert time.monotonic() - started < 5
+    finally:
+        server.close()
+
+
+class Trickle(FakeResponse):
+    """1回の読み込みごとに時計を進める応答（少しずつ送り続ける相手）。"""
+
+    def __init__(self, body, clock, step):
+        super().__init__(body)
+        self.clock, self.step, self.reads = clock, step, 0
+
+    def read1(self, size=-1):
+        self.reads += 1
+        self.clock[0] += self.step
+        return super().read1(size)
+
+
+def test_body_read_in_chunks_stops_at_the_deadline(limits):
+    now = [0.0]
+    body = Trickle(b"x" * (3 * tr_http.CHUNK_BYTES), now, step=10.0)
+    open_url, _ = scripted(body)
+    with pytest.raises(FetchError) as e:
+        fetch(URL, limits, open_url=open_url, deadline=15.0, clock=lambda: now[0])
+    assert e.value.category == "timeout"
+    assert body.reads == 2  # 2塊目の後（20 秒）で上限（15 秒）を過ぎた。3塊目は読まない
+
+
+def test_chunked_read_returns_the_whole_body_within_the_deadline(limits):
+    now = [0.0]
+    data = b"y" * (2 * tr_http.CHUNK_BYTES + 5)
+    open_url, _ = scripted(Trickle(data, now, step=1.0))
+    response = fetch(URL, limits, open_url=open_url, deadline=100.0, clock=lambda: now[0])
+    assert response.body == data
+
+
+def test_body_size_limit_still_applies_with_a_deadline(limits, monkeypatch):
+    monkeypatch.setattr(tr_http, "MAX_BODY_BYTES", 100)
+    open_url, _ = scripted(b"z" * 101)
+    with pytest.raises(FetchError) as e:
+        fetch(URL, limits, open_url=open_url, deadline=100.0, clock=lambda: 0.0)
+    assert e.value.category == "invalid_response"
+
+
+def test_redirect_is_not_followed_after_the_deadline():
+    now = [0.0]
+    handler = tr_http._RedirectHandler(10.0, lambda: now[0])
+    request = urllib.request.Request(URL)
+    headers = Message()
+    headers["Location"] = "https://feed.example/next"
+    followed = handler.redirect_request(
+        request, None, 301, "moved", headers, "https://feed.example/next"
+    )
+    assert followed is not None  # 上限の内ならたどる
+    now[0] = 10.0
+    with pytest.raises(tr_http._OutOfTime):
+        handler.redirect_request(request, None, 301, "moved", headers, "https://feed.example/next")
+
+
+class Closing:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_redirect_stopped_by_the_deadline_closes_the_previous_response():
+    handler = tr_http._RedirectHandler(5.0, lambda: 9.0)
+    fp = Closing()
+    with pytest.raises(tr_http._OutOfTime):
+        handler.redirect_request(urllib.request.Request(URL), fp, 301, "m", Message(), URL)
+    assert fp.closed
+
+
+class Finished(FakeResponse):
+    """全部を渡した後に isclosed() が真になる応答（HTTPResponse と同じ）。"""
+
+    def isclosed(self):
+        return self.tell() == len(self.getvalue())
+
+
+def test_body_fully_received_is_kept_even_if_the_deadline_passed_then(limits):
+    now = [0.0]
+
+    class Late(Finished):
+        def read1(self, size=-1):
+            now[0] += 100.0  # 読み終わった時点で上限を過ぎる
+            return super().read1(size)
+
+    open_url, _ = scripted(Late(b"abc"))
+    response = fetch(URL, limits, open_url=open_url, deadline=50.0, clock=lambda: now[0])
+    assert response.body == b"abc"
+
+
+def _trickle_server(chunked, count=100, pause=0.2):
+    """1バイトずつ少しずつ送り続ける本物のサーバー（別スレッド）。（ソケット, URL）を返す。"""
+    import threading
+    import time
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            conn.recv(4096)
+            head = "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+            head += "Transfer-Encoding: chunked\r\n" if chunked else f"Content-Length: {count}\r\n"
+            conn.sendall((head + "\r\n").encode())
+            for _ in range(count):
+                conn.sendall(b"1\r\nx\r\n" if chunked else b"x")
+                time.sleep(pause)
+            conn.close()
+        except OSError:
+            pass  # 相手が先に切った
+
+    threading.Thread(target=serve, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.getsockname()[1]}/"
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_real_trickling_response_is_cut_near_the_deadline(limits, chunked):
+    """0.2 秒ごとに1バイトずつ送る応答を、残りの時間（1 秒）の付近で打ち切る。"""
+    import time
+
+    server, url = _trickle_server(chunked)
+    try:
+        started = time.monotonic()
+        with pytest.raises(FetchError) as e:
+            fetch(url, limits, deadline=started + 1.0)
+        assert e.value.category == "timeout"
+        assert time.monotonic() - started < 3  # 全部（20 秒）や応答の上限（30 秒）を待たない
+    finally:
+        server.close()

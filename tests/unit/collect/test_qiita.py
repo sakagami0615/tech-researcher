@@ -127,6 +127,21 @@ def test_requests_stop_at_the_limit(limits):
     assert len(api.calls) == 30 and result.attempts == 30
 
 
+def test_deadline_stops_the_pages_and_fails_the_source_as_timeout(limits):
+    now = [0.0]
+    pages = FakeApi([[item(n) for n in range(100)]] * 5)
+
+    def api(url, page_limits, **_):
+        now[0] += 60  # 1ページごとに 60 秒かかる
+        return pages(url, page_limits)
+
+    result = collect_qiita(
+        QIITA, TARGET.period, limits, fetch_url=api, deadline=100.0, clock=lambda: now[0]
+    )
+    assert result.records == () and result.error_category == "timeout"
+    assert result.attempts == 2  # 2ページ目の後（120 秒）で上限（100 秒）を過ぎた
+
+
 def test_retries_are_cut_to_the_remaining_requests(limits):
     # 再試行も要求に数える。残りが少ないページは、再試行の回数を減らして上限を超えない
     full = [item(n) for n in range(100)]

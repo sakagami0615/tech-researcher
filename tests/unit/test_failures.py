@@ -108,8 +108,10 @@ def test_retries_per_stage():
     assert failures.retries(CONFIG, "collect", []) == (0, 2)
     # 要求の総数を試行回数にする情報源は、再試行に数えない
     assert failures.retries(CONFIG, "collect", [entry("qiita", "failed", "dns", 3)]) == (0, 2)
-    # ② の再試行はまだ行わない（上限は structure.md 6.3）。③ は再試行しない
+    # ② は行った再試行の回数（上限は structure.md 6.3）。③ は再試行しない
     assert failures.retries(CONFIG, "analyze", fetches) == (0, 1)
+    assert failures.retries(CONFIG, "analyze", fetches, 1) == (1, 1)
+    assert failures.retries(CONFIG, "analyze", fetches, 5) == (1, 1)
     assert failures.retries(CONFIG, "verify", fetches) == (0, 0)
 
 

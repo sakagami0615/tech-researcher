@@ -127,6 +127,20 @@ class GitHubClient:
         self.search_calls = 0  # Search の要求の回数（再試行を含む）
         self.graphql_calls = 0  # GraphQL の要求の回数（再試行を含む）
         self._last_search: float | None = None
+        # 要求を出してよい時間の上限（clock の値。① 全体の上限。6.4）。None なら制限なし
+        self.deadline: float | None = None
+
+    def limit_time(self, deadline: float, clock: Callable[[], float]) -> None:
+        """要求を出してよい時間の上限（clock の値）を決める。時計もそろえる（上限の判定と
+        Search の間隔の計算に使う）。"""
+        self.deadline = deadline
+        self._clock = clock
+
+    def _time_limit(self, min_wait: float = 0.0) -> dict[str, Any]:
+        """fetch に渡す時間の上限の引数（上限がなければ空。差し替えた取得の引数を変えない）。"""
+        if self.deadline is None:
+            return {}
+        return {"deadline": self.deadline, "clock": self._clock, "min_wait": min_wait}
 
     @property
     def authenticated(self) -> bool:
@@ -159,6 +173,8 @@ class GitHubClient:
         if remaining >= 1 and self._last_search is not None:
             wait = self._last_search + interval - self._clock()
             if wait > 0:
+                if self.deadline is not None and self._clock() + wait >= self.deadline:
+                    raise GitHubError("/search：時間の上限に達した", TIMEOUT, 0)
                 self._sleep(wait)
         try:
             data, used = self._request(f"/search/{kind}", params, remaining, interval)
@@ -194,6 +210,7 @@ class GitHubClient:
                 sleep=self._sleep,
                 follow_redirects=False,
                 data=body,
+                **self._time_limit(),
             )
         except FetchError as e:
             self.graphql_calls += e.attempts
@@ -237,12 +254,15 @@ class GitHubClient:
                     headers=self._headers,
                     sleep=lambda seconds: self._sleep(max(seconds, min_wait)),
                     follow_redirects=False,
+                    **self._time_limit(min_wait),
                 )
             except FetchError as e:
                 used += e.attempts
                 if e.status in _REDIRECTS:
                     url = _redirect_target(url, e.headers, _is_search(path))
                     if url is not None:
+                        if self.deadline is not None and self._clock() + min_wait >= self.deadline:
+                            raise GitHubError(f"{path}：時間の上限に達した", TIMEOUT, used) from e
                         self._sleep(min_wait)  # Search の間隔はリダイレクトの先にも守る
                         continue
                     raise GitHubError(f"{path}：たどれないリダイレクト", REDIRECT, used) from e

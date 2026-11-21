@@ -16,6 +16,9 @@ fetches.json にも書く（実行エラー Issue の表と、部分的な失敗
 Star 数の測定の後に、急上昇・新規のリポジトリを判定し（github_spikes）、載せる分の README を取る。
 まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
 に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
+時間の上限（structure.md 6.4）：① 全体の上限（段階の上限から collect_wrapup_s を引いた時刻）を
+過ぎたら、残りの情報源は取得せずに timeout の失敗にして、終わった情報源の分で続ける。情報源ごとの
+上限は last30days-skill・Qiita・GitHub Releases に、全体の上限は README の取得に渡す（Deadlines）。
 外部由来の文（タイトル・本文）はファイルにだけ書き、戻り値（標準出力に出す要約）には件数と
 情報源の ID だけを入れる（structure.md 3.2）。
 前日の記録がなく判定しなかった急上昇は unjudged.json に書き、③ がヘッダの定型文にする。
@@ -27,6 +30,7 @@ data-model.md 2.6）にする。
 
 import json
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -56,7 +60,7 @@ from tech_researcher.collect.records import (
 )
 from tech_researcher.collect.rss import collect_feed, feed_source_id
 from tech_researcher.collect.sources import source_names
-from tech_researcher.config import Config, Feed, GitHubReleases, Limits, Qiita
+from tech_researcher.config import Config, Feed, Limits
 from tech_researcher.db.history import featured_urls, shown_urls
 from tech_researcher.db.items import lookup_item_refs
 from tech_researcher.db.readonly import tentative_ids
@@ -75,6 +79,7 @@ from tech_researcher.stages.collect_store import (
     unavailable_sources,
 )
 
+OUT_OF_TIME = "収集全体の時間の上限に達した"
 COLLECTED = "collected.json"
 ITEM_IDS = "item-ids.json"  # collected.json の項目と同じ順の ID（② の入力と ③ の照合で使う）
 UNAVAILABLE = "unavailable.json"  # 取得できなかった情報源と、取れなかった部分（末尾の表示の元）
@@ -85,15 +90,25 @@ STAR_JUDGMENT = "GitHub の Star の急増"
 # last30days-skill を置いた場所（作業ディレクトリから。worker では /app、ホストではリポジトリ）
 LAST30DAYS_ROOT = Path("third_party/last30days")
 
+# deadline は情報源ごとの時間の上限（Collectors の clock の値。structure.md 6.4）
 CollectFeed = Callable[[Feed, Limits], SourceResult]
-CollectQiita = Callable[[Qiita, Period, Limits], SourceResult]
-# （設定, 対象期間, 収集用トークン）→ 有効な情報源（hackernews・github_search）ごとの結果
-CollectLast30Days = Callable[[Config, Period, str | None], list[SourceResult]]
-CollectReleases = Callable[[GitHubReleases, Period, GitHubClient], SourceResult]
+CollectQiita = Callable[..., SourceResult]  # （設定, 対象期間, limits, deadline=）
+# （設定, 対象期間, 収集用トークン, deadline=）→ 有効な情報源（hackernews・github_search）ごとの結果
+CollectLast30Days = Callable[..., list[SourceResult]]
+CollectReleases = Callable[..., SourceResult]  # （設定, 対象期間, クライアント, deadline=）
 
 
-def _last30days(config: Config, period: Period, token: str | None) -> list[SourceResult]:
-    return collect_last30days(config, period, LAST30DAYS_ROOT, github_token=token)
+def _last30days(
+    config: Config,
+    period: Period,
+    token: str | None,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[SourceResult]:
+    return collect_last30days(
+        config, period, LAST30DAYS_ROOT, github_token=token, deadline=deadline, clock=clock
+    )
 
 
 @dataclass(frozen=True)
@@ -107,6 +122,9 @@ class Collectors:
     github: Callable[[str | None, Limits], GitHubClient] = GitHubClient
     token: Callable[[], str | None] = collect_token
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    # 時間の上限の判定に使う時計（テストで偽物に差し替える）。既定の収集器は自分で time.monotonic
+    # を使うので、収集器を差し替えずに clock だけを変えると食い違う
+    clock: Callable[[], float] = time.monotonic
 
 
 DEFAULT_COLLECTORS = Collectors()
@@ -120,6 +138,38 @@ class GitHubOutcome:
     at: datetime
     records: tuple[Record, ...] = ()
     star_unjudged: bool = False
+
+
+MINUTE = 60.0  # 設定の上限（分）を秒にする
+
+
+@dataclass(frozen=True)
+class Deadlines:
+    """① の時間の上限（structure.md 6.4）。clock の値で表す。
+
+    overall は ① 全体の上限（段階の上限から collect_wrapup_s を引いた時刻。まとめて書く時間を
+    残す）。過ぎたら、残りの情報源は取得せずに timeout の失敗にし、終わった情報源の分で続ける
+    （US-E6-03）。source は情報源ごとの上限（① 全体の内数）。
+    """
+
+    clock: Callable[[], float]
+    overall: float
+    per_source_s: float
+
+    @classmethod
+    def start(cls, limits: Limits, target: Target, clock: Callable[[], float]) -> Deadlines:
+        stage = getattr(limits, target.cadence)
+        total = max(stage.collect * MINUTE - limits.collect_wrapup_s, 0.0)
+        return cls(clock, clock() + total, stage.collect_per_source * MINUTE)
+
+    def expired(self) -> bool:
+        return self.clock() >= self.overall
+
+    def left(self) -> float:
+        return self.overall - self.clock()
+
+    def source(self) -> float:
+        return min(self.clock() + self.per_source_s, self.overall)
 
 
 def collect_failure(sources: int, failed: int) -> str | None:
@@ -159,6 +209,7 @@ def run_collect(
     featured, shown = _history(db, target)
     log.write("collect", "start")
     limits = config.limits
+    deadlines = Deadlines.start(limits, target, collectors.clock)
     fetched: list[tuple[SourceResult, datetime]] = []
 
     def keep(*pairs: tuple[SourceResult, datetime]) -> None:
@@ -173,16 +224,27 @@ def run_collect(
     feeds = [f for f in config.feeds if f.enabled]
     for f in feeds:
         keep(
-            _collect_one(feed_source_id(f), lambda f=f: collectors.feed(f, limits), log, collectors)
+            _collect_one(
+                feed_source_id(f),
+                lambda until, f=f: collectors.feed(
+                    f, limits, deadline=until, clock=collectors.clock
+                ),
+                log,
+                collectors,
+                deadlines,
+            )
         )
     if config.qiita is not None and config.qiita.enabled:
         qiita = config.qiita
         keep(
             _collect_one(
                 QIITA_SOURCE_ID,
-                lambda: collectors.qiita(qiita, target.period, limits),
+                lambda until: collectors.qiita(
+                    qiita, target.period, limits, deadline=until, clock=collectors.clock
+                ),
                 log,
                 collectors,
+                deadlines,
             )
         )
     # GitHub を使う情報源があるときだけ読む（使わないのに形の誤りで止めないように）
@@ -196,12 +258,14 @@ def run_collect(
         )
     )
     token = _token(collectors, log) if uses_github else None
-    keep(*_collect_last30days(config, target, token, log, collectors))
+    keep(*_collect_last30days(config, target, token, log, collectors, deadlines))
     results = [r for r, _ in fetched]
     # REST の回数の上限（1回の実行あたり）はクライアントごとに数える。候補集め・README・Releases で
     # 1つのクライアントを共有し、上限を超えないようにする
-    client = cache(lambda: collectors.github(token, limits))
-    github = _collect_github(config, target, results, client, db, write, featured, log, collectors)
+    client = cache(lambda: _github_client(collectors, token, limits, deadlines))
+    github = _collect_github(
+        config, target, results, client, db, write, featured, log, collectors, deadlines
+    )
     if github is not None and write:
         assert db is not None
         record_source_fetch(db, log.run_id, github.fetch.to_fetch(github.at))
@@ -210,9 +274,12 @@ def run_collect(
         keep(
             _collect_one(
                 RELEASES_SOURCE_ID,
-                lambda: collectors.releases(releases, target.period, client()),
+                lambda until: collectors.releases(
+                    releases, target.period, client(), deadline=until, clock=collectors.clock
+                ),
                 log,
                 collectors,
+                deadlines,
             )
         )
         results = [r for r, _ in fetched]
@@ -350,15 +417,31 @@ def _token(collectors: Collectors, log: RunLog) -> str | None:
 
 
 def _collect_one(
-    source_id: str, collect: Callable[[], SourceResult], log: RunLog, collectors: Collectors
+    source_id: str,
+    collect: Callable[[float], SourceResult],
+    log: RunLog,
+    collectors: Collectors,
+    deadlines: Deadlines,
 ) -> tuple[SourceResult, datetime]:
-    """1つの情報源を集めてログに残す。想定外の例外もその情報源の失敗にする（US-E6-04）。"""
-    try:
-        result = collect()
-    except Exception as e:
-        result = _unexpected(source_id, e, log)
+    """1つの情報源を集めてログに残す。想定外の例外もその情報源の失敗にする（US-E6-04）。
+
+    ① 全体の上限を過ぎていたら、取得せずに timeout の失敗にする。collect には情報源ごとの
+    上限（clock の値）を渡す。
+    """
+    if deadlines.expired():
+        result = _out_of_time(source_id, log)
+    else:
+        try:
+            result = collect(deadlines.source())
+        except Exception as e:
+            result = _unexpected(source_id, e, log)
     _log_result(result, log)
     return result, collectors.now()
+
+
+def _out_of_time(source_id: str, log: RunLog) -> SourceResult:
+    log.write("collect", "failure", source=source_id, error_category="timeout", detail=OUT_OF_TIME)
+    return SourceResult(source_id, (), 0, OUT_OF_TIME, error_category="timeout")
 
 
 def _unexpected(source_id: str, e: Exception, log: RunLog) -> SourceResult:
@@ -386,7 +469,12 @@ def _log_result(result: SourceResult, log: RunLog) -> None:
 
 
 def _collect_last30days(
-    config: Config, target: Target, token: str | None, log: RunLog, collectors: Collectors
+    config: Config,
+    target: Target,
+    token: str | None,
+    log: RunLog,
+    collectors: Collectors,
+    deadlines: Deadlines,
 ) -> list[tuple[SourceResult, datetime]]:
     """HN・GitHub Search を1回の last30days-skill の実行で集める。"""
     enabled = [
@@ -400,7 +488,16 @@ def _collect_last30days(
     if not enabled:
         return []
     try:
-        results = collectors.last30days(config, target.period, token)
+        if deadlines.expired():
+            results = [_out_of_time(sid, log) for sid in enabled]
+        else:
+            results = collectors.last30days(
+                config,
+                target.period,
+                token,
+                deadline=deadlines.source(),
+                clock=collectors.clock,
+            )
     except Exception as e:
         name = type(e).__name__
         log.write("collect", "failure", source=",".join(enabled), error_category=name, exc=e)
@@ -421,6 +518,7 @@ def _collect_github(
     featured: set[str],
     log: RunLog,
     collectors: Collectors,
+    deadlines: Deadlines,
 ) -> GitHubOutcome | None:
     """GitHub の候補を集め、Star 数を測って急上昇・新規を判定する（D-13）。無効なら None。
 
@@ -432,8 +530,20 @@ def _collect_github(
         return None
     records: tuple[Record, ...] = ()
     star_unjudged = False
+    until = deadlines.source()  # 情報源ごとの上限（README の取得に渡す）
     if target.cadence != "daily":
         github = GitHubFetch(0, 0, skipped=True)
+    elif deadlines.expired() or deadlines.left() < _github_min_seconds(config):
+        # 残りの時間が Search の最短の所要時間より短い（途中で止められず ① 全体が落ちるため）。
+        # 取得せず失敗にする
+        log.write(
+            "collect",
+            "failure",
+            source=GITHUB_REPOS_SOURCE_ID,
+            error_category="timeout",
+            detail=OUT_OF_TIME,
+        )
+        github = GitHubFetch(0, 0, OUT_OF_TIME, "timeout")
     else:
         try:
             client = get_client()
@@ -477,7 +587,9 @@ def _collect_github(
             if write:  # README の取得中に止められても、測り残しの印を残す
                 assert db is not None
                 record_source_fetch(db, log.run_id, fetch(0).to_fetch(collectors.now()))
-            records, readme_calls = _with_readmes(spikes.records, client, featured, log)
+            records, readme_calls = _with_readmes(
+                spikes.records, client, featured, log, until, collectors.clock
+            )
             github = fetch(readme_calls)
         except Exception as e:
             name = type(e).__name__
@@ -500,18 +612,46 @@ def _collect_github(
     return GitHubOutcome(github, at, records, star_unjudged)
 
 
+def _github_client(
+    collectors: Collectors, token: str | None, limits: Limits, deadlines: Deadlines
+) -> GitHubClient:
+    """1回の実行で共有する GitHub のクライアント。① 全体の上限を、すべての要求の時間の上限にする
+    （要求の時間を残りまで縮め、残りに収まらない再試行や待ちは始めない）。"""
+    client = collectors.github(token, limits)
+    client.limit_time(deadlines.overall, deadlines.clock)
+    return client
+
+
+def _github_min_seconds(config: Config) -> float:
+    """GitHub の候補集めを始めるのに要る残りの時間（秒）。Search を使い切るまでにかかる時間
+    （1分あたりの回数で間隔をあける。途中では止めない）。Search を使わなければ 0 で、上限を
+    過ぎていなければ始める。"""
+    settings = config.github_repos
+    if settings is None or not (settings.search_topics or settings.search_without_topic):
+        return 0.0
+    limits = config.limits
+    return limits.github_search_calls / limits.github_search_per_minute * MINUTE
+
+
 def _by_repo(snapshots):
     return {s.repo: s for s in snapshots}
 
 
 def _with_readmes(
-    records: tuple[Record, ...], client: GitHubClient, featured: set[str], log: RunLog
+    records: tuple[Record, ...],
+    client: GitHubClient,
+    featured: set[str],
+    log: RunLog,
+    deadline: float,
+    clock: Callable[[], float],
 ) -> tuple[tuple[Record, ...], int]:
     """載せるリポジトリ（すでに載せたものを除く）の README を、一次情報の本文にする。
 
     README の失敗は項目の補足が欠けるだけなので、止めずに続ける（失敗の分類は fetch_readmes が
     ログに残す）。（README を足したレコード、使った要求の回数）を返す。
     想定外の例外のときも、それまでに使った要求の回数を返す。
+    deadline（github_repos の情報源ごとの上限。① 全体の上限で切る）を過ぎたら、残りの README は
+    取らない（README なしで載る）。
     """
     wanted = [
         r for r in records if r.github is not None and repo_url(r.github.full_name) not in featured
@@ -520,7 +660,12 @@ def _with_readmes(
         return records, 0
     before = client.rest_calls
     try:
-        found = fetch_readmes([r.github.full_name for r in wanted if r.github], client)
+        found = fetch_readmes(
+            [r.github.full_name for r in wanted if r.github],
+            client,
+            deadline=deadline,
+            clock=clock,
+        )
     except Exception as e:  # README は補足。想定外でも急上昇の判定は残す
         log.write(
             "collect", "failure", source=GITHUB_REPOS_SOURCE_ID, error_category=type(e).__name__
