@@ -442,7 +442,7 @@ last30days-skill は `--days N --as-of YYYY-MM-DD` で期間を受け取り、�
 | 段階の合計 | 55 分 | 83 分 | — |
 | ジョブ全体 | 60 分（6:00 に始めて 7:00 まで。月曜の週次 7:00 と重ならない） | 90 分 | `bin/tr-run` が統括スクリプトを止める。止めたことはログに残す |
 
-- ① の上限は worker が自分で守る。設定の `collect_wrapup_s`（初期値 60 秒）だけ早く情報源の取得をやめ、まとめて書く時間を残す。上限の後の情報源は取得せずに `timeout` の失敗とし、終わった情報源の分で続ける。情報源ごとの上限は、last30days-skill の CLI の上限時間・Qiita のページの間・GitHub Releases のリポジトリとページの間・README の取得で確かめる（RSS・Atom は1回の要求が HTTP の上限で終わる）。GitHub の候補集め・Star 数の測定は途中で止めないので、残りの時間が Search を使い切る時間（`github_search_calls` ÷ `github_search_per_minute` 分）より短ければ始めずに `timeout` の失敗にする（最低限の目安。Star 数の測定や HTTP の待ちは含まない）。README の取得は github_repos の情報源ごとの上限で止める。② の再試行は、残りが1分より短ければ行わない
+- ① の上限は worker が自分で守る。設定の `collect_wrapup_s`（初期値 120 秒）だけ早く情報源の取得をやめ、まとめて書く時間を残す。上限の後の情報源は取得せずに `timeout` の失敗とし、終わった情報源の分で続ける。GitHub の要求（REST・Search・GraphQL）と RSS・Qiita の HTTP は、1回の要求の接続・応答の上限時間を ① 全体の上限までの残りに縮め、残りに収まらない再試行・待ち（`Retry-After`・Search の間隔を含む）は始めない。`collect_wrapup_s`（初期値 120 秒）は、まとめて書く時間とコンテナの起動の余裕（初回のビルドは除く）にあてる。情報源ごとの上限は、last30days-skill の CLI の上限時間・Qiita のページの間・GitHub Releases のリポジトリとページの間・README の取得で確かめる（RSS・Atom は1回の要求が HTTP の上限で終わる）。GitHub の候補集め・Star 数の測定は途中で止めないので、残りの時間が Search を使い切る時間（`github_search_calls` ÷ `github_search_per_minute` 分）より短ければ始めずに `timeout` の失敗にする（最低限の目安。Star 数の測定や HTTP の待ちは含まない）。README の取得は github_repos の情報源ごとの上限で止める。② の再試行は、残りが1分より短ければ行わない
 - `bin/tr-run` に止められた統括スクリプトは実行エラー Issue を作れない。ジョブ全体の上限は、統括スクリプトの不具合で止まらないときの最後の歯止めとし、段階の合計との差（日次 5 分・週次 7 分）をコンテナの起動などの余裕とする
 
 ### 6.5 API 利用量（1回の実行あたり）
@@ -460,7 +460,7 @@ last30days-skill は `--days N --as-of YYYY-MM-DD` で期間を受け取り、�
 - `--max-budget-usd` は使わない。クライアント側の費用の見積もりで判定するもので、サブスクリプションの利用量の上限ではないため（[CLI reference](https://code.claude.com/docs/en/cli-reference)）
 - 上限を超えたときは、それ以上の要求を出さず、その情報源を失敗として扱う（部分レポート）。部分に分かれる情報源（GitHub Releases の追跡先）は、上限に達した後の部分を取れなかった部分とし、すべてが取れなかったときだけ失敗にする（[data-model.md](data-model.md) 2.8）
 - 各値は設定ファイルの `[limits]` に置き、運用で調整する
-- GitHub の REST・Search・GraphQL の回数は、1回の実行で1つの GitHub のクライアントを共有して合算する（候補集め・Star 数・README・Releases）。Qiita は別に数える。last30days-skill の CLI が内部で使う GitHub の要求は数えられない
+- GitHub の REST・Search・GraphQL の回数は、1回の実行で1つの GitHub のクライアントを共有して合算する（候補集め・Star 数・README・Releases）。Qiita は別に数える。last30days-skill の CLI が内部で使う GitHub の要求は数えられない（同じトークンで Search の二次レート制限に当たるおそれがあるので、last30days と候補集めは並行させない）
 
 ### 6.6 実装で決める細部
 

@@ -99,10 +99,15 @@ CollectReleases = Callable[..., SourceResult]  # （設定, 対象期間, クラ
 
 
 def _last30days(
-    config: Config, period: Period, token: str | None, *, deadline: float | None = None
+    config: Config,
+    period: Period,
+    token: str | None,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[SourceResult]:
     return collect_last30days(
-        config, period, LAST30DAYS_ROOT, github_token=token, deadline=deadline
+        config, period, LAST30DAYS_ROOT, github_token=token, deadline=deadline, clock=clock
     )
 
 
@@ -221,7 +226,9 @@ def run_collect(
         keep(
             _collect_one(
                 feed_source_id(f),
-                lambda _, f=f: collectors.feed(f, limits),
+                lambda until, f=f: collectors.feed(
+                    f, limits, deadline=until, clock=collectors.clock
+                ),
                 log,
                 collectors,
                 deadlines,
@@ -232,7 +239,9 @@ def run_collect(
         keep(
             _collect_one(
                 QIITA_SOURCE_ID,
-                lambda until: collectors.qiita(qiita, target.period, limits, deadline=until),
+                lambda until: collectors.qiita(
+                    qiita, target.period, limits, deadline=until, clock=collectors.clock
+                ),
                 log,
                 collectors,
                 deadlines,
@@ -253,7 +262,7 @@ def run_collect(
     results = [r for r, _ in fetched]
     # REST の回数の上限（1回の実行あたり）はクライアントごとに数える。候補集め・README・Releases で
     # 1つのクライアントを共有し、上限を超えないようにする
-    client = cache(lambda: collectors.github(token, limits))
+    client = cache(lambda: _github_client(collectors, token, limits, deadlines))
     github = _collect_github(
         config, target, results, client, db, write, featured, log, collectors, deadlines
     )
@@ -266,7 +275,7 @@ def run_collect(
             _collect_one(
                 RELEASES_SOURCE_ID,
                 lambda until: collectors.releases(
-                    releases, target.period, client(), deadline=until
+                    releases, target.period, client(), deadline=until, clock=collectors.clock
                 ),
                 log,
                 collectors,
@@ -483,7 +492,11 @@ def _collect_last30days(
             results = [_out_of_time(sid, log) for sid in enabled]
         else:
             results = collectors.last30days(
-                config, target.period, token, deadline=deadlines.source()
+                config,
+                target.period,
+                token,
+                deadline=deadlines.source(),
+                clock=collectors.clock,
             )
     except Exception as e:
         name = type(e).__name__
@@ -520,7 +533,7 @@ def _collect_github(
     until = deadlines.source()  # 情報源ごとの上限（README の取得に渡す）
     if target.cadence != "daily":
         github = GitHubFetch(0, 0, skipped=True)
-    elif deadlines.left() < _github_min_seconds(config):
+    elif deadlines.expired() or deadlines.left() < _github_min_seconds(config):
         # 残りの時間が Search の最短の所要時間より短い（途中で止められず ① 全体が落ちるため）。
         # 取得せず失敗にする
         log.write(
@@ -597,6 +610,16 @@ def _collect_github(
         detail="skipped" if github.skipped else github.error,
     )
     return GitHubOutcome(github, at, records, star_unjudged)
+
+
+def _github_client(
+    collectors: Collectors, token: str | None, limits: Limits, deadlines: Deadlines
+) -> GitHubClient:
+    """1回の実行で共有する GitHub のクライアント。① 全体の上限を、すべての要求の時間の上限にする
+    （要求の時間を残りまで縮め、残りに収まらない再試行や待ちは始めない）。"""
+    client = collectors.github(token, limits)
+    client.deadline = deadlines.overall
+    return client
 
 
 def _github_min_seconds(config: Config) -> float:

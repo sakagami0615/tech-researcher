@@ -131,7 +131,7 @@ def test_deadline_stops_the_pages_and_fails_the_source_as_timeout(limits):
     now = [0.0]
     pages = FakeApi([[item(n) for n in range(100)]] * 5)
 
-    def api(url, page_limits):
+    def api(url, page_limits, **_):
         now[0] += 60  # 1ページごとに 60 秒かかる
         return pages(url, page_limits)
 

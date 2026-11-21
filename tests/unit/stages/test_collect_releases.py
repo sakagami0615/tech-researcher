@@ -147,7 +147,7 @@ def test_failed_source_without_breakdown_is_shown_with_a_generic_reason(tmp_path
     cfg = replace(CONFIG, feeds=(feed("a"),))
     broken = replace(
         all_collectors([]),
-        feed=lambda f, limits: SourceResult("rss:a", (), 3, "x", error_category="KeyError"),
+        feed=lambda f, limits, **_: SourceResult("rss:a", (), 3, "x", error_category="KeyError"),
     )
     run_collect(cfg, TARGET, tmp_path, prod_log(tmp_path), collectors=broken)
     assert unavailable_notes(tmp_path, cfg) == [("a", "取得に失敗")]
@@ -261,7 +261,7 @@ def test_classified_failures_of_other_sources_are_shown_with_their_reason(tmp_pa
     cfg = replace(CONFIG, feeds=(feed("a"),))
     broken = replace(
         all_collectors([]),
-        feed=lambda f, limits: SourceResult("rss:a", (), 3, "x", error_category="http_5xx"),
+        feed=lambda f, limits, **_: SourceResult("rss:a", (), 3, "x", error_category="http_5xx"),
     )
     run_collect(cfg, TARGET, tmp_path, prod_log(tmp_path), collectors=broken)
     assert unavailable_notes(tmp_path, cfg) == [("a", "HTTP 5xx")]

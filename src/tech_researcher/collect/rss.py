@@ -8,24 +8,34 @@
 import calendar
 import io
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from html.parser import HTMLParser
+from time import monotonic
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import feedparser
 
-from tech_researcher.collect.http import INVALID_RESPONSE, FetchError, classify, fetch
+from tech_researcher.collect.http import INVALID_RESPONSE, FetchError, classify, fetch, time_limit
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.config import Feed, Limits
 
 log = logging.getLogger(__name__)
 
 
-def collect_feed(feed: Feed, limits: Limits, *, fetch_url=fetch) -> SourceResult:
+def collect_feed(
+    feed: Feed,
+    limits: Limits,
+    *,
+    fetch_url=fetch,
+    deadline: float | None = None,
+    clock: Callable[[], float] = monotonic,
+) -> SourceResult:
     """フィードを取得する。フィードとして読めない応答（HTML のエラーページなど）は失敗にする。
 
     pages が2以上なら、続くページも取る（GitHub Changelog。D-11）。どれかのページが失敗したら、
     情報源全体を失敗にする。重なったエントリーは先に出たものを残す。
+    deadline は時間の上限（clock の値。structure.md 6.4）で、要求の時間をその残りに収める。
     2ページ目以降に新しいエントリーがなければ警告をログに残す（ページ送りが効いていないおそれ）。
     """
     source_id = feed_source_id(feed)
@@ -34,7 +44,7 @@ def collect_feed(feed: Feed, limits: Limits, *, fetch_url=fetch) -> SourceResult
     attempts = 0
     for page in range(1, feed.pages + 1):
         try:
-            response = fetch_url(_page_url(feed.url, page), limits)
+            response = fetch_url(_page_url(feed.url, page), limits, **time_limit(deadline, clock))
         except FetchError as e:
             return SourceResult(
                 source_id, (), attempts + e.attempts, str(e), error_category=classify(e)

@@ -430,3 +430,12 @@ def test_result_text_is_read_only_for_api_errors(reason):
     # スキーマに合わない出力・ターン数の超過などの文は、手がかりに合っても読まない
     data = {**json.loads(NOT_LOGGED_IN), "terminal_reason": reason, "result": "limit reached"}
     assert invoke.classify_failure(data) == "agent_failed"
+
+
+@pytest.mark.parametrize(
+    "result", ["API Error: Overloaded", "Internal server error", "Unable to connect to API"]
+)
+def test_known_status_decides_alone_even_with_a_transient_text(result):
+    # 状態が400など知らないものなら、一時的な失敗を示す文があっても再試行しない
+    data = {**json.loads(NOT_LOGGED_IN), "api_error_status": 400, "result": result}
+    assert invoke.classify_failure(data) == "agent_failed"

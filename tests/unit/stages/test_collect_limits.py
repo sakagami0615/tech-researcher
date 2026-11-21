@@ -8,9 +8,9 @@ from dataclasses import replace
 from datetime import date
 
 from tech_researcher.collect.github_api import GitHubClient
-from tech_researcher.collect.http import Response
+from tech_researcher.collect.http import FetchError, Response
 from tech_researcher.collect.records import SourceResult
-from tech_researcher.config import GitHubReleases
+from tech_researcher.config import Feed, GitHubReleases
 from tech_researcher.periods import weekly_target
 from tech_researcher.stages import collect as collect_stage
 from tech_researcher.stages.collect import FETCHES, Deadlines, run_collect
@@ -23,6 +23,7 @@ from tests.unit.stages.test_collect import (
     prod_log,
 )
 
+CONFIG_FEED = Feed("a", "a", "https://a.example.com/rss", "new", True)
 RELEASES = GitHubReleases(True, "GitHub Releases", ("a/one", "b/two", "c/three"))
 
 
@@ -77,7 +78,7 @@ def test_sources_after_the_overall_limit_fail_as_timeout_and_the_rest_continue(t
     calls = []
     base = all_collectors(calls)
 
-    def slow_feed(f, limits):
+    def slow_feed(f, limits, **_):
         result = base.feed(f, limits)
         clock.now += 11 * 60  # 1つ目で ① の上限（10 分）を使い切る
         return result
@@ -115,17 +116,17 @@ def test_each_source_gets_its_deadline_inside_the_overall_one(tmp_path):
     seen = {}
     releases_config = replace(all_sources_config(), github_releases=RELEASES)
 
-    def qiita(settings, period, limits, *, deadline):
+    def qiita(settings, period, limits, *, deadline, **_):
         seen["qiita"] = deadline
         clock.now += 100
         return SourceResult("qiita", (), 1)
 
-    def last30days(config, period, token, *, deadline):
+    def last30days(config, period, token, *, deadline, **_):
         seen["last30days"] = deadline
         clock.now += 100
         return [SourceResult("hackernews", (), 1), SourceResult("github_search", (), 1)]
 
-    def releases(settings, period, client, *, deadline):
+    def releases(settings, period, client, *, deadline, **_):
         seen["releases"] = deadline
         return SourceResult("github_releases", (), 1)
 
@@ -226,7 +227,7 @@ def test_github_is_not_started_without_time_for_its_searches(tmp_path):
     calls = []
     base = all_collectors(calls)
 
-    def slow_feed(f, limits):
+    def slow_feed(f, limits, **_):
         if clock.now == 1000.0:  # 最初の feed だけ。全体の上限（10 分）まで残り 3 分になる
             clock.now += 7 * 60
         return base.feed(f, limits)
@@ -238,3 +239,69 @@ def test_github_is_not_started_without_time_for_its_searches(tmp_path):
     assert "github_search" not in calls and "github_graphql" not in calls
     assert fetched_status(tmp_path)["github_repos"] == ("failed", "timeout")
     assert clock.now < 1000.0 + 10 * 60  # 上限は過ぎていない（Search の時間だけが足りない）
+
+
+def test_github_is_not_started_exactly_at_the_limit(tmp_path):
+    """上限ちょうど（残り 0 秒）では、Search を使わない設定でも始めずに timeout にする。"""
+    clock = Clock()
+    calls = []
+    base = all_collectors(calls)
+
+    def feed(f, limits, **_):
+        clock.now += 10 * 60  # 全体の上限（10 分）ちょうど
+        return base.feed(f, limits)
+
+    quiet = replace(all_sources_config().github_repos, search_without_topic=False, search_topics=())
+    config = limited(replace(all_sources_config(), feeds=(), github_repos=quiet), collect=10)
+    config = replace(config, feeds=(CONFIG_FEED,))
+    collected = replace(base, feed=feed, clock=clock)
+    run_collect(config, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
+    assert "github_graphql" not in calls
+    assert fetched_status(tmp_path)["github_repos"] == ("failed", "timeout")
+
+
+def test_collect_ends_inside_the_stage_limit_even_when_one_request_is_slow(tmp_path):
+    """last30days が上限の1秒前まで使い、Releases の1回の要求に 145 秒かかる場合でも、
+    ① は全体の上限の内に終わる（要求の時間を残りに収め、残りのリポジトリは要求しない）。"""
+    clock = Clock()
+    calls = []
+    base = all_collectors(calls)
+    config = limited(
+        replace(all_sources_config(), github_releases=RELEASES, github_repos=None, feeds=()),
+        collect=20,
+        per_source=10,
+        wrapup=120,
+    )
+    overall = clock.now + 20 * 60 - 120
+
+    def last30days(cfg, period, token, **_):
+        clock.now = overall - 1  # 上限の 1 秒前まで使う
+        return [SourceResult("hackernews", (), 1), SourceResult("github_search", (), 1)]
+
+    def slow(url, limits, *, deadline=None, clock=None, **_):
+        # 本物の fetch と同じく、要求の時間は残りの時間までに収める
+        left = deadline - clock()
+        if left <= 0:
+            raise FetchError("時間の上限に達した", 0, category="timeout")
+        requested.append(url)
+        spent = min(145.0, left)
+        tick.now += spent
+        if spent < 145.0:
+            raise FetchError("timeout", 1, category="timeout")
+        return Response(url, 200, b"[]", 1)
+
+    requested: list[str] = []
+    tick = clock
+
+    def make(token, limits):
+        return GitHubClient(token, limits, fetch_url=slow, sleep=lambda s: None, clock=clock)
+
+    collected = replace(base, last30days=last30days, github=make, clock=clock)
+    # Qiita は無効にして、Releases の動きだけを見る
+    config = replace(config, qiita=None)
+    summary = run_collect(config, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
+
+    assert clock.now <= overall + 1e-9  # 全体の上限（段階の上限から余裕を引いた時刻）の内
+    assert len(requested) == 1  # 残りのリポジトリには要求を出さない
+    assert "github_releases" in summary["failed_sources"]
+    assert fetched_status(tmp_path)["github_releases"] == ("failed", "timeout")

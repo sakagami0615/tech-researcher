@@ -268,12 +268,17 @@ def _run(
     時間の中だけで行う。
     """
     attempts = limits.last30days_retries + 1
+    error, category = "", None  # 直前の失敗（再試行の前に上限に達したとき残す）
     for attempt in range(1, attempts + 1):
         timeout = float(limits.last30days_timeout_s)
         if deadline is not None:
             left = deadline - clock()
             if left <= 0:
-                raise _CliError("時間の上限に達した", attempt - 1, TIMEOUT)
+                if attempt > 1:  # 1回目の失敗の分類と詳細を残す
+                    raise _CliError(
+                        f"{error}（時間の上限のため再試行しない）", attempt - 1, category
+                    )
+                raise _CliError("時間の上限に達した", 0, TIMEOUT)
             timeout = min(timeout, left)
         try:
             done = run(

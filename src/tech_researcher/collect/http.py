@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
@@ -108,8 +108,16 @@ def fetch(
     headers: Mapping[str, str] | None = None,
     follow_redirects: bool = True,
     data: bytes | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    min_wait: float = 0.0,
 ) -> Response:
     """GET して本文を返す。待ちは設定の http_retry_waits_s で、Retry-After があれば従う。
+
+    deadline は時間の上限（clock の値。structure.md 6.4）。1回の要求の接続・応答の上限時間を
+    残りの時間まで縮め、残りに収まらない再試行（待ちを含む。min_wait は呼ぶ側が待つ最短の秒数）
+    は始めずに、そのときの失敗を FetchError にする。過ぎていれば要求を出さずに timeout にする。
+    上限時間はソケットの1回ごとの待ちに掛かるので、少しずつ送り続ける応答までは縮められない。
 
     data を渡すと、それを本文にして POST する（GitHub の GraphQL の問い合わせ用）。POST でも
     同じく再試行するので、読み取りだけの要求（何度送っても結果が変わらないもの）にだけ使う。
@@ -121,7 +129,8 @@ def fetch(
     if data is not None and follow_redirects:
         # urllib は POST の 301〜303 を本文のない GET に変えてたどるため、組み合わせない
         raise ValueError("data を送るときは follow_redirects=False にする")
-    if open_url is None:
+    default_open = open_url is None
+    if default_open and deadline is None:
         opener = _opener(limits, follow_redirects)
 
         def open_url(req):
@@ -132,6 +141,17 @@ def fetch(
         request.add_unredirected_header(name, value)
     waits = limits.http_retry_waits_s
     for attempt in range(1, len(waits) + 2):
+        if deadline is not None:
+            left = deadline - clock()
+            if left <= 0:
+                raise FetchError("時間の上限に達した", attempt - 1, category=TIMEOUT)
+            if default_open:  # 1回の上限時間を残りの時間まで縮める
+                opener = _opener(_shrunk(limits, left), follow_redirects)
+                connect = min(limits.http_connect_timeout_s, left)
+
+                def open_url(req, opener=opener, connect=connect):
+                    return opener.open(req, timeout=connect)
+
         try:
             return _get(open_url, request, attempt)
         except _Retryable as e:
@@ -140,8 +160,27 @@ def fetch(
             wait = waits[attempt - 1]
             if e.retry_after is not None:
                 wait = min(e.retry_after, limits.retry_after_max_s)
+            if deadline is not None and clock() + max(wait, min_wait) >= deadline:
+                # 待った後に要求する時間が残らない。再試行せずに、この失敗で終える
+                raise FetchError(
+                    f"時間の上限のため再試行しない：{e}", attempt, e.status, e.headers
+                ) from e
             sleep(wait)
     raise AssertionError("ここには来ない")
+
+
+def time_limit(deadline: float | None, clock: Callable[[], float]) -> dict:
+    """fetch に渡す時間の上限の引数（上限がなければ空）。"""
+    return {} if deadline is None else {"deadline": deadline, "clock": clock}
+
+
+def _shrunk(limits: Limits, left: float) -> Limits:
+    """接続・応答の上限時間を、残りの時間（秒）に収める（小数の秒にする）。"""
+    return replace(
+        limits,
+        http_connect_timeout_s=min(limits.http_connect_timeout_s, left),
+        http_read_timeout_s=min(limits.http_read_timeout_s, left),
+    )
 
 
 def _get(open_url, request, attempt: int) -> Response:

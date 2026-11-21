@@ -553,6 +553,14 @@ def _stage_limits(t: _Table) -> StageLimits:
     return result
 
 
+def _analyze_retries(t: _Table) -> int:
+    """② の再試行の回数は 0〜1（structure.md 6.5 の「② は最大2回（再試行を含む）」）。"""
+    value = t.int_at_least("analyze_retries", minimum=0)
+    if value > 1:
+        raise ConfigError(f"limits.analyze_retries: 0 か 1 にする（{value}）")
+    return value
+
+
 def _limits(t: _Table) -> Limits:
     waits = t.value("http_retry_waits_s", list)
     if not all(isinstance(w, int) and not isinstance(w, bool) and w >= 0 for w in waits):
@@ -568,7 +576,7 @@ def _limits(t: _Table) -> Limits:
         last30days_timeout_s=t.int_at_least("last30days_timeout_s"),
         last30days_retries=t.int_at_least("last30days_retries", minimum=0),
         collect_wrapup_s=t.int_at_least("collect_wrapup_s", minimum=0),
-        analyze_retries=t.int_at_least("analyze_retries", minimum=0),
+        analyze_retries=_analyze_retries(t),
         github_rest_calls=t.int_at_least("github_rest_calls"),
         github_search_calls=t.int_at_least("github_search_calls"),
         github_search_per_minute=t.int_at_least("github_search_per_minute"),

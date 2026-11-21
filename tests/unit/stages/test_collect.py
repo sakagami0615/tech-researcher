@@ -62,7 +62,7 @@ def record(source_id, url, published):
     )
 
 
-def fake_collect(f, limits):
+def fake_collect(f, limits, **_):
     match f.id:
         case "a":
             return SourceResult(
@@ -169,7 +169,7 @@ def test_popularity_is_judged_before_period_filter(tmp_path):
     )
     hot = Attention("hatena_bookmarks", 500.0, FETCHED)
 
-    def popular_collect(f, limits):
+    def popular_collect(f, limits, **_):
         match f.id:
             case "p":
                 records = (
@@ -270,7 +270,7 @@ def test_collected_items_can_be_loaded_back(tmp_path):
         TARGET,
         tmp_path,
         log,
-        collectors=Collectors(feed=lambda f, limits: SourceResult("rss:x", records, 1)),
+        collectors=Collectors(feed=lambda f, limits, **_: SourceResult("rss:x", records, 1)),
     )
 
     items = load_collected(tmp_path / COLLECTED)
@@ -306,7 +306,7 @@ class FakeGitHub:
         self.search_error = search_error  # Search の失敗の HTTP の状態
         self.created = created or {}  # リポジトリ → 作成日時（なければ REPO_CREATED）
 
-    def fetch(self, url, limits, *, headers, sleep, follow_redirects, data=None):
+    def fetch(self, url, limits, *, headers, sleep, follow_redirects, data=None, **_):
         if "/readme" in url:
             repo = url.split("/repos/")[1].removesuffix("/readme")
             self.calls.append(f"readme:{repo}")
@@ -360,7 +360,7 @@ def all_sources_config():
 
 
 def all_collectors(calls, github=None, token=TOKEN, hn_record=None):
-    def rss(f, limits):
+    def rss(f, limits, **_):
         calls.append(f"rss:{f.id}")
         return fake_collect(f, limits)
 
@@ -956,7 +956,9 @@ def test_featured_repo_with_another_event_is_passed_without_the_spike(tmp_path):
     )
     collectors = all_collectors([], github=github)
     release = record("rss:a", "https://github.com/done/repo", IN)
-    collectors = replace(collectors, feed=lambda f, limits: SourceResult("rss:a", (release,), 1))
+    collectors = replace(
+        collectors, feed=lambda f, limits, **_: SourceResult("rss:a", (release,), 1)
+    )
     summary = run_day(conn, tmp_path, PROD, github, collectors)
     assert summary["held_items"] == 0
     item = {i.url: i for i in load_collected(tmp_path / COLLECTED)}["https://github.com/done/repo"]

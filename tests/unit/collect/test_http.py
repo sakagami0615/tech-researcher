@@ -314,3 +314,86 @@ def test_data_with_redirects_followed_is_refused(limits):
     with pytest.raises(ValueError):
         fetch(URL, limits, open_url=open_url, data=b"{}")
     assert requests == []
+
+
+# ① の時間の上限（deadline。structure.md 6.4）
+def test_expired_deadline_sends_no_request(limits):
+    open_url, requests = scripted(b"x")
+    with pytest.raises(FetchError) as e:
+        fetch(URL, limits, open_url=open_url, deadline=10.0, clock=lambda: 10.0)
+    assert requests == [] and e.value.attempts == 0 and e.value.category == "timeout"
+
+
+def test_retry_that_does_not_fit_in_the_remaining_time_is_not_started(limits):
+    now = [0.0]
+    open_url, requests = scripted(http_error(503), b"ok")
+    waits = []
+    with pytest.raises(FetchError) as e:
+        # 待ち（5 秒）の後に要求する時間が残らない（残り 4 秒）
+        fetch(
+            URL,
+            limits,
+            open_url=open_url,
+            sleep=waits.append,
+            deadline=4.0,
+            clock=lambda: now[0],
+        )
+    assert waits == [] and len(requests) == 1
+    assert e.value.attempts == 1 and e.value.status == 503
+
+
+def test_retry_after_and_min_wait_count_toward_the_deadline(limits):
+    open_url, requests = scripted(http_error(429, "50"), b"ok")
+    with pytest.raises(FetchError):
+        fetch(
+            URL, limits, open_url=open_url, sleep=lambda s: None, deadline=40.0, clock=lambda: 0.0
+        )
+    assert len(requests) == 1  # Retry-After の 50 秒が残り 40 秒に収まらない
+    open_url, requests = scripted(http_error(503), b"ok")
+    with pytest.raises(FetchError):
+        fetch(
+            URL,
+            limits,
+            open_url=open_url,
+            sleep=lambda s: None,
+            deadline=30.0,
+            clock=lambda: 0.0,
+            min_wait=40.0,  # 呼ぶ側が待つ最短の秒数（Search の間隔）
+        )
+    assert len(requests) == 1
+
+
+def test_retry_that_fits_is_made(limits):
+    open_url, requests = scripted(http_error(503), b"ok")
+    waits = []
+    response = fetch(
+        URL, limits, open_url=open_url, sleep=waits.append, deadline=100.0, clock=lambda: 0.0
+    )
+    assert response.body == b"ok" and waits == [5] and len(requests) == 2
+
+
+def test_timeouts_of_one_request_are_cut_to_the_remaining_time(limits):
+    shrunk = tr_http._shrunk(limits, 2.5)
+    assert (shrunk.http_connect_timeout_s, shrunk.http_read_timeout_s) == (2.5, 2.5)
+    same = tr_http._shrunk(limits, 100.0)
+    assert (same.http_connect_timeout_s, same.http_read_timeout_s) == (10, 30)
+
+
+def test_real_request_to_a_silent_server_is_cut_at_the_deadline(limits):
+    """応答しない相手に対し、応答の上限（30 秒）ではなく残りの時間で打ち切る。"""
+    import time
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    try:
+        started = time.monotonic()
+        with pytest.raises(FetchError):
+            fetch(
+                f"http://127.0.0.1:{server.getsockname()[1]}/",
+                limits,
+                deadline=started + 0.3,
+            )
+        assert time.monotonic() - started < 5
+    finally:
+        server.close()

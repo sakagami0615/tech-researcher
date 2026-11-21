@@ -441,10 +441,13 @@ def test_wrapup_must_be_shorter_than_the_collect_limit(base):
 
 def test_retry_and_wrapup_limits_are_read(base):
     limits = load_config(CONFIG_PATH).limits
-    assert (limits.collect_wrapup_s, limits.analyze_retries) == (60, 1)
+    assert (limits.collect_wrapup_s, limits.analyze_retries) == (120, 1)
     data = full(base)
     data["limits"]["analyze_retries"] = 0
     assert parse_config(data).limits.analyze_retries == 0
+    data["limits"]["analyze_retries"] = 2  # 6.5 の「② は最大2回（再試行を含む）」を超える
+    with pytest.raises(ConfigError, match="analyze_retries"):
+        parse_config(data)
     data["limits"]["analyze_retries"] = -1
     with pytest.raises(ConfigError, match="analyze_retries"):
         parse_config(data)

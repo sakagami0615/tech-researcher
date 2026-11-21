@@ -288,7 +288,8 @@ def classify_failure(data: dict) -> str:
     """出力がなく終わった結果の JSON の失敗の分類。分からなければ agent_failed（再試行しない）。
 
     HTTP の状態（api_error_status。あれば）を先に見る：401・403 は auth、429 は usage_limit、
-    529 は overloaded、ほかの 5xx は server_error。なければ result の文の手がかりで決める
+    529 は overloaded、ほかの 5xx は server_error、知らない状態は agent_failed（状態があれば
+    状態だけで決め、文で分類し直さない）。状態がなければ result の文の手がかりで決める
     （terminal_reason が api_error のときだけ）。is_error が真でなければ agent_failed。
     一時的と分かるものだけを TRANSIENT にし、迷うものは再試行しない。
     """
@@ -304,6 +305,7 @@ def classify_failure(data: dict) -> str:
             return OVERLOADED
         if 500 <= status < 600:
             return SERVER_ERROR
+        return "agent_failed"  # 知らない状態は、文で分類し直さない（再試行しない）
     text = data.get("result")
     # 文を読むのは API の失敗（terminal_reason が api_error）のときだけ。スキーマに合わない出力や
     # ターン数の超過で終わった結果の文は、AI や入力の外部の文を含みうるので読まない

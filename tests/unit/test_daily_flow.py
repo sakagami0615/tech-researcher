@@ -184,7 +184,7 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
     )
     monkeypatch.setattr(orchestrator.Compose, "run", lambda c, *a: h.fake_compose_run(c, *a))
     monkeypatch.setattr(invoke, "call_agent", h.fake_call_agent)
-    collect = partial(collect_feed, fetch_url=lambda url, limits: h.fake_fetch(url, limits))
+    collect = partial(collect_feed, fetch_url=lambda url, limits, **_: h.fake_fetch(url, limits))
     collectors = Collectors(feed=collect)
     monkeypatch.setattr(cli, "run_collect", partial(run_collect, collectors=collectors))
     return h

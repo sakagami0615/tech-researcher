@@ -16,7 +16,14 @@ from datetime import UTC, datetime, time, timedelta
 from time import monotonic
 from urllib.parse import urlencode
 
-from tech_researcher.collect.http import INVALID_RESPONSE, TIMEOUT, FetchError, classify, fetch
+from tech_researcher.collect.http import (
+    INVALID_RESPONSE,
+    TIMEOUT,
+    FetchError,
+    classify,
+    fetch,
+    time_limit,
+)
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.collect.rss import html_links
 from tech_researcher.config import Limits, Qiita
@@ -72,7 +79,7 @@ def collect_qiita(
         page_limits = replace(limits, http_retry_waits_s=limits.http_retry_waits_s[: remaining - 1])
         url = f"{API_URL}?{urlencode({'page': page, 'per_page': PER_PAGE, 'query': query})}"
         try:
-            response = fetch_url(url, page_limits)
+            response = fetch_url(url, page_limits, **time_limit(deadline, clock))
         except FetchError as e:
             return _failure(attempts + e.attempts, str(e), classify(e))
         attempts += response.attempts

@@ -249,7 +249,9 @@ def test_retry_stops_when_the_deadline_passes_between_attempts():
         CONFIG, PERIOD, ROOT, github_token="t", run=advancing, deadline=100.0, clock=lambda: now[0]
     )
     assert len(run.calls) == 1  # 1回目の後に上限を過ぎた。再試行しない
-    assert all(r.error_category == "timeout" and r.attempts == 1 for r in results)
+    # 1回目の失敗の分類と詳細を残す（上限の超過に置き換えない）
+    assert all(r.error_category == "exit_code" and r.attempts == 1 for r in results)
+    assert all("boom" in r.error and "再試行しない" in r.error for r in results)
 
 
 def test_exit_1_is_retried():
