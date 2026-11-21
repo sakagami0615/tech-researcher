@@ -93,6 +93,105 @@ def lookup_item_refs(
     return {url: marks[url] for url in urls if url in marks}
 
 
+_ROW_COLUMNS = (
+    "target",
+    "canonical_url",
+    "kind",
+    "title",
+    "excerpt",
+    "published_at",
+    "published_precision",
+    "posted_at",
+    "inclusion_event",
+    "inclusion_basis",
+    "inclusion_at",
+    "events_json",
+    "attention_json",
+    "sources_json",
+    "links_json",
+    "github_json",
+    "meta_terms_json",
+    "hold_reason",
+)
+
+
+def load_item_rows(conn: sqlite3.Connection, cadence: str, first: date, end: date) -> list[ItemRow]:
+    """対象が first 以上 end 未満の行を ItemRow に戻す（週次の材料に日次の収集結果を使う。3.8）。
+
+    対象の順、同じ対象の中では主キーの順。読むだけなので、読み取り専用の接続でも使える。
+    保存していないもの（一次情報の本文、出典ごとのタイトル・抜粋）は戻らない。出典は重複判定結果の
+    1件ごとに1つのレコードで、代表のタイトル・抜粋・公開日時は先頭のレコードが持つ。
+    """
+    rows = conn.execute(
+        f"SELECT {', '.join(_ROW_COLUMNS)} FROM items"
+        " WHERE cadence = ? AND target >= ? AND target < ? ORDER BY target, item_id",
+        (cadence, first.isoformat(), end.isoformat()),
+    )
+    return [_restore(cadence, dict(zip(_ROW_COLUMNS, row, strict=True))) for row in rows]
+
+
+def _restore(cadence: str, r: dict) -> ItemRow:
+    published_at = _time(r["published_at"])
+    precision = r["published_precision"]
+    records = tuple(
+        Record(
+            source_id=s["source_id"],
+            url=s["url"],
+            title=r["title"] if n == 0 else "",
+            published_precision=precision if n == 0 else "unknown",
+            fetched_at=datetime.fromisoformat(s["fetched_at"]),
+            events=(),
+            excerpt=r["excerpt"] if n == 0 else None,
+            published_at=published_at if n == 0 else None,
+            posted_at=_time(s["posted_at"]),
+        )
+        for n, s in enumerate(json.loads(r["sources_json"]))
+    )
+    github = None if r["github_json"] is None else json.loads(r["github_json"])
+    item = Item(
+        url=r["canonical_url"],
+        sources=records,
+        events=tuple(
+            Event(e["type"], datetime.fromisoformat(e["at"]), e["basis"])
+            for e in json.loads(r["events_json"])
+        ),
+        attention=tuple(
+            Attention(a["metric"], a["value"], datetime.fromisoformat(a["measured_at"]))
+            for a in json.loads(r["attention_json"])
+        ),
+        links=tuple(json.loads(r["links_json"])),
+        meta_terms=tuple(json.loads(r["meta_terms_json"])),
+        github=None
+        if github is None
+        else GitHubRepo(
+            github["full_name"],
+            datetime.fromisoformat(github["created_at"]),
+            github["stars_total"],
+            github["star_delta_24h"],
+            tuple(github["mentioned_by"]),
+        ),
+    )
+    return ItemRow(
+        cadence=cadence,
+        target=date.fromisoformat(r["target"]),
+        item=item,
+        kind=r["kind"],
+        title=r["title"],
+        published_precision=precision,
+        inclusion=Event(
+            r["inclusion_event"], datetime.fromisoformat(r["inclusion_at"]), r["inclusion_basis"]
+        ),
+        excerpt=r["excerpt"],
+        published_at=published_at,
+        posted_at=_time(r["posted_at"]),
+        hold_reason=r["hold_reason"],
+    )
+
+
+def _time(text: str | None) -> datetime | None:
+    return None if text is None else datetime.fromisoformat(text)
+
+
 _KEY = ("cadence", "target", "canonical_url")
 # 再試行・再実行で置き換える列。first_run_id は最初の値を残す
 _VALUES = (

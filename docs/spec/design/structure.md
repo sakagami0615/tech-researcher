@@ -291,6 +291,7 @@ period_days = 1                 # 対象期間の長さ。終わりは実行日�
 
 [weekly]
 period_days = 7                 # 終わりは実行日（月曜）の 0:00（JST）。D-17
+compare_weeks = 4               # 比較の窓（過去何週か。省略すると 4。data-model.md 3.8）
 
 # 情報源。enabled = false で除外し、ブロックを足して追加する
 [sources.hackernews]

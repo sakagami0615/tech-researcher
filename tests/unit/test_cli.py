@@ -87,7 +87,10 @@ def test_weekly_target_comes_from_run_id(env, capsys):
     (Path(env["TR_DATA_DIR"]) / "dry-run" / run_id).mkdir()
     assert cli.main(["collect", "weekly", "--run-id", run_id], env) == 0
     assert json.loads(capsys.readouterr().out)["target"] == "2026-10-26"
-    assert not (Path(env["TR_DATA_DIR"]) / "dry-run" / run_id / "agent-input.json").exists()
+    data = json.loads(
+        (Path(env["TR_DATA_DIR"]) / "dry-run" / run_id / "agent-input.json").read_text("utf-8")
+    )
+    assert (data["task"], data["target"]["week"]) == ("weekly", "2026-10-26")
 
 
 @pytest.mark.parametrize(

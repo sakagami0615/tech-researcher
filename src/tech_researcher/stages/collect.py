@@ -16,6 +16,8 @@ fetches.json にも書く（実行エラー Issue の表と、部分的な失敗
 Star 数の測定の後に、急上昇・新規のリポジトリを判定し（github_spikes）、載せる分の README を取る。
 まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
 に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
+週次は、取り直した分と DB にある日次の items を URL でまとめ（stages/weekly_items.py）、まとめた分を
+collected.json と週次の items にする（日次の掲載除外は持ち込まない。Star・人気型フィードは測らない）。
 時間の上限（structure.md 6.4）：① 全体の上限（段階の上限から collect_wrapup_s を引いた時刻）を
 過ぎたら、残りの情報源は取得せずに timeout の失敗にして、終わった情報源の分で続ける。情報源ごとの
 上限は last30days-skill・Qiita・GitHub Releases に、全体の上限は README の取得に渡す（Deadlines）。
@@ -23,7 +25,7 @@ Star 数の測定の後に、急上昇・新規のリポジトリを判定し（
 情報源の ID だけを入れる（structure.md 3.2）。
 前日の記録がなく判定しなかった急上昇は unjudged.json に書き、③ がヘッダの定型文にする。
 collected.json は load_collected で収集項目に戻せる（② の入力の用意と ③ の照合に使う）。
-日次は、collected.json の項目と同じ順の ID を item-ids.json に書く。本番は items の主キーから
+collected.json の項目と同じ順の ID を item-ids.json に書く。本番は items の主キーから
 作る ID（i48213）、ドライランは DB にすでにある項目はその ID、新しい項目は仮の ID（d1, d2, …。
 data-model.md 2.6）にする。
 """
@@ -78,6 +80,7 @@ from tech_researcher.stages.collect_store import (
     source_fetch,
     unavailable_sources,
 )
+from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows
 
 OUT_OF_TIME = "収集全体の時間の上限に達した"
 COLLECTED = "collected.json"
@@ -297,12 +300,18 @@ def run_collect(
     fetches = [source_fetch(r, at, counts[r.source_id]) for r, at in fetched]
     if github is not None:
         fetches.append(github.fetch.to_fetch(github.at, counts[GITHUB_REPOS_SOURCE_ID]))
+    rows = None
+    stored = observed  # items に書く項目（日次は AI に渡さない項目も含む）
+    if target.cadence == "weekly":
+        # 週次の材料：取り直した分と、DB にある日次の収集結果を URL でまとめる（3.8）
+        rows = weekly_rows(target, items, load_daily_rows(db, target) if db is not None else [])
+        items = stored = [r.item for r in rows]
     refs: dict[str, str] = {}
     if write:
         assert db is not None
-        saved = save_collect(db, log.run_id, target, fetches, observed, holds)
-        refs = dict(zip((i.url for i in observed), saved, strict=target.cadence == "daily"))
-    elif db is not None and target.cadence == "daily":  # ドライラン：本番の実行が書いた項目の ID
+        saved = save_collect(db, log.run_id, target, fetches, observed, holds, rows)
+        refs = dict(zip((i.url for i in stored), saved, strict=True))
+    elif db is not None:  # ドライラン：本番の実行が書いた項目の ID
         refs = lookup_item_refs(db, target.cadence, target.key, (i.url for i in items))
     # 途中で止まっても壊れたファイルを残さないよう、一時ファイルに書いてから置き換える
     partial = run_dir / f"{COLLECTED}.partial"
@@ -318,7 +327,7 @@ def run_collect(
         _write_unjudged(run_dir, judged.unjudged, unjudged_star)
         _write_json(run_dir / UNAVAILABLE, unavailable_sources(fetches))
         _write_json(run_dir / FETCHES, fetch_entries(fetches))
-        _write_item_ids(run_dir, items, refs)
+    _write_item_ids(run_dir, items, refs)
     log.write("collect", "end", count=len(items))
     failed = [r.source_id for r in results if r.error]
     sources = len(results)

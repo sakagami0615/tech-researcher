@@ -6,6 +6,7 @@ period_days = 1 # 対象期間の長さ。終わりは実行日の 0:00（JST）
 
 [weekly]
 period_days = 7 # 終わりは実行日以前で最も近い月曜の 0:00（JST）。D-17
+compare_weeks = 4 # 比較の窓。過去の観測・テーマを何週前まで見るか（週次の ② の入力。data-model.md 3.8）
 
 # last30days-skill で集める情報源（D-01）
 [sources.hackernews]

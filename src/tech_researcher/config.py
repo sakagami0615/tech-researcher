@@ -189,6 +189,7 @@ class QuoteLimits:
 class Config:
     daily_period_days: int
     weekly_period_days: int
+    weekly_compare_weeks: int
     hackernews: Last30DaysSource | None
     github_search: Last30DaysSource | None
     github_repos: GitHubRepos | None
@@ -226,10 +227,12 @@ def parse_config(data: dict[str, Any]) -> Config:
     feeds = top.array_of_tables("feeds")
     top.done()
     topic, subqueries = _last30days(last30days)
+    weekly_days, weekly_weeks = _weekly(weekly)
 
     config = Config(
         daily_period_days=_period_days(daily),
-        weekly_period_days=_period_days(weekly),
+        weekly_period_days=weekly_days,
+        weekly_compare_weeks=weekly_weeks,
         hackernews=_last30days_source(sources, "hackernews"),
         github_search=_last30days_source(sources, "github_search"),
         github_repos=_github_repos(sources),
@@ -321,6 +324,21 @@ def _period_days(t: _Table) -> int:
     value = t.int_at_least("period_days")
     t.done()
     return value
+
+
+DEFAULT_COMPARE_WEEKS = 4  # 週次の比較の窓（過去何週か。report-templates.md 2.3 の初期値）
+
+
+def _weekly(t: _Table) -> tuple[int, int]:
+    """（調査期間の日数、比較の窓の週数）。窓は書かなければ初期値。"""
+    days = t.int_at_least("period_days")
+    weeks = t.value("compare_weeks", int, required=False)
+    if weeks is None:
+        weeks = DEFAULT_COMPARE_WEEKS
+    elif weeks < 1:
+        raise ConfigError(f"{t.path_of('compare_weeks')}: 1 以上にする（{weeks}）")
+    t.done()
+    return days, weeks
 
 
 def _source(sources: _Table | None, name: str) -> _Table | None:

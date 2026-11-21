@@ -527,8 +527,8 @@ def test_dry_run_reads_db_but_writes_nothing(tmp_path):
     conn.close()
 
 
-def test_weekly_skips_star_measurement_and_items(tmp_path):
-    """週次は Star を測らず（skipped）、items は週次の材料の Issue（#44）まで書かない。"""
+def test_weekly_skips_star_measurement_and_writes_weekly_items(tmp_path):
+    """週次は Star を測らず（skipped）、取り直した分を週次の items に書く。"""
     weekly = weekly_target(date(2026, 10, 26), 7)
     conn = open_db(tmp_path / "tech-researcher.sqlite3")
     start_run(conn, PROD, weekly, FETCHED)
@@ -547,7 +547,9 @@ def test_weekly_skips_star_measurement_and_items(tmp_path):
     assert conn.execute(
         "SELECT status, record_count FROM source_fetches WHERE source_id = 'github_repos'"
     ).fetchall() == [("skipped", 0)]
-    assert conn.execute("SELECT count(*) FROM items").fetchone() == (0,)
+    assert conn.execute("SELECT cadence, target, count(*) FROM items").fetchall() == [
+        ("weekly", "2026-10-26", 3)
+    ]
     conn.close()
 
 
