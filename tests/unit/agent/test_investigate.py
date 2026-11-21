@@ -321,7 +321,7 @@ def test_secret_in_evidence_stops_publication():
 
 @pytest.mark.parametrize("code", sorted(inv.AGENT_UNUSABLE))
 def test_agent_unusable_skips_the_call(code):
-    """② の AI の呼び出しが失敗したときは ④ を呼ばない（D-04、US-E7-04）。"""
+    """② がスキルがない・docker を起動できないで失敗したときは ④ を呼ばない（D-04）。"""
     failure = inv.Failure(
         "run_error", TARGET, failed_stage="analyze", error_category="失敗", error_code=code
     )
@@ -330,8 +330,16 @@ def test_agent_unusable_skips_the_call(code):
     assert got.reason == "agent_unusable" and not got.called
 
 
-@pytest.mark.parametrize("code", ["input_too_large", "bad_schema", "bad_input"])
-def test_analyze_failures_without_calling_the_agent_are_investigated(code):
+def test_agent_unusable_is_limited_to_skill_and_launch_failures():
+    assert inv.AGENT_UNUSABLE == {"missing_skill", "launch_failed"}
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["agent_failed", "bad_output", "timeout", "input_too_large", "bad_schema", "bad_input"],
+)
+def test_other_analyze_failures_are_investigated(code):
+    """AI 自体は使えるかもしれない ② の失敗では ④ を呼ぶ（④ が失敗したら定型にする）。"""
     failure = inv.Failure(
         "run_error", TARGET, failed_stage="analyze", error_category="失敗", error_code=code
     )

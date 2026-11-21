@@ -9,7 +9,8 @@
   ときの定型（3.5）に落とす。根拠の行は AI が選んだ ID から、コードが元の行を取り出す（存在しない
   ID は捨てる。10行×3ブロックまで）。AI の出力の全文と根拠の抜粋は秘匿情報の検査にもかけ、
   見つかれば AI の文も抜粋も載せない 3.5 の定型にする（③ と同じく、捨てる文の中も見る）
-- ② の AI の呼び出しが失敗した実行エラーでは、AI を利用できないものとして ④ を呼ばない（D-04）
+- ② がイメージにスキルがない・docker を起動できないで失敗した実行エラーでは、AI を利用できない
+  ものとして ④ を呼ばない（D-04）
 - ④ は再試行しない（structure.md 6.3）。失敗したら定型にする
 
 統括スクリプトの失敗の分岐へのつなぎ込みと、investigation.json・runs の investigation_json への
@@ -45,12 +46,12 @@ INVESTIGATE_SCHEMA = resources.files("tech_researcher") / "schemas" / INVESTIGAT
 KINDS = ("run_error", "rejected")  # 実行エラー・不合格
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}  # 表記はコードが変える（4.4）
 HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の例）
-# ② の AI の呼び出しが失敗した分類（invoke.py の AgentError と、統括スクリプトの launch_failed）。
-# AI 自体を利用できない失敗として ④ を飛ばす（D-04、US-E7-04 の「LLM 呼び出しの失敗」）。
-# claude を呼ばずに止めた input_too_large・bad_schema は、AI は使えるので ④ を呼ぶ
-AGENT_UNUSABLE = frozenset(
-    {"agent_failed", "bad_output", "timeout", "missing_skill", "launch_failed"}
-)
+# ② の失敗のうち、④ も同じく動かせないと分かっている分類。AI 自体を利用できない失敗として ④ を
+# 飛ばす（D-04）。イメージにスキルがない（missing_skill）、docker を起動できない（launch_failed）。
+# ほかの ② の失敗（agent_failed・bad_output・timeout、claude を呼ばずに止めた input_too_large など）
+# では ④ を呼び、④ が失敗したら定型にする（調査結果が載る場面を優先する。失敗の日はまれ）。
+# 利用上限・認証の失敗の分類を足したら、その分類もここに入れる
+AGENT_UNUSABLE = frozenset({"missing_skill", "launch_failed"})
 # claude を動かさずに終わった失敗（統括スクリプトの _NOT_CALLED と同じ。使用量のログを残さない）
 _NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
 
@@ -128,7 +129,7 @@ class InvestigateResult:
 
 
 def agent_unusable(failure: Failure) -> bool:
-    """② の AI の呼び出しが失敗した実行エラーか（AI を利用できないので ④ を飛ばす。D-04）。"""
+    """② が AGENT_UNUSABLE の分類で失敗した実行エラーか（AI を使えないので ④ を飛ばす。D-04）。"""
     return failure.failed_stage == "analyze" and failure.error_code in AGENT_UNUSABLE
 
 
