@@ -211,14 +211,20 @@ class RunHistory:
     failed_sources: tuple[tuple[str, str | None], ...]
 
 
-def recent_runs(conn: sqlite3.Connection, since: datetime, run_id: str) -> list[RunHistory]:
-    """since 以降に始まった、run_id 以外の実行の履歴（古い順）。④ の入力の履歴に使う。"""
+def recent_runs(
+    conn: sqlite3.Connection, since: datetime, before: datetime, run_id: str
+) -> list[RunHistory]:
+    """since 以降、before（この実行の開始時刻）より前に始まった、run_id 以外の実行の履歴（古い順）。
+
+    ④ の入力の履歴に使う。この実行より後に始まった実行は入れない。
+    """
     rows = conn.execute(
         "SELECT r.run_id, r.cadence, r.target, r.started_at, r.status, r.failed_stage,"
         " r.error_category, r.retry_count, p.rejected_checks FROM runs AS r"
         " LEFT JOIN reports AS p ON p.run_id = r.run_id"
-        " WHERE r.started_at >= ? AND r.run_id != ? ORDER BY r.started_at, r.run_id",
-        (utc_text(since), run_id),
+        " WHERE r.started_at >= ? AND r.started_at < ? AND r.run_id != ?"
+        " ORDER BY r.started_at, r.run_id",
+        (utc_text(since), utc_text(before), run_id),
     ).fetchall()
     history = []
     for rid, cadence, target, started, status, stage, category, retries, checks in rows:

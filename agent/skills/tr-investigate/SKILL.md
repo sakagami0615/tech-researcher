@@ -39,7 +39,7 @@ description: tech-researcher の ④ 失敗時の調査。この依頼に続く 
   "lines": [
     {"id": "L001", "kind": "log", "text": "06:00:12 collect failure source=hackernews error_category=dns"},
     {"id": "L040", "kind": "verification", "text": "verify result=rejected reason=invalid_output entries=0 excluded=0"},
-    {"id": "L060", "kind": "history", "text": "2026-10-22 06:00 daily target=2026-10-22 status=succeeded sources ok=12"}
+    {"id": "L060", "kind": "history", "text": "2026-10-22 06:00 daily target=2026-10-21 status=succeeded sources ok=12"}
   ]
 }
 ```
@@ -49,6 +49,7 @@ description: tech-researcher の ④ 失敗時の調査。この依頼に続く 
   - `log`：この実行のログ。`時刻 段階 出来事` に続けて、`source`（情報源）・`error_category`（失敗の分類）・`count`（件数）・`attempt`（試行の番号）がある。出来事は `start`・`end`・`failure`・`retry`・`source_result`（情報源の結果）・`excluded`（③ が項目を除外した。`error_category` が除外の分類）・`secret_detected`・`usage`（AI の呼び出しの記録）・`warning`
   - `verification`：③ の結果。`result`（`report`・`rejected`・`secret_detected`）・`reason`（不合格の分類。`invalid_output` は ② の出力の形が不正、`all_excluded` は検査ですべての項目が除外された）・件数と、除外した項目の ID（`malformed_ids` は、AI が返した ID のうち形が正しくなく、コードが伏せたものの数）
   - `history`：この実行より前の直近の実行の記録。開始時刻・種類・対象・状態（`succeeded`・`rejected`・`failed`・`running`（途中で止まった）・`observed`）・失敗の段階と分類・情報源の取得の状態ごとの数・失敗した情報源
+    - 取得の状態：`ok`（1件以上取れた）・`no_results`（取れたが0件）・`failed`（取得に失敗した）・`skipped`（その実行では取得しない情報源）
 - 除外した記事の本文・タイトルは、コードが材料から外している。記事の中身は分からない前提で調べる
 
 ## 手順
@@ -97,7 +98,7 @@ description: tech-researcher の ④ 失敗時の調査。この依頼に続く 
 - ログの行を文章に書き写さない。根拠の行はコードが `evidence_line_ids` から抜き出して載せる
 - トークン・パスワード・API キーのような値（`ghp_`・`github_pat_`・`sk-ant-` などで始まる文字列や、`[MASKED:…]` の箇所の元の値）は、推測も含めて書かない
 
-URL・リンク・HTML を含む文章、空の欄、長さの目安を大きく超えた事象がひとつでもあると、調査結果全体が掲載されず、Issue には定型の項目だけが載ります。秘匿値に見える文字列が出力に1つでもあると、Issue 自体が公開されません。
+URL・リンク・HTML を含む文章、空の欄、長さの目安を大きく超えた事象がひとつでもあると、調査結果全体が掲載されず、Issue には定型の項目だけが載ります。秘匿値に見える文字列が1つでもあると、調査結果も根拠の抜粋も載らず、Issue には定型の項目だけが載ります。
 
 ## 根拠の行
 

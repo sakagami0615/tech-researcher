@@ -108,6 +108,8 @@ def test_log_lines_use_only_allowed_fields(tmp_path):
     log.write("verify", "end", count=0)
     with path.open("a", encoding="utf-8") as f:
         f.write("壊れた行\n[1]\n")
+    with path.open("ab") as f:  # 書き込みの途中で切れた最後の行（多バイト文字の途中）
+        f.write('{"stage": "job", "event": "end", "detail": "あ'.encode()[:-1])
     lines = inv.log_lines(path)
     assert lines == [
         "06:00:12 collect source_result source=hackernews error_category=dns attempt=3",
@@ -162,7 +164,7 @@ def test_history_lines_from_recent_runs(tmp_path):
         fetch = SourceFetch(source, status, 1, 1 if status == "ok" else 0, 0, now, category)
         record_source_fetch(conn, "20261023-060000-0000", fetch)
     start_run(conn, RUN_ID, TARGET, now)  # 今回の実行は入れない
-    history = recent_runs(conn, now - timedelta(days=inv.HISTORY_DAYS), RUN_ID)
+    history = recent_runs(conn, now - timedelta(days=inv.HISTORY_DAYS), now, RUN_ID)
     assert inv.history_lines(history) == [
         "2026-10-22 06:00 daily target=2026-10-21 status=succeeded",
         "2026-10-23 06:00 daily target=2026-10-22 status=failed failed_stage=collect "
@@ -179,7 +181,7 @@ def test_history_lines_include_rejected_checks(tmp_path):
     start_run(conn, "20261023-060000-0000", daily_target(date(2026, 10, 23), 1), now)
     report = ReportRow("daily", date(2026, 10, 22), "rejected", {}, {}, (), ("invalid_output",))
     save_report(conn, "20261023-060000-0000", report)
-    (run,) = recent_runs(conn, now, RUN_ID)
+    (run,) = recent_runs(conn, now, now + timedelta(hours=1), RUN_ID)
     assert run.rejected_checks == ("invalid_output",)
     assert "rejected_checks=invalid_output" in inv.history_lines([run])[0]
 
@@ -405,7 +407,7 @@ def test_recent_runs_include_runs_stopped_midway(tmp_path):
     conn = open_db(tmp_path / "db.sqlite3")
     now = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
     start_run(conn, "20261023-060000-0000", daily_target(date(2026, 10, 23), 1), now)
-    (run_,) = recent_runs(conn, now, RUN_ID)
+    (run_,) = recent_runs(conn, now, now + timedelta(hours=1), RUN_ID)
     assert inv.history_lines([run_]) == ["2026-10-24 06:00 daily target=2026-10-22 status=running"]
 
 
@@ -443,13 +445,59 @@ def test_repository_has_the_investigate_skill():
     assert f"1かたまり{MAX_EVIDENCE_LINES}行まで・{MAX_EVIDENCE_BLOCKS}かたまりまで" in text
 
 
-def test_output_that_cannot_be_checked_falls_back():
-    """呼び出しの後の検査で想定外の例外が出ても（深すぎる入れ子など）、定型にする（6.3）。"""
-    deep: list = []
-    for _ in range(5000):
-        deep = [deep]
-    got, _ = run({**OUTPUT, "investigation": deep})
+def _returning(monkeypatch, output):
+    """call_agent を、構造化出力をそのまま返す偽物にする（結果の JSON を作らない）。"""
+
+    def fake(body, timeout_s, **kwargs):
+        return invoke.AgentResult(output=output)
+
+    monkeypatch.setattr(invoke, "call_agent", fake)
+
+
+def _investigate():
+    return inv.investigate(
+        ERROR, LINES, 1.0, runner=None, scanner=SCANNER, max_turns=None, max_input_bytes=10**6
+    )
+
+
+def test_unexpected_error_while_checking_falls_back(monkeypatch):
+    """呼び出しの後の検査で想定外の例外が出ても、定型にする（structure.md 6.3）。"""
+    _returning(monkeypatch, OUTPUT)
+
+    def broken(output, lines):
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr(inv, "parse_investigation", broken)
+    got = _investigate()
     assert got.investigation is None and got.reason == "invalid_output" and got.called
+
+
+def _deep(leaf, depth=5000):
+    value = [leaf]
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_too_deep_output_falls_back(monkeypatch):
+    _returning(monkeypatch, {**OUTPUT, "investigation": _deep("x")})
+    got = _investigate()
+    assert got.investigation is None and got.reason == "invalid_output"
+
+
+def test_secret_deep_in_the_output_is_still_found(monkeypatch):
+    """深すぎる入れ子の中の秘匿値も、形の検査より先に見つけて分類を残す。"""
+    _returning(monkeypatch, {**OUTPUT, "investigation": _deep(TOKEN)})
+    got = _investigate()
+    assert got.reason == "secret_detected" and got.secret_kinds == ("github_token",)
+
+
+def test_recent_runs_exclude_runs_started_after_this_one(tmp_path):
+    conn = open_db(tmp_path / "db.sqlite3")
+    now = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
+    start_run(conn, RUN_ID, TARGET, now)
+    start_run(conn, "20261024-070000-0000", TARGET, now + timedelta(minutes=30))
+    assert recent_runs(conn, now - timedelta(days=7), now, RUN_ID) == []
 
 
 def test_secret_in_evidence_is_reported_even_with_text_violations():

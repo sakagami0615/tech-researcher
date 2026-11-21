@@ -20,7 +20,7 @@
 import json
 import re
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
@@ -52,8 +52,6 @@ HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の
 # では ④ を呼び、④ が失敗したら定型にする（調査結果が載る場面を優先する。失敗の日はまれ）。
 # 利用上限・認証の失敗の分類を足したら、その分類もここに入れる
 AGENT_UNUSABLE = frozenset({"missing_skill", "launch_failed"})
-# claude を動かさずに終わった失敗（統括スクリプトの _NOT_CALLED と同じ。使用量のログを残さない）
-_NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
 
 # 検証結果の行に入れてよい項目 ID の形（i{主キー}・ドライランの仮の d{番号}。2.6）
 _ITEM_ID = re.compile(r"[id][0-9]{1,18}")
@@ -137,13 +135,14 @@ def log_lines(path: Path) -> list[str]:
     """1回の実行のログ（JSON Lines）から、許可した項目（issue_fields）だけで作った行。
 
     detail・exception は使わない（外部由来の文や、除外した項目の本文・タイトルを含みうる）。
-    読めない行は飛ばす。時刻は JST の時:分:秒にする。
+    読めない行（JSON でない、UTF-8 として読めない。最後の行が書き込みの途中で切れたときなど）は
+    飛ばす。時刻は JST の時:分:秒にする。
     """
     lines = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_bytes().splitlines():
         try:
-            record = json.loads(raw)
-        except json.JSONDecodeError:
+            record = json.loads(raw.decode("utf-8"))
+        except ValueError:  # UnicodeDecodeError・JSONDecodeError
             continue
         if not isinstance(record, dict) or "stage" not in record or "event" not in record:
             continue
@@ -305,7 +304,7 @@ def investigate(
         return InvestigateResult(
             None,
             e.category,
-            called=e.category not in _NOT_CALLED,
+            called=e.category not in invoke.NOT_CALLED,
             models=e.models,
             usage=e.usage,
             detail=e.detail,
@@ -348,9 +347,14 @@ def _check_output(
     output: object, lines: Sequence[Line], scanner: SecretScanner
 ) -> tuple[Investigation | None, str | None, tuple[str, ...]]:
     """出力を検査し、（調査結果、載せない理由、秘匿情報の分類）を返す。秘匿情報を先に見る。"""
-    # 無害化の前の全文と、1つずつの文字列を検査する（③ と同じ。stages/daily.py）。形の検査より
-    # 先に行い、スキーマに合わない出力の中の秘匿値も見落とさない
-    texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
+    # 1つずつの文字列と、無害化の前の全文を検査する（③ と同じ。stages/daily.py）。形の検査より
+    # 先に行い、スキーマに合わない出力の中の秘匿値も見落とさない。文字列は再帰を使わずに集める
+    # ので、深すぎる入れ子でも先に見られる。全文の JSON にできない出力は、形の検査で落ちる
+    texts = list(_strings(output))
+    try:
+        texts.append(json.dumps(output, ensure_ascii=False))
+    except RecursionError, TypeError, ValueError:
+        pass
     if kinds := _secret_kinds(scanner, texts):
         return None, "secret_detected", kinds
     try:
@@ -376,16 +380,19 @@ def _secret_kinds(scanner: SecretScanner, texts: Iterable[str]) -> tuple[str, ..
     return tuple(sorted({f.kind for text in texts for f in scanner.find(text)}))
 
 
-def _strings(value: object) -> Iterable[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield str(key)
-            yield from _strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _strings(item)
+def _strings(value: object) -> Iterator[str]:
+    """JSON の値の、すべてのキーと文字列の値。入れ子が深くても止まらないよう、再帰を使わない。"""
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for key, item in node.items():
+                yield str(key)
+                stack.append(item)
+        elif isinstance(node, list):
+            stack.extend(node)
 
 
 def _time(value: object) -> str:
