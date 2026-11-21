@@ -49,10 +49,9 @@ def test_partial_sources_use_display_names_and_skip_whole_failures(tmp_path):
         entry("rss:example", "failed", "dns", 3),
         entry("qiita"),
     ]
+    fetches.append(entry("github_releases", "failed", "timeout", 1, [("a/b", "timeout")]))
     (tmp_path / "fetches.json").write_text(json.dumps(fetches))
     names = {"github_releases": "GitHub Releases", "rss:example": "Example", "qiita": "Qiita"}
-    fetches.append(entry("github_releases", "failed", "timeout", 1, [("a/b", "timeout")]))
-    # 全失敗（failed。内訳があっても）は failed_sources 側。ここは一部だけ取れなかった情報源
     assert failures.partial_source_names(tmp_path, names) == ["GitHub Releases"]
 
 

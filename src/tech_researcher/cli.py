@@ -186,7 +186,9 @@ def _finish_stage(args: argparse.Namespace, files: RunFiles, log: RunLog) -> dic
             raise ValueError("investigation.json が JSON のオブジェクトでない")
     with closing(open_db(files.db)) as conn:
         row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (files.run_id,)).fetchone()
-        if row is not None and row[0] != "running":
+        if row is None:  # 開始の行がない（① が start_run の前に止まった）。閉じるものがない
+            return {"status": "not_started"}
+        if row[0] != "running":
             # ① の worker がすでに閉じた実行（取得の全失敗・① の例外）は、終わりの値を上書きしない
             if text is not None:
                 record_investigation(conn, files.run_id, text)

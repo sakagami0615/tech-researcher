@@ -64,6 +64,7 @@ REPORT = "report"
 REJECTED = "rejected"
 SECRET_DETECTED = "secret_detected"
 RESULTS = frozenset({REPORT, REJECTED, SECRET_DETECTED})
+BODY_LIMIT = 60_000  # GitHub の Issue 本文の上限（report-templates.md 0.3）。超えたら不合格
 
 
 def write_daily_input(config: Config, target: Target, run_dir: Path) -> None:
@@ -175,6 +176,26 @@ def run_verify(
         unavailable=unavailable_notes(run_dir, config),
         unjudged=unjudged,
     )
+    if len(report.body) > BODY_LIMIT:  # 投稿できない長さ。掲載を絞って作り直さない（再生成しない）
+        log.write("verify", "failure", error_category="body_too_long")
+        verification.update({"secret_detected": "passed", "body_too_long": "failed"})
+        facts = _save(
+            db,
+            run_id,
+            target,
+            len(items),
+            entries,
+            excluded,
+            verification,
+            ["body_too_long"],
+            outcomes=outcomes,
+            output=output,
+            scanner=scanner,
+            kept=kept,
+        )
+        return _finish(
+            run_dir, log, REJECTED, "body_too_long", entries=0, excluded=reasons, facts=facts
+        )
     kinds = sorted({f.kind for f in scanner.find(issue_text(report))})
     verification["secret_detected"] = "failed" if kinds else "passed"
     if kinds:

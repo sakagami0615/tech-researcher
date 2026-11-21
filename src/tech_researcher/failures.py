@@ -68,6 +68,7 @@ CHECK_LABELS = {
     "missing_period_event": "期間内の出来事の欠落",
     "too_long": "文字数・要点数の超過",
     "all_excluded": "すべての項目を除外",
+    "body_too_long": "本文が 60,000 文字を超えた",
     "secret_detected": "秘匿情報の検査",
 }
 # ② の再試行の上限（structure.md 6.3）。再試行は別の Issue で行う。それまでの回数は 0
@@ -134,7 +135,11 @@ def partial_source_names(run_dir: Path, names: Mapping[str, str]) -> list[str]:
 
     全失敗の判定に使う failed_sources には入れない（US-E6-03 の部分レポート）。
     """
-    return [names.get(e["source_id"], e["source_id"]) for e in load_fetches(run_dir) if e["parts"]]
+    return [
+        names.get(e["source_id"], e["source_id"])
+        for e in load_fetches(run_dir)
+        if e["parts"] and e["status"] != "failed"  # すべて取れなかったときは failed（全失敗）
+    ]
 
 
 def load_fetches(run_dir: Path) -> list[dict]:

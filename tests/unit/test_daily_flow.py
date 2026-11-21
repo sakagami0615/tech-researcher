@@ -1303,3 +1303,21 @@ def test_run_close_failure_does_not_change_the_result(host, monkeypatch):
     assert (code, summary["result"]) == (1, "rejected")
     log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
     assert ("job", "failure") in stages_of(log)
+
+
+def test_body_over_the_limit_is_rejected_not_posted(host, monkeypatch):
+    """本文が 60,000 文字を超える日は不合格にする（R 0.3）。掲載を絞って作り直さない。"""
+    monkeypatch.setattr("tech_researcher.stages.daily.BODY_LIMIT", 100)
+    code, summary, _ = host.run("--dry-run")
+
+    assert (code, summary["result"]) == (1, "rejected")
+    out_dir = Path(summary["output_dir"])
+    validation = json.loads((out_dir / "validation.json").read_text())
+    assert (validation["reason"], validation["rejected_checks"]) == (
+        "body_too_long",
+        ["body_too_long"],
+    )
+    issue = (out_dir / "issue.md").read_text(encoding="utf-8")
+    assert issue.startswith("[不合格]") and "本文が 60,000 文字を超えた" in issue
+    assert "見出し1" not in issue
+    assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]

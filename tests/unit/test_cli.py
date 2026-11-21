@@ -283,13 +283,6 @@ def test_finish_rejects_dry_run_and_bad_arguments(env, capsys):
         assert e.value.code == 2
 
 
-def test_finish_with_a_run_not_started_fails_without_details(env, capsys):
-    (Path(env["TR_DATA_DIR"]) / "work" / PROD).mkdir(parents=True)
-    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
-    assert cli.main(args, env) == 1
-    assert "finish が失敗した" in capsys.readouterr().err
-
-
 def test_finish_keeps_the_values_of_a_run_already_closed_and_adds_investigation(env):
     data = production_run(env)
     with closing(open_db(data / "db" / "tech-researcher.sqlite3")) as conn:
@@ -307,3 +300,10 @@ def test_finish_keeps_the_values_of_a_run_already_closed_and_adds_investigation(
     status, stage, category, retries, text, _, _ = run_row(data)
     assert (status, stage, category, retries) == ("failed", "collect", "all_sources_failed", 2)
     assert json.loads(text) == INVESTIGATION
+
+
+def test_finish_without_a_start_row_does_nothing(env, capsys):
+    (Path(env["TR_DATA_DIR"]) / "work" / PROD).mkdir(parents=True)
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
+    assert cli.main(args, env) == 0  # ① が開始の行を書く前に止まった実行。閉じるものがない
+    assert json.loads(capsys.readouterr().out)["status"] == "not_started"
