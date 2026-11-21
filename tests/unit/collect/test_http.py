@@ -407,10 +407,10 @@ class Trickle(FakeResponse):
         super().__init__(body)
         self.clock, self.step, self.reads = clock, step, 0
 
-    def read(self, size=-1):
+    def read1(self, size=-1):
         self.reads += 1
         self.clock[0] += self.step
-        return super().read(size)
+        return super().read1(size)
 
 
 def test_body_read_in_chunks_stops_at_the_deadline(limits):
@@ -452,3 +452,82 @@ def test_redirect_is_not_followed_after_the_deadline():
     now[0] = 10.0
     with pytest.raises(tr_http._OutOfTime):
         handler.redirect_request(request, None, 301, "moved", headers, "https://feed.example/next")
+
+
+class Closing:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_redirect_stopped_by_the_deadline_closes_the_previous_response():
+    handler = tr_http._RedirectHandler(5.0, lambda: 9.0)
+    fp = Closing()
+    with pytest.raises(tr_http._OutOfTime):
+        handler.redirect_request(urllib.request.Request(URL), fp, 301, "m", Message(), URL)
+    assert fp.closed
+
+
+class Finished(FakeResponse):
+    """全部を渡した後に isclosed() が真になる応答（HTTPResponse と同じ）。"""
+
+    def isclosed(self):
+        return self.tell() == len(self.getvalue())
+
+
+def test_body_fully_received_is_kept_even_if_the_deadline_passed_then(limits):
+    now = [0.0]
+
+    class Late(Finished):
+        def read1(self, size=-1):
+            now[0] += 100.0  # 読み終わった時点で上限を過ぎる
+            return super().read1(size)
+
+    open_url, _ = scripted(Late(b"abc"))
+    response = fetch(URL, limits, open_url=open_url, deadline=50.0, clock=lambda: now[0])
+    assert response.body == b"abc"
+
+
+def _trickle_server(chunked, count=100, pause=0.2):
+    """1バイトずつ少しずつ送り続ける本物のサーバー（別スレッド）。（ソケット, URL）を返す。"""
+    import threading
+    import time
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        try:
+            conn, _ = server.accept()
+            conn.recv(4096)
+            head = "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+            head += "Transfer-Encoding: chunked\r\n" if chunked else f"Content-Length: {count}\r\n"
+            conn.sendall((head + "\r\n").encode())
+            for _ in range(count):
+                conn.sendall(b"1\r\nx\r\n" if chunked else b"x")
+                time.sleep(pause)
+            conn.close()
+        except OSError:
+            pass  # 相手が先に切った
+
+    threading.Thread(target=serve, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.getsockname()[1]}/"
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_real_trickling_response_is_cut_near_the_deadline(limits, chunked):
+    """0.2 秒ごとに1バイトずつ送る応答を、残りの時間（1 秒）の付近で打ち切る。"""
+    import time
+
+    server, url = _trickle_server(chunked)
+    try:
+        started = time.monotonic()
+        with pytest.raises(FetchError) as e:
+            fetch(url, limits, deadline=started + 1.0)
+        assert e.value.category == "timeout"
+        assert time.monotonic() - started < 3  # 全部（20 秒）や応答の上限（30 秒）を待たない
+    finally:
+        server.close()

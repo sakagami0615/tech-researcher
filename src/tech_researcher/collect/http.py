@@ -201,14 +201,18 @@ def _read_body(res, attempt: int, deadline: float | None, clock: Callable[[], fl
         chunks = []
         size = 0
         while True:
-            chunk = res.read(min(CHUNK_BYTES, MAX_BODY_BYTES + 1 - size))
+            # read1 は、そのとき届いている分だけを返す（read は指定の量がそろうまで戻らず、少しずつ
+            # 送り続ける応答では上限を確かめる所に来ない）
+            chunk = res.read1(min(CHUNK_BYTES, MAX_BODY_BYTES + 1 - size))
             if not chunk:
                 break
             chunks.append(chunk)
             size += len(chunk)
             if size > MAX_BODY_BYTES:
                 break
-            if clock() >= deadline:
+            if getattr(res, "isclosed", lambda: False)():
+                break  # 全部受け取った。上限を過ぎていても捨てない
+            if clock() >= deadline:  # 次の塊を読む前に確かめる
                 raise _OutOfTime
         body = b"".join(chunks)
     if len(body) > MAX_BODY_BYTES:
@@ -348,6 +352,8 @@ class _RedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, *args, **kwargs):
         if self._deadline is not None and self._clock() >= self._deadline:
+            if args[1] is not None:
+                args[1].close()  # 前の応答（fp）を閉じてから止める
             raise _OutOfTime
         return super().redirect_request(*args, **kwargs)
 
