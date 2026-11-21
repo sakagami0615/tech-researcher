@@ -12,7 +12,6 @@ from tech_researcher.periods import (
     Target,
     in_utc_date_window,
     last30days_window,
-    spike_window,
 )
 
 
@@ -32,7 +31,9 @@ def event_in_window(item: Item, event: Event, target: Target) -> bool:
       期間内に投稿されても残さない（D-13）
     - 初登場：前日の取得と比べて判定した時点で、その対象日の出来事なので、時刻では判定しない。
       取得の時刻（翌日 6:00 の実行）は、窓（対象日 6:00〜翌日 6:00）の終わりより後になるため
-    - Star の増分・新しい OSS：対象日 6:00〜翌日 6:00
+    - Star の増分・新しい OSS：前日の記録との比較・作成日と累計での判定（github_spikes）の時点で
+      その対象日の出来事なので、時刻では判定しない。測定の時刻（翌日 6:00 の実行）は、窓（対象日
+      6:00〜翌日 6:00）の終わりより後になるため（初登場と同じ）
     """
     period = target.period
     match event.type:
@@ -47,11 +48,30 @@ def event_in_window(item: Item, event: Event, target: Target) -> bool:
             return _in_date_window(event, period)
         case "attention_spike" if event.basis == "threshold":
             return period.contains(event.at)
-        case "attention_spike" if event.basis == "feed_entry":
+        case "attention_spike" if event.basis in ("feed_entry", "star_growth"):
             return True
-        case "attention_spike" | "new_repo":
-            return spike_window(target).contains(event.at)
+        case "new_repo":
+            return True
     raise ValueError(f"知らない出来事 {event.type}")
+
+
+def window_events(item: Item, target: Target) -> list[Event]:
+    """判定の窓に入る出来事（掲載の根拠になりうるもの）。"""
+    return [e for e in item.events if event_in_window(item, e, target)]
+
+
+def date_approximated(item: Item, target: Target) -> bool:
+    """期間内の判定が、last30days-skill の UTC の日付だけによるか（D-16。除外の対象）。
+
+    判定の窓に入る出来事がすべて、日付だけの公開か、日付だけの投稿での基準超えのとき True。
+    時刻まで分かる出来事（自作の収集・初登場・Star の増分など）が1つでもあれば False。
+    """
+    events = window_events(item, target)
+    return bool(events) and all(
+        (e.type == "published" or (e.type == "attention_spike" and e.basis == "threshold"))
+        and _date_only(item, e)
+        for e in events
+    )
 
 
 def published_before_period(item: Item, target: Target) -> bool:

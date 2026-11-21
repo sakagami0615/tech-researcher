@@ -304,6 +304,17 @@ def test_featured_urls_come_from_created_report_issues_only(conn):
     assert featured_urls(conn) == {"https://e.com/spike"}
 
 
+def test_featured_urls_before_ignores_the_given_day_and_later(conn):
+    """同じ対象の再実行・ドライランは、その日に載せた項目で自分を除外しない。"""
+    publish(conn, RUN, DAY, "https://e.com/today", SPIKE)
+    publish(conn, "20261023-060000-0022", date(2026, 10, 22), "https://e.com/before", SPIKE)
+    assert featured_urls(conn, DAY) == {"https://e.com/before"}
+    assert featured_urls(conn, date(2026, 10, 24)) == {
+        "https://e.com/today",
+        "https://e.com/before",
+    }
+
+
 def test_featured_urls_exclude_unpublished_states(conn):
     runs = [f"20261024-1{n}0000-aaaa" for n in range(4)]
     for run in runs:

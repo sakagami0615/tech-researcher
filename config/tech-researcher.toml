@@ -49,6 +49,7 @@ threshold_increase = 100
 report_top_n = 10
 new_repo_days = 14
 new_repo_stars = 200
+new_repo_top_n = 10 # 新しい OSS を載せる件数の上限（累計 Star の多い順。載せ済みは数えない）
 search_days = 14        # 観測（PoC）までの仮の値
 search_min_stars = 200  # 観測（PoC）までの仮の値
 

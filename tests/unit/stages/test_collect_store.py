@@ -106,7 +106,8 @@ def test_unknown_publication_uses_first_source():
 def test_inclusion_event_priority_and_window():
     """公開・リリース → 新しい OSS → 急上昇 → 投稿の順。窓の外の出来事は選ばない。"""
     spike = Event("attention_spike", LATER, "threshold")
-    star = Event("attention_spike", SPIKE, "star_growth")  # 窓（6:00〜翌 6:00）の外
+    star = Event("attention_spike", SPIKE, "star_growth")  # 前日の記録との比較で判定済み
+    stale = Event("attention_spike", OLD, "threshold")  # 窓（対象期間）の外
     posted = Event("posted", IN)
     old = rec(
         "https://example.com/o", published=OLD, events=(Event("published", OLD), posted, spike)
@@ -116,9 +117,11 @@ def test_inclusion_event_priority_and_window():
     assert inclusion_event(item(new), TARGET) == Event("published", LATER)
     two = rec("https://example.com/t", events=(Event("published", LATER), Event("released", IN)))
     assert inclusion_event(item(two), TARGET) == Event("released", IN)  # 同じ順位は早い方
-    out = rec("https://example.com/x", published=OLD, events=(Event("published", OLD), star))
+    out = rec("https://example.com/x", published=OLD, events=(Event("published", OLD), stale))
     with pytest.raises(ValueError, match="判定の窓"):
         inclusion_event(item(out), TARGET)
+    starred = rec("https://example.com/s", published=OLD, events=(Event("published", OLD), star))
+    assert inclusion_event(item(starred), TARGET) == star  # 測定の時刻が窓の外でも判定済み
 
 
 def test_source_fetch_states():

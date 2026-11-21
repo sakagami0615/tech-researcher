@@ -118,8 +118,9 @@ class SourceFetch:
         # skipped（取得しなかった）は理由を持っても持たなくてもよい
         if self.status == "failed" and self.error_category is None:
             raise ValueError("failed には error_category が要る")
-        if self.status in ("ok", "no_results") and self.error_category is not None:
-            raise ValueError(f"{self.status} に error_category は持たせない")
+        if self.status == "no_results" and self.error_category is not None:
+            raise ValueError("no_results に error_category は持たせない")
+        # ok が error_category を持つのは、一部だけ取れなかったとき（PARTIAL の印）
         if not 0 <= self.in_period_count <= self.record_count:
             raise ValueError("件数は 0 ≦ 期間内に残った件数 ≦ 取得件数 にする")
         if self.attempts < 0:
@@ -147,3 +148,20 @@ def record_source_fetch(conn: sqlite3.Connection, run_id: str, fetch: SourceFetc
             utc_text(fetch.fetched_at),
         ),
     )
+
+
+def fetch_incomplete(conn: sqlite3.Connection, source_id: str, target: date) -> bool:
+    """対象日 target の日次の実行のうち最後の取得（skipped を除く）が、一部だけの成功か失敗か。
+
+    状態が `failed`、または `ok` で error_category を持つ（一部だけ取れなかった）とき True。
+    取得の記録がなければ False。再実行で、最初の実行が測り残した分を判定に入れるかの判断に使う
+    （data-model.md 3.4）。
+    """
+    row = conn.execute(
+        "SELECT f.status, f.error_category FROM source_fetches AS f"
+        " JOIN runs AS r ON r.run_id = f.run_id"
+        " WHERE r.cadence = 'daily' AND r.target = ? AND f.source_id = ? AND f.status != 'skipped'"
+        " ORDER BY f.fetched_at DESC, f.rowid DESC LIMIT 1",
+        (target.isoformat(), source_id),
+    ).fetchone()
+    return row is not None and (row[0] == "failed" or row[1] is not None)

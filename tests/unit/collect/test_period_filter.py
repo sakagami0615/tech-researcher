@@ -69,13 +69,16 @@ def test_threshold_spike_uses_period_and_rescues_old_article():
     [
         (Event("new_repo", datetime(2026, 10, 23, 6, 0, tzinfo=JST)), True),
         (Event("new_repo", datetime(2026, 10, 24, 5, 59, tzinfo=JST)), True),
-        (Event("new_repo", datetime(2026, 10, 23, 5, 59, tzinfo=JST)), False),
-        (Event("attention_spike", datetime(2026, 10, 24, 6, 0, tzinfo=JST), "star_growth"), False),
+        # 判定済みの出来事。測定の時刻（翌日 6:00 の実行）が窓の外でも、その対象日のもの
+        (Event("new_repo", datetime(2026, 10, 24, 6, 0, 5, tzinfo=JST)), True),
+        (
+            Event("attention_spike", datetime(2026, 10, 24, 6, 0, 5, tzinfo=JST), "star_growth"),
+            True,
+        ),
         (Event("attention_spike", datetime(2026, 10, 24, 1, 0, tzinfo=JST), "feed_entry"), True),
     ],
 )
-def test_detected_events_use_spike_window(event, expected):
-    # 対象日 6:00〜翌日 6:00（JST）
+def test_detected_events_are_judged_at_detection(event, expected):
     assert in_period(item(record([event])), TARGET) is expected
 
 

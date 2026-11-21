@@ -7,10 +7,11 @@
 - GitHub の新着・急上昇（github_repos）は、候補集めと Star の測定を1つの情報源として残す。
   1件でも測れていれば ok（Search が上限で止まった・一部の問い合わせが失敗したなどの部分的な失敗は
   ログに残す）。測れたものがなく失敗があれば failed、候補がなければ no_results。件数は測った
-  リポジトリの数で、期間内に残った件数は0（急上昇・新規の判定は #37）
+  リポジトリの数。期間内に残った件数は、急上昇・新規として残ったリポジトリの項目に入ったレコードの数
 - 項目の行：代表のタイトル・抜粋・公開日時は、時刻まで分かる公開日時を持つ出典、なければ日付
   だけの公開日時を持つ出典、なければ最初の出典から取る（期間の判定と同じ順。period_filter）。
   タイトル・抜粋が空なら、ほかの出典の最初の空でない値を使う。投稿日時は出典の中で最も早いもの
+- hold_reason：AI に渡さない項目（collect/holds.py）にも行を書く。観測として残すため
 - 掲載の根拠とする出来事：判定の窓に入る出来事のうち、published・released → new_repo →
   attention_spike → posted の順で選び、同じ順位なら早いもの
 - kind：リポジトリ（github の値を持つ、または URL がリポジトリのトップ）→ repo、
@@ -20,19 +21,20 @@
 
 import sqlite3
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
 
 from tech_researcher.collect.github_candidates import ACTIVITY_PATHS, repo_from_url
-from tech_researcher.collect.period_filter import event_in_window, published_source
+from tech_researcher.collect.period_filter import published_source, window_events
 from tech_researcher.collect.records import Event, Item, Record, SourceResult
 from tech_researcher.collect.sources import GITHUB_REPOS_SOURCE_ID
 from tech_researcher.db.items import ItemRow, upsert_items
 from tech_researcher.db.runs import SourceFetch, record_source_fetch
 from tech_researcher.periods import Target
 
+PARTIAL = "partial"  # 一部だけ測れた（理由の分類がないとき）
 FETCH_FAILED = "fetch_failed"  # 収集処理が分類を付けなかった失敗
 # 掲載の根拠とする出来事の順位（小さいほど先。data-model.md 2.4）
 INCLUSION_ORDER = {"published": 0, "released": 0, "new_repo": 1, "attention_spike": 2, "posted": 3}
@@ -45,6 +47,9 @@ class GitHubFetch:
 
     measured は測った（同じ対象日の記録を使ったものを含む）リポジトリの数。
     error・error_category は最初の失敗（Search を先に見る）。skipped は測らなかった（週次）。
+    partial は一部だけ測れた・候補を取れなかった（測れなかった候補か、失敗があった）。
+    測れたものがあるときは、status は ok のまま error_category に失敗の分類（なければ
+    PARTIAL）を持たせ、再実行が測り残しを判定に入れるかの印にする。
     """
 
     measured: int
@@ -52,20 +57,29 @@ class GitHubFetch:
     error: str | None = None
     error_category: str | None = None
     skipped: bool = False
+    partial: bool = False
 
     @property
     def failed(self) -> bool:
         return self.error is not None and self.measured == 0
 
-    def to_fetch(self, fetched_at: datetime) -> SourceFetch:
+    def to_fetch(self, fetched_at: datetime, in_period: int = 0) -> SourceFetch:
         if self.skipped:
             status, category = "skipped", None
         elif self.failed:
             status, category = "failed", self.error_category or FETCH_FAILED
         else:
             status, category = ("ok" if self.measured else "no_results"), None
+            if self.measured and self.partial:
+                category = self.error_category or PARTIAL
         return SourceFetch(
-            GITHUB_REPOS_SOURCE_ID, status, self.attempts, self.measured, 0, fetched_at, category
+            GITHUB_REPOS_SOURCE_ID,
+            status,
+            self.attempts,
+            self.measured,
+            in_period,
+            fetched_at,
+            category,
         )
 
 
@@ -94,8 +108,11 @@ def save_collect(
     target: Target,
     fetches: Sequence[SourceFetch],
     items: Sequence[Item],
+    holds: Mapping[str, str] = {},
 ) -> list[str]:
     """取得結果と収集項目を書き、項目の ID（i…）を items の順で返す。
+
+    holds は項目の URL → AI に渡さない理由（hold_reason）。
 
     runs の開始の行（start_run）は先に書いておく。items は日次だけ書く（週次の items は、日次の
     items と合わせて作る週次の材料の Issue（#44）で書く。それまでは書かない）。
@@ -104,10 +121,12 @@ def save_collect(
         record_source_fetch(conn, run_id, fetch)
     if target.cadence != "daily":
         return []
-    return upsert_items(conn, run_id, [item_row(item, target) for item in items])
+    return upsert_items(
+        conn, run_id, [item_row(item, target, holds.get(item.url)) for item in items]
+    )
 
 
-def item_row(item: Item, target: Target) -> ItemRow:
+def item_row(item: Item, target: Target, hold_reason: str | None = None) -> ItemRow:
     """収集項目を items の1行にする（期間内に残った項目だけを渡す）。"""
     rep = representative(item)
     primary = next((r.primary_text for r in item.sources if r.primary_text is not None), None)
@@ -124,6 +143,7 @@ def item_row(item: Item, target: Target) -> ItemRow:
         published_at=rep.published_at,
         posted_at=min(posted) if posted else None,
         primary_text=primary,
+        hold_reason=hold_reason,
     )
 
 
@@ -134,7 +154,7 @@ def representative(item: Item) -> Record:
 
 def inclusion_event(item: Item, target: Target) -> Event:
     """掲載の根拠とする出来事。判定の窓に入る出来事がなければ ValueError。"""
-    events = [e for e in item.events if event_in_window(item, e, target)]
+    events = window_events(item, target)
     if not events:
         raise ValueError(f"判定の窓に入る出来事がない: {item.url}")
     return min(events, key=lambda e: (INCLUSION_ORDER[e.type], e.at))

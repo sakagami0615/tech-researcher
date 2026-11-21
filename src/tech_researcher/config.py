@@ -62,7 +62,7 @@ class GitHubRepos:
     """GitHub の新着・急上昇（D-13）。
 
     D-13 の記号との対応：threshold_increase＝A、report_top_n＝N_report、new_repo_days＝D、
-    new_repo_stars＝C、search_days＝D_search、search_min_stars＝C_search。
+    new_repo_stars＝C、new_repo_top_n（新規を載せる件数の上限。累計の多い順）、search_days＝D_search、search_min_stars＝C_search。
     search_days・search_min_stars は観測（PoC）で決める。
     search_without_topic が True なら、トピックを付けない検索も行う。search_topics は Search で
     1つずつ検索するトピック。watch_repos は `owner/repo`（小文字にそろえる）。どちらも空でよい。
@@ -77,6 +77,7 @@ class GitHubRepos:
     report_top_n: int
     new_repo_days: int
     new_repo_stars: int
+    new_repo_top_n: int
     search_days: int
     search_min_stars: int
 
@@ -345,6 +346,7 @@ def _github_repos(sources: _Table | None) -> GitHubRepos | None:
         report_top_n=t.int_at_least("report_top_n"),
         new_repo_days=t.int_at_least("new_repo_days"),
         new_repo_stars=t.int_at_least("new_repo_stars"),
+        new_repo_top_n=t.int_at_least("new_repo_top_n"),
         search_days=t.int_at_least("search_days"),
         search_min_stars=t.int_at_least("search_min_stars", minimum=0),
     )

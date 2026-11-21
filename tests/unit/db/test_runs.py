@@ -190,7 +190,7 @@ def test_source_fetch_needs_run(conn):
     [
         {"status": "broken"},
         {"status": "failed"},
-        {"status": "ok", "error_category": "timeout"},
+        {"status": "no_results", "error_category": "timeout"},
         {"in_period_count": 11},
         {"in_period_count": -1},
         {"attempts": -1},
