@@ -38,6 +38,9 @@ MAX_REDIRECTS = 3
 # トークンに使える形。ヘッダに入れたときに要求を壊す文字（改行など）を止める。
 # 不正な値を http.client に渡すと、例外のメッセージに値がそのまま入るため、先に確かめる
 TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_.\-]+")
+# 応答の JSON の入れ子の深さの上限。GitHub の正しい応答はずっと浅い。
+# json の RecursionError に頼ると、Python の版によっては深い入れ子も読めてしまうため、自分で数える
+MAX_JSON_DEPTH = 64
 # API のパス。`/` で区切った空でない部分だけにし、ホストを差し替えられないようにする
 # （`.`・`..` の部分は別に止める）
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
@@ -194,8 +197,8 @@ class GitHubClient:
             raise GitHubError(message, category, e.attempts, e.status) from e
         self.graphql_calls += response.attempts
         try:
-            return json.loads(response.body)
-        except (ValueError, RecursionError) as e:  # 入れ子が深すぎる JSON は RecursionError
+            return load_json(response.body)
+        except (ValueError, RecursionError) as e:  # 入れ子が深すぎる JSON も読めない応答とする
             message = f"{GRAPHQL_PATH}：応答が JSON でない"
             raise GitHubError(message, INVALID_RESPONSE, response.attempts) from e
 
@@ -245,9 +248,30 @@ class GitHubClient:
         else:
             raise GitHubError(f"{path}：リダイレクトが多すぎる", REDIRECT, used)
         try:
-            return json.loads(response.body), used
+            return load_json(response.body), used
         except (ValueError, RecursionError) as e:  # 深すぎる入れ子も読めない応答とする
             raise GitHubError(f"{path}：応答が JSON でない", INVALID_RESPONSE, used) from e
+
+
+def load_json(body: bytes | str) -> Any:
+    """JSON を読み、入れ子が MAX_JSON_DEPTH より深ければ ValueError にする。
+
+    深さは再帰を使わずに数える。
+    """
+    data = json.loads(body)
+    stack = [(data, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, dict):
+            children = value.values()
+        elif isinstance(value, list):
+            children = value
+        else:
+            continue
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError("JSON の入れ子が深すぎる")
+        stack.extend((child, depth + 1) for child in children)
+    return data
 
 
 def _is_search(path: str) -> bool:

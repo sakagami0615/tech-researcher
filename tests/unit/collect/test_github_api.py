@@ -429,3 +429,18 @@ def test_graphql_deeply_nested_json_is_an_invalid_response(limits):
     with pytest.raises(GitHubError) as e:
         api.graphql("{ x }", {})
     assert e.value.category == github_api.INVALID_RESPONSE
+
+
+def test_json_depth_limit_does_not_depend_on_python_recursion(limits):
+    # 釣り合った深い入れ子は、Python の版によっては json が例外にせず読めてしまう
+    deep = b"[" * (github_api.MAX_JSON_DEPTH + 1) + b"]" * (github_api.MAX_JSON_DEPTH + 1)
+    api = client(limits, FakeFetch(Response("https://api.github.com/a", 200, deep, 1)))
+    with pytest.raises(GitHubError) as e:
+        api.get("/a")
+    assert e.value.category == github_api.INVALID_RESPONSE
+
+
+def test_json_at_the_depth_limit_is_read():
+    ok = "[" * github_api.MAX_JSON_DEPTH + "]" * github_api.MAX_JSON_DEPTH
+    assert github_api.load_json(ok) is not None
+    assert github_api.load_json('{"a": {"b": [1, {"c": 2}]}}') == {"a": {"b": [1, {"c": 2}]}}
