@@ -3,7 +3,7 @@ import json
 import pytest
 
 from tech_researcher.agent.daily import CATEGORIES, DEPTHS
-from tech_researcher.agent.investigate import CONFIDENCES
+from tech_researcher.agent.investigate import CONFIDENCE_LABELS
 from tech_researcher.render.failure import TARGETS
 from tech_researcher.validate.schema import (
     DAILY_OUTPUT_SCHEMA,
@@ -138,7 +138,7 @@ def test_investigate_schema_uses_only_allowed_keywords():
 
 def test_investigate_schema_enums_match_code_constants():
     props = json.loads(schema_text(INVESTIGATE_OUTPUT_SCHEMA))["properties"]
-    assert props["confidence"]["enum"] == list(CONFIDENCES)
+    assert props["confidence"]["enum"] == list(CONFIDENCE_LABELS)
     target = props["countermeasures"]["items"]["properties"]["target"]
     assert target["enum"] == list(TARGETS)
 

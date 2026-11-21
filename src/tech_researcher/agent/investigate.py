@@ -8,7 +8,7 @@
 - 出力：スキーマ（D6(a)）・D2・D3・確度・空の欄・文字数を検査し、違反したら AI を利用できない
   ときの定型（3.5）に落とす。根拠の行は AI が選んだ ID から、コードが元の行を取り出す（存在しない
   ID は捨てる。10行×3ブロックまで）。AI の出力の全文と根拠の抜粋は秘匿情報の検査にもかけ、
-  見つかれば公開停止（3.6）にさせる（③ の検査と同じく、捨てる文の中でも止める）
+  見つかれば AI の文も抜粋も載せない 3.5 の定型にする（③ と同じく、捨てる文の中も見る）
 - ② の AI の呼び出しが失敗した実行エラーでは、AI を利用できないものとして ④ を呼ばない（D-04）
 - ④ は再試行しない（structure.md 6.3）。失敗したら定型にする
 
@@ -18,6 +18,7 @@
 
 import json
 import re
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -42,7 +43,7 @@ from tech_researcher.validate.secret_scan import SecretScanner
 INVESTIGATE_SCHEMA = resources.files("tech_researcher") / "schemas" / INVESTIGATE_OUTPUT_SCHEMA
 
 KINDS = ("run_error", "rejected")  # 実行エラー・不合格
-CONFIDENCES = {"high": "高", "medium": "中", "low": "低"}  # 表記はコードが変える（4.4）
+CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}  # 表記はコードが変える（4.4）
 HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の例）
 # ② の AI の呼び出しが失敗した分類（invoke.py の AgentError と、統括スクリプトの launch_failed）。
 # AI 自体を利用できない失敗として ④ を飛ばす（D-04、US-E7-04 の「LLM 呼び出しの失敗」）。
@@ -50,6 +51,8 @@ HISTORY_DAYS = 7  # 履歴の行にする直近の日数（data-model.md 4.4 の
 AGENT_UNUSABLE = frozenset(
     {"agent_failed", "bad_output", "timeout", "missing_skill", "launch_failed"}
 )
+# claude を動かさずに終わった失敗（統括スクリプトの _NOT_CALLED と同じ。使用量のログを残さない）
+_NOT_CALLED = frozenset({"input_too_large", "bad_schema", "missing_skill"})
 
 # 検証結果の行に入れてよい項目 ID の形（i{主キー}・ドライランの仮の d{番号}。2.6）
 _ITEM_ID = re.compile(r"[id][0-9]{1,18}")
@@ -82,6 +85,8 @@ class Failure:
             raise ValueError(f"処理段階にない {self.failed_stage!r}")
         if (self.kind == "rejected") != (self.rejected_checks is not None):
             raise ValueError("rejected_checks は不合格のときだけ必要")
+        if self.kind == "run_error" and not self.error_category:
+            raise ValueError("実行エラーにはエラーの概要が要る")
 
 
 @dataclass(frozen=True)
@@ -97,10 +102,16 @@ class Line:
 class InvestigateResult:
     """④ の結果。investigation が None なら 3.5 の定型にし、reason にその分類を入れる。
 
-    reason：agent_unusable（④ を呼ばなかった）、AgentError の分類・launch_failed（④ の失敗）、
-    invalid_output（D6(a)）、investigation_violation の分類（D2・D3 など）、secret_detected
-    （公開停止。3.6 にする）。output は検査を通った出力（investigation.json・runs の
-    investigation_json に残すもの）。called は AI を呼んだか（使用量のログを残すか）。
+    reason：agent_unusable（④ を呼ばなかった）、AgentError の分類・launch_failed・
+    agent_failed（想定外の例外も含む。④ の失敗）、invalid_output（D6(a)）、
+    investigation_violation の分類（D2・D3 など）、secret_detected（AI の出力か根拠の抜粋に
+    秘匿情報があった。AI の文と抜粋を載せない 3.5 の定型にし、secret_kinds をログに残す）。
+    output は検査を通った出力（investigation.json・runs の investigation_json に残すもの）。
+
+    ログ（structure.md 3.3 の usage の行と failure の行）に残す値も持つ：called は AI を
+    呼んだか、input_bytes は標準入力のバイト数、wall_ms はコンテナの起動を含めた所要時間、
+    models・usage は結果の JSON の値、detail は失敗の詳細（stderr と Claude Code の分類。
+    呼び出し側がマスクしてから残す）、remove_failed は残ったコンテナを消せなかったか。
     """
 
     investigation: Investigation | None
@@ -108,8 +119,12 @@ class InvestigateResult:
     output: dict | None = None
     secret_kinds: tuple[str, ...] = ()
     called: bool = False
+    input_bytes: int | None = None
+    wall_ms: int | None = None
     models: tuple[str, ...] = ()
     usage: invoke.AgentUsage | None = None
+    detail: str = ""
+    remove_failed: bool = False
 
 
 def agent_unusable(failure: Failure) -> bool:
@@ -246,7 +261,7 @@ def parse_investigation(output: object, lines: Sequence[Line]) -> Investigation:
     return Investigation(
         event=output["event"],
         cause=output["cause"],
-        confidence=CONFIDENCES[output["confidence"]],
+        confidence=CONFIDENCE_LABELS[output["confidence"]],
         contents=tuple(output["investigation"]),
         measures=tuple(Countermeasure(m["target"], m["text"]) for m in output["countermeasures"]),
         evidence=select_evidence(texts, output["evidence_line_ids"]),
@@ -273,6 +288,8 @@ def investigate(
         return InvestigateResult(None, "agent_unusable")
     data = build_investigate_input(failure, lines, scanner)
     body = json.dumps(data, ensure_ascii=False).encode()
+    sent = {"input_bytes": len(body)}
+    started = time.monotonic()
     try:
         result = invoke.call_agent(
             body,
@@ -284,13 +301,39 @@ def investigate(
             max_input_bytes=max_input_bytes,
         )
     except invoke.AgentError as e:
-        called = e.category not in ("input_too_large", "bad_schema", "missing_skill")
-        return InvestigateResult(None, e.category, called=called, models=e.models, usage=e.usage)
-    except OSError:  # docker を起動できない
-        return InvestigateResult(None, "launch_failed")
-    done = {"called": True, "models": result.models, "usage": result.usage}
+        return InvestigateResult(
+            None,
+            e.category,
+            called=e.category not in _NOT_CALLED,
+            models=e.models,
+            usage=e.usage,
+            detail=e.detail,
+            remove_failed=e.remove_failed,
+            wall_ms=_elapsed(started),
+            **sent,
+        )
+    except OSError as e:  # docker を起動できない
+        return InvestigateResult(None, "launch_failed", detail=type(e).__name__, **sent)
+    except Exception as e:
+        # AI を呼んだ後の想定外の失敗。④ は失敗しても定型にする（structure.md 6.3）
+        return InvestigateResult(
+            None,
+            "agent_failed",
+            called=True,
+            detail=type(e).__name__,
+            wall_ms=_elapsed(started),
+            **sent,
+        )
+    done = {
+        "called": True,
+        "models": result.models,
+        "usage": result.usage,
+        "wall_ms": _elapsed(started),
+        **sent,
+    }
     output = result.output
-    # 無害化の前の全文と、1つずつの文字列を検査する（③ と同じ。stages/daily.py）
+    # 無害化の前の全文と、1つずつの文字列を検査する（③ と同じ。stages/daily.py）。形の検査より
+    # 先に行い、スキーマに合わない出力の中の秘匿値も見落とさない
     texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
     if kinds := _secret_kinds(scanner, texts):
         return InvestigateResult(None, "secret_detected", secret_kinds=kinds, **done)
@@ -300,10 +343,16 @@ def investigate(
         return InvestigateResult(None, "invalid_output", **done)
     if reason := investigation_violation(investigation):
         return InvestigateResult(None, reason, **done)
+    # 行はマスクしてから入れているので、通常は見つからない。抜粋も投稿前の検査の対象とする
+    # 決まり（report-templates.md 3.2・US-E7-05）の保険として残す
     evidence = [line for block in investigation.evidence for line in block]
     if kinds := _secret_kinds(scanner, evidence):
         return InvestigateResult(None, "secret_detected", secret_kinds=kinds, **done)
     return InvestigateResult(investigation, output=output, **done)
+
+
+def _elapsed(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
 
 
 def _secret_kinds(scanner: SecretScanner, texts: Iterable[str]) -> tuple[str, ...]:

@@ -84,6 +84,7 @@ def run(output=OUTPUT, failure=ERROR, lines=LINES, done=None, max_input_bytes=10
         {"kind": "rejected", "failed_stage": "verify", "rejected_checks": ()},
         {"kind": "rejected"},  # 不合格には検証項目が要る
         {"kind": "run_error", "failed_stage": "collect", "rejected_checks": ()},
+        {"kind": "run_error", "failed_stage": "collect"},  # エラーの概要がない
     ],
 )
 def test_failure_rejects_inconsistent_fields(fields):
@@ -273,6 +274,7 @@ def test_report_uses_the_investigation_or_falls_back():
         ),
         ({**OUTPUT, "event": "あ" * 401}, "too_long"),
         ({**OUTPUT, "investigation": []}, "empty"),
+        ({**OUTPUT, "countermeasures": []}, "empty"),
         ({**OUTPUT, "cause": "  "}, "empty"),
     ],
 )
@@ -301,6 +303,7 @@ def test_evidence_is_limited_to_ten_lines_by_three_blocks():
         {**OUTPUT, "cause": f"トークン {TOKEN} が原因"},
         {**OUTPUT, "investigation": ["known-secret-value"]},
         {**OUTPUT, "evidence_line_ids": [TOKEN]},  # 捨てる ID の中でも止める
+        {**OUTPUT, "extra": TOKEN},  # スキーマに合わない出力でも、形の検査より先に見つける
     ],
 )
 def test_secret_in_output_stops_publication(output):
@@ -319,7 +322,9 @@ def test_secret_in_evidence_stops_publication():
 @pytest.mark.parametrize("code", sorted(inv.AGENT_UNUSABLE))
 def test_agent_unusable_skips_the_call(code):
     """② の AI の呼び出しが失敗したときは ④ を呼ばない（D-04、US-E7-04）。"""
-    failure = inv.Failure("run_error", TARGET, failed_stage="analyze", error_code=code)
+    failure = inv.Failure(
+        "run_error", TARGET, failed_stage="analyze", error_category="失敗", error_code=code
+    )
     got, runner = run(failure=failure)
     assert runner.calls == [] and got.investigation is None
     assert got.reason == "agent_unusable" and not got.called
@@ -327,15 +332,73 @@ def test_agent_unusable_skips_the_call(code):
 
 @pytest.mark.parametrize("code", ["input_too_large", "bad_schema", "bad_input"])
 def test_analyze_failures_without_calling_the_agent_are_investigated(code):
-    failure = inv.Failure("run_error", TARGET, failed_stage="analyze", error_code=code)
+    failure = inv.Failure(
+        "run_error", TARGET, failed_stage="analyze", error_category="失敗", error_code=code
+    )
     got, runner = run(failure=failure)
     assert len(runner.calls) == 1 and got.investigation is not None
 
 
 def test_agent_failure_falls_back_without_retry():
-    got, runner = run(done=Done(1, NOT_LOGGED_IN))
+    got, runner = run(done=Done(1, NOT_LOGGED_IN, stderr="stderr の末尾", remove_failed=True))
     assert len(runner.calls) == 1  # ④ は再試行しない（structure.md 6.3）
     assert got.investigation is None and got.reason == "agent_failed" and got.called
+    # 使用量と失敗の行に残す値（structure.md 3.3）
+    assert got.input_bytes == len(runner.calls[0][3]) and got.wall_ms is not None
+    assert got.detail.startswith("stderr の末尾") and "exit=1" in got.detail
+    assert got.remove_failed and got.usage is not None
+
+
+def test_success_keeps_the_values_for_the_usage_log():
+    got, runner = run()
+    assert got.input_bytes == len(runner.calls[0][3]) and got.wall_ms >= 0
+    assert got.usage.num_turns == 2 and got.detail == "" and not got.remove_failed
+
+
+@pytest.mark.parametrize("category", ["missing_skill", "bad_schema"])
+def test_failures_before_claude_runs_are_not_counted_as_calls(tmp_path, category):
+    if category == "missing_skill":
+        got, _ = run(done=Done(invoke.MISSING_SKILL_EXIT, "", stderr="スキルがない"))
+    else:
+        got = inv.investigate(
+            ERROR,
+            LINES,
+            1.0,
+            runner=FakeRunner(Done(0, result())),
+            scanner=SCANNER,
+            max_turns=None,
+            max_input_bytes=10**6,
+            schema=tmp_path / "missing.json",
+        )
+    assert got.reason == category and not got.called
+
+
+def test_unexpected_error_after_the_call_falls_back():
+    class Strange:
+        def run(self, *args, **kwargs):
+            raise RuntimeError("想定外")
+
+    got = inv.investigate(
+        ERROR, LINES, 1.0, runner=Strange(), scanner=SCANNER, max_turns=None, max_input_bytes=10**6
+    )
+    assert got.investigation is None and got.reason == "agent_failed" and got.called
+    assert got.detail == "RuntimeError"  # 例外の文は残さない
+
+
+def test_input_masks_secrets_in_the_failure_fields():
+    error = inv.Failure("run_error", TARGET, failed_stage="post", error_category=f"x {TOKEN}")
+    assert TOKEN not in json.dumps(inv.build_investigate_input(error, (), SCANNER))
+    rejected = inv.Failure("rejected", TARGET, rejected_checks=("known-secret-value",))
+    failure = inv.build_investigate_input(rejected, (), SCANNER)["failure"]
+    assert failure["rejected_checks"] == ["[MASKED:known]"]
+
+
+def test_recent_runs_include_runs_stopped_midway(tmp_path):
+    conn = open_db(tmp_path / "db.sqlite3")
+    now = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
+    start_run(conn, "20261023-060000-0000", daily_target(date(2026, 10, 23), 1), now)
+    (run_,) = recent_runs(conn, now, RUN_ID)
+    assert inv.history_lines([run_]) == ["2026-10-24 06:00 daily target=2026-10-22 status=running"]
 
 
 def test_timeout_and_launch_failure_fall_back():
@@ -368,5 +431,5 @@ def test_repository_has_the_investigate_skill():
     # スキルに書いた目安・値が、コードの検査と表記にそろっている
     assert f"{EVENT_LIMIT}字以内" in text
     assert all(f"| `{t}` |" in text for t in TARGETS)
-    assert all(f"| `{c}` |" in text for c in inv.CONFIDENCES)
+    assert all(f"| `{c}` |" in text for c in inv.CONFIDENCE_LABELS)
     assert f"1かたまり{MAX_EVIDENCE_LINES}行まで・{MAX_EVIDENCE_BLOCKS}かたまりまで" in text
