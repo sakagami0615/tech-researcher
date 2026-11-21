@@ -1249,7 +1249,7 @@ def test_production_all_sources_failed_keeps_workers_close_and_adds_investigatio
     [run] = host.runs()
     assert run[3:] == ("failed", "collect", "all_sources_failed", 1)
     assert json.loads(investigation_json(host))["event"] == "処理が失敗した"
-    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "record-investigation"]
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish"]
 
 
 def test_dry_run_failure_does_not_write_db_and_reads_history(host):
@@ -1273,3 +1273,33 @@ def test_dry_run_failure_does_not_write_db_and_reads_history(host):
     history = [line["text"] for line in lines if line["kind"] == "history"]
     assert len(history) == 1 and "status=failed failed_stage=collect" in history[0]
     assert "partial_sources=github_releases:1" in history[0]  # 一部だけ取れなかった情報源も入れる
+
+
+def test_production_verify_failure_closes_run_as_failed_verify(host, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr(cli, "run_verify", broken)
+    code, summary, _ = host.run()
+
+    assert (code, summary["failed_stage"], summary["error_category"]) == (1, "verify", "exit_1")
+    [run] = host.runs()
+    assert run[3:] == ("failed", "verify", "exit_1", 1)  # running のまま残さない
+
+
+def test_run_close_failure_does_not_change_the_result(host, monkeypatch):
+    """runs を閉じられなくても、要約は元の失敗のまま出す（後始末の失敗はログに残す）。"""
+    real = host.fake_compose_run
+
+    def run(compose, service, args, timeout_s):
+        if args[0] == "finish":
+            raise OSError("docker")
+        return real(compose, service, args, timeout_s)
+
+    monkeypatch.setattr(host, "fake_compose_run", run)
+    host.ai = lambda data: {"items": [entry("i99", 1)]}
+    code, summary, _ = host.run()
+
+    assert (code, summary["result"]) == (1, "rejected")
+    log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
+    assert ("job", "failure") in stages_of(log)

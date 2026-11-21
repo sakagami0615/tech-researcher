@@ -13,7 +13,8 @@ report-templates.md 3章）。
    ドライランは出力として残り、本番は ⑤ が使う）
 4. 本番だけ、runs を worker の `finish` で閉じる（failed・rejected、終了時刻、④ の出力、
    ② が失敗したときのモデル）。DB に書くのは worker だけ（D-04）。ドライランは DB に書かない。
-   ① の worker がすでに閉じた失敗（取得の全失敗・① の例外）は、上書きしない
+   ① の worker がすでに閉じた実行（取得の全失敗・① の例外）は、worker の finish が終わりの値を
+   上書きせず、④ の出力だけを足す
 
 後始末の失敗（④ の失敗、本文を書けない、runs を閉じられない）は実行の結果を変えない。ログに残し、
 要約は元の失敗のまま出す。⑤ の投稿（Issue を作ること）はここでは行わない。
@@ -71,6 +72,7 @@ CHECK_LABELS = {
 }
 # ② の再試行の上限（structure.md 6.3）。再試行は別の Issue で行う。それまでの回数は 0
 ANALYZE_RETRY_LIMIT = 1
+REQUEST_COUNT_SOURCES = frozenset({GITHUB_REPOS_SOURCE_ID, "github_releases", "qiita"})
 _EXIT = re.compile(r"exit_([0-9]+)")
 
 # エラーの概要（コードが分類した短い文。report-templates.md 3.2）。例外のメッセージは入れない
@@ -107,31 +109,24 @@ class Outcome:
 
 def handle(job: Job, outcome: Outcome, minute: float) -> None:
     """失敗の後始末を行う（モジュールの説明）。例外は出さない。minute は設定の上限（分）の秒数。"""
-    result = InvestigateResult(None)
     try:
-        report, result = _report(job, outcome, minute)
-        _write(job.files.dir / ISSUE, issue_text(report))
-        if result.output is not None:
-            _write(job.files.dir / INVESTIGATION, json.dumps(result.output, ensure_ascii=False))
+        _write_issue(job, outcome, minute)
     except Exception as e:
         _quiet(job, "investigate", "failure", error_category=type(e).__name__, exc=e)
     if job.files.dry_run:
         return
-    if not _closed_by_worker(outcome):
+    try:
         _close_run(job, outcome, minute)
-    elif result.output is not None:  # 閉じた値は変えず、④ の出力だけを足す
-        _run_worker(
-            job, ["record-investigation", job.cadence, "--run-id", job.files.run_id], minute
-        )
+    except Exception as e:
+        _quiet(job, "job", "failure", error_category="run_close_failed", exc=e)
 
 
-def _closed_by_worker(outcome: Outcome) -> bool:
-    """① の worker がすでに runs を閉じた失敗か。すべての情報源の取得に失敗した日・有効な情報源が
-    ない日（collect_failure）と、① の例外で終了コードが非0になったとき（例外の型の名前を残して
-    いるので、上書きしない。data-model.md 3.4）。"""
-    return outcome.stage == "collect" and (
-        outcome.category in _COLLECT_SUMMARIES or bool(_EXIT.fullmatch(outcome.category or ""))
-    )
+def _write_issue(job: Job, outcome: Outcome, minute: float) -> None:
+    """④ の調査・本文を作り、investigation.json・issue.md を書く（先に ④ の出力を残す）。"""
+    report, result = _report(job, outcome, minute)
+    if result.output is not None:
+        _write(job.files.dir / INVESTIGATION, json.dumps(result.output, ensure_ascii=False))
+    _write(job.files.dir / ISSUE, issue_text(report))
 
 
 def partial_source_names(run_dir: Path, names: Mapping[str, str]) -> list[str]:
@@ -180,12 +175,12 @@ def error_summary(stage: str, category: str, fetches: Sequence[Mapping]) -> str:
 def source_results(fetches: Sequence[Mapping], names: Mapping[str, str]) -> list[SourceResult]:
     """実行エラー Issue の「情報源ごとの取得結果」。内訳のある情報源は部分ごとの行にする。
 
-    再試行は試行回数から初回を引いた数。github_repos の試行回数は要求の回数なので 0 とする。
+    再試行回数は _retry_count。
     """
     rows = []
     for f in fetches:
         name = names.get(f["source_id"], f["source_id"])
-        retries = 0 if f["source_id"] == GITHUB_REPOS_SOURCE_ID else max(f["attempts"] - 1, 0)
+        retries = _retry_count(f)
         if f["parts"]:
             rows += [
                 SourceResult(f"{name}（{p['name']}）", False, fetch_reason(p["category"]), retries)
@@ -198,6 +193,14 @@ def source_results(fetches: Sequence[Mapping], names: Mapping[str, str]) -> list
     return rows
 
 
+def _retry_count(fetch: Mapping) -> int:
+    """情報源の再試行回数（試行回数から初回を引いた数）。github_repos・github_releases・qiita の
+    試行回数は要求の総数（ページ・リポジトリごと）で、再試行ではないので 0 とする。"""
+    if fetch["source_id"] in REQUEST_COUNT_SOURCES:
+        return 0
+    return max(fetch["attempts"] - 1, 0)
+
+
 def retries(config: Config, stage: str, fetches: Sequence[Mapping]) -> tuple[int, int]:
     """失敗した処理での（再試行回数、上限）。再試行の実装（別の Issue）までは、回数は ① の
     情報源の再試行だけ（失敗した情報源の試行回数の最大から初回を引いた数。上限で切る）。"""
@@ -205,11 +208,7 @@ def retries(config: Config, stage: str, fetches: Sequence[Mapping]) -> tuple[int
     if stage == "collect":
         limit = max(len(limits.http_retry_waits_s), limits.last30days_retries)
         used = max(
-            (
-                f["attempts"] - 1
-                for f in fetches
-                if f["status"] == "failed" and f["source_id"] != GITHUB_REPOS_SOURCE_ID
-            ),
+            (_retry_count(f) for f in fetches if f["status"] == "failed"),
             default=0,
         )
         return min(max(used, 0), limit), limit
@@ -218,10 +217,10 @@ def retries(config: Config, stage: str, fetches: Sequence[Mapping]) -> tuple[int
 
 def _report(job: Job, outcome: Outcome, minute: float) -> tuple[Report, InvestigateResult]:
     target = job.target
-    validation = load_validation(job.files.dir)
     if outcome.kind == SECRET_STOP:
         assert outcome.stage is not None
         return secret_stop_report(target, outcome.stage), InvestigateResult(None)
+    validation = load_validation(job.files.dir)
     fetches = load_fetches(job.files.dir)
     names = source_names(job.config)
     if outcome.kind == REJECTED:

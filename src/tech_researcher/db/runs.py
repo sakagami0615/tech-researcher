@@ -78,7 +78,7 @@ def finish_run(
 ) -> None:
     """実行の終わりを記録する。failed_stage は失敗（failed）のときだけ、必ず持たせる。
 
-    investigation_json は ④ の出力（検査を通ったもの。呼ぶ側がマスクしてから渡す）。
+    investigation_json は ④ の出力（統括スクリプトが秘匿情報の検査を通したもの）。
 
     同じ実行の中でやり直したときは、同じ行を上書きする。
     """
@@ -114,7 +114,7 @@ def finish_run(
 
 def record_investigation(conn: sqlite3.Connection, run_id: str, investigation_json: str) -> None:
     """④ の出力（検査を通ったもの）だけを記録する。すでに閉じた実行（finish_run）の終わりの値は
-    変えない。呼ぶ側がマスクしてから渡す。"""
+    変えない。④ の出力は統括スクリプトが秘匿情報の検査を通したもの。"""
     check_writable_run_id(run_id)
     cursor = conn.execute(
         "UPDATE runs SET investigation_json = ? WHERE run_id = ?", (investigation_json, run_id)
@@ -280,7 +280,9 @@ def recent_runs(
                 fetches=counts,
                 failed_sources=tuple((s, c) for s, st, c, _ in fetches if st == "failed"),
                 partial_sources=tuple(
-                    (s, n) for s, _, _, parts in fetches if (n := _part_count(parts))
+                    (s, n)
+                    for s, st, _, parts in fetches
+                    if st != "failed" and (n := _part_count(parts))
                 ),
             )
         )

@@ -290,7 +290,7 @@ def test_finish_with_a_run_not_started_fails_without_details(env, capsys):
     assert "finish が失敗した" in capsys.readouterr().err
 
 
-def test_record_investigation_keeps_the_closing_values(env):
+def test_finish_keeps_the_values_of_a_run_already_closed_and_adds_investigation(env):
     data = production_run(env)
     with closing(open_db(data / "db" / "tech-researcher.sqlite3")) as conn:
         finish_run(
@@ -302,7 +302,8 @@ def test_record_investigation_keeps_the_closing_values(env):
             error_category="all_sources_failed",
             retry_count=2,
         )
-    assert cli.main(["record-investigation", "daily", "--run-id", PROD], env) == 0
+    args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "analyze"]
+    assert cli.main([*args, "--error-category", "agent_failed", "--model", "claude-x"], env) == 0
     status, stage, category, retries, text, _, _ = run_row(data)
     assert (status, stage, category, retries) == ("failed", "collect", "all_sources_failed", 2)
     assert json.loads(text) == INVESTIGATION

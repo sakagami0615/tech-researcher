@@ -490,6 +490,8 @@ ${TR_DATA_DIR}/
 │       ├── agent-output.json           # ② ④ の出力
 │       ├── validation.json             # ③ の結果（合否、除外した項目と理由）
 │       ├── secret-scan.json            # 秘匿情報の検査の結果（検出したかどうかと、検出の分類だけ）
+│       ├── investigation.json          # ④ の出力（検査を通ったときだけ。runs の investigation_json にも書く）
+│       ├── fetches.json                # ① の情報源ごとの取得結果（実行エラー Issue の表の元）
 │       └── issue.md                    # ③ が作った Issue のタイトル・ラベル・本文（⑤ に渡す）
 └── dry-run/
     └── <実行ID>/

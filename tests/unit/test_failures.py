@@ -51,7 +51,8 @@ def test_partial_sources_use_display_names_and_skip_whole_failures(tmp_path):
     ]
     (tmp_path / "fetches.json").write_text(json.dumps(fetches))
     names = {"github_releases": "GitHub Releases", "rss:example": "Example", "qiita": "Qiita"}
-    # 全失敗の情報源は failed_sources 側。ここに入れるのは、一部だけ取れなかった情報源
+    fetches.append(entry("github_releases", "failed", "timeout", 1, [("a/b", "timeout")]))
+    # 全失敗（failed。内訳があっても）は failed_sources 側。ここは一部だけ取れなかった情報源
     assert failures.partial_source_names(tmp_path, names) == ["GitHub Releases"]
 
 
@@ -106,6 +107,8 @@ def test_retries_per_stage():
     assert failures.retries(CONFIG, "collect", fetches) == (2, 2)
     assert failures.retries(CONFIG, "collect", [entry("a", "failed", "dns", 9)]) == (2, 2)
     assert failures.retries(CONFIG, "collect", []) == (0, 2)
+    # 要求の総数を試行回数にする情報源は、再試行に数えない
+    assert failures.retries(CONFIG, "collect", [entry("qiita", "failed", "dns", 3)]) == (0, 2)
     # ② の再試行はまだ行わない（上限は structure.md 6.3）。③ は再試行しない
     assert failures.retries(CONFIG, "analyze", fetches) == (0, 1)
     assert failures.retries(CONFIG, "verify", fetches) == (0, 0)

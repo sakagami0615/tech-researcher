@@ -219,7 +219,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `model` | TEXT | ② で使われたモデルの名前（Claude Code の出力の `modelUsage` から取る。複数あれば `,` でつなぐ）。② を呼ばなかった実行では空 |
 
 - `status` が `running` のまま残った行は、途中で止まった実行を表す。後片付けの処理は作らない
-- 実装での対応（`src/tech_researcher/cli.py`）：本番の実行（観測を含む）の開始の行は、① の worker が DB を開いて書く。`started_at` は実行 ID の開始時刻。① で実行エラーと分かった本番の実行（すべての情報源の取得に失敗した日・有効な情報源がない日（`all_sources_failed`・`no_sources`）と、① の例外（例外の型の名前））は、① の worker が `failed`（`failed_stage` は `collect`）と終了時刻で閉じる。観測（`obs-`）の実行は、それ以外なら ① の worker が `observed` で閉じる。上限で止められて worker が書けなかった実行は `running` のまま残る。日次の ② 以降の失敗（実行エラー・不合格・秘匿情報の検出による公開停止）は、統括スクリプトが worker の `finish` で `failed`（`failed_stage`・`error_category`・`retry_count`）・`rejected` と終了時刻、④ の出力（`investigation_json`）、② が失敗したときの `model` を書いて閉じる。① の worker がすでに閉じた失敗（取得の全失敗・① の例外）は上書きせず、④ の出力だけを足す（`record-investigation`）。成功の終わりは ⑤ で、週次は統合（#47・#48）で書く（それまでは `running` のまま残る）。ドライランは書かない取得結果は、情報源の取得を終えるごとに書き、期間内に残った件数を ① の最後に書き直す（① が上限で止められても、それまでの取得の記録が残る）
+- 実装での対応（`src/tech_researcher/cli.py`）：本番の実行（観測を含む）の開始の行は、① の worker が DB を開いて書く。`started_at` は実行 ID の開始時刻。① で実行エラーと分かった本番の実行（すべての情報源の取得に失敗した日・有効な情報源がない日（`all_sources_failed`・`no_sources`）と、① の例外（例外の型の名前））は、① の worker が `failed`（`failed_stage` は `collect`）と終了時刻で閉じる。観測（`obs-`）の実行は、それ以外なら ① の worker が `observed` で閉じる。上限で止められて worker が書けなかった実行は `running` のまま残る。日次の ② 以降の失敗（実行エラー・不合格・秘匿情報の検出による公開停止）は、統括スクリプトが worker の `finish` で `failed`（`failed_stage`・`error_category`・`retry_count`）・`rejected` と終了時刻、④ の出力（`investigation_json`）、② が失敗したときの `model` を書いて閉じる。すでに閉じた実行（① の worker が閉じた取得の全失敗・① の例外）は、`finish` が終わりの値を上書きせず、④ の出力だけを足す。成功の終わりは ⑤ で、週次は統合（#47・#48）で書く（それまでは `running` のまま残る）。ドライランは書かない。取得結果は、情報源の取得を終えるごとに書き、期間内に残った件数を ① の最後に書き直す（① が上限で止められても、それまでの取得の記録が残る）
 
 #### source_fetches
 

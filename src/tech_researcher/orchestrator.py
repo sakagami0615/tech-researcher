@@ -561,7 +561,7 @@ def _run_stages(job: Job) -> Summary:
     model_args = ["--model", ",".join(models)] if models else []
     verified, category = _worker(job, "verify", job.limits.verify, _verify_summary, model_args)
     if verified is None:
-        return _fail(job, "verify", category, fields, models)
+        return _fail(job, "verify", category, fields)
     if verified["result"] == REJECTED:  # 不合格（US-E7-02）。不合格の後に再生成はしない
         reason = _validation_reason(job)
         failures.handle(job, failures.Outcome(failures.REJECTED, category=reason), MINUTE)
@@ -586,10 +586,11 @@ def _fail(
 ) -> Summary:
     """日次の ① 〜 ③ の実行エラー：④ の調査・本文・本番の runs の終わりを行い、要約にする。
 
-    週次の ① の失敗も同じ流れを通る（④ の入力は日次・週次で同じ。本文の作り方も同じ）。
+    週次の失敗の分岐は週次の統合（#47・#48）で足す（いまは要約だけ）。
     """
     assert category is not None
-    failures.handle(job, failures.Outcome(failures.RUN_ERROR, stage, category, models), MINUTE)
+    if job.cadence == "daily":
+        failures.handle(job, failures.Outcome(failures.RUN_ERROR, stage, category, models), MINUTE)
     return job.summary("error", failed_stage=stage, error_category=category, **(fields or {}))
 
 

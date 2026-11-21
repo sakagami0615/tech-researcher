@@ -101,7 +101,7 @@ def _run(
     log: RunLog,
     scanner: SecretScanner,
 ) -> dict:
-    if args.stage in ("finish", "record-investigation"):
+    if args.stage == "finish":
         return _finish_stage(args, files, log)
     if args.stage == "verify":
         if files.dry_run:
@@ -173,7 +173,7 @@ def _finish(conn: sqlite3.Connection, run_id: str, category: str | None) -> None
 def _finish_stage(args: argparse.Namespace, files: RunFiles, log: RunLog) -> dict:
     """本番の失敗した実行（② 以降の失敗、不合格、公開停止）を runs で閉じる。
 
-    record-investigation は、① の worker がすでに閉じた実行に ④ の出力だけを足す。
+    すでに閉じた実行（① の worker が閉じたもの）は、④ の出力だけを足して終わりの値を変えない。
     統括スクリプトが失敗の分岐の終わりに呼ぶ。④ の調査結果（実行のフォルダの
     investigation.json。検査を通ったもの）があれば investigation_json に入れる。② が失敗した
     ときに結果の JSON に出ていたモデルも記録する。同じ実行の中でやり直したときは同じ行を上書きする。
@@ -184,12 +184,13 @@ def _finish_stage(args: argparse.Namespace, files: RunFiles, log: RunLog) -> dic
         text = path.read_text(encoding="utf-8")
         if not isinstance(json.loads(text), dict):
             raise ValueError("investigation.json が JSON のオブジェクトでない")
-    if args.stage == "record-investigation":
-        if text is None:
-            raise ValueError("investigation.json がない")
-        with closing(open_db(files.db)) as conn:
-            record_investigation(conn, files.run_id, text)
-        return {"status": "recorded"}
+    with closing(open_db(files.db)) as conn:
+        row = conn.execute("SELECT status FROM runs WHERE run_id = ?", (files.run_id,)).fetchone()
+        if row is not None and row[0] != "running":
+            # ① の worker がすでに閉じた実行（取得の全失敗・① の例外）は、終わりの値を上書きしない
+            if text is not None:
+                record_investigation(conn, files.run_id, text)
+            return {"status": row[0]}
     if args.model is not None:
         _record_model(files, args.model, log)
     with closing(open_db(files.db)) as conn:
@@ -254,12 +255,6 @@ def _parser() -> argparse.ArgumentParser:
     finish.add_argument("--error-category", type=_category, help="コードが決めた分類の名前")
     finish.add_argument("--retry-count", type=_count)
     finish.add_argument("--model", help="② で使われたモデルの名前（`,` でつなぐ）")
-    record = stages.add_parser(
-        "record-investigation",
-        help="① の worker がすでに閉じた実行に、④ の出力（investigation.json）だけを記録する",
-    )
-    record.add_argument("cadence", choices=sorted(_TARGETS))
-    record.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
     return parser
 
 
@@ -281,7 +276,7 @@ def _prepare(
     files = RunFiles(data_dir(environ, Path.cwd()), args.run_id)
     if getattr(args, "model", None) is not None:
         split_models(args.model)  # 形が違えば起動の誤り（ログと DB に外部の文を入れない）
-    if args.stage in ("finish", "record-investigation") and (files.dry_run or files.observation):
+    if args.stage == "finish" and (files.dry_run or files.observation):
         raise _UsageError("finish は通常の本番の実行だけ（ドライランは DB に書かない）")
     if files.observation and (args.stage, args.cadence) != ("collect", "daily"):
         raise _UsageError("観測（obs-）の実行は日次の ① だけ")
