@@ -20,7 +20,7 @@ import os
 import re
 import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode, urljoin
@@ -38,9 +38,11 @@ MAX_REDIRECTS = 3
 # トークンに使える形。ヘッダに入れたときに要求を壊す文字（改行など）を止める。
 # 不正な値を http.client に渡すと、例外のメッセージに値がそのまま入るため、先に確かめる
 TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_.\-]+")
-# 応答の JSON の入れ子の深さの上限。GitHub の正しい応答はずっと浅い。
+# 応答の JSON の入れ子の深さの上限。一番外の配列・オブジェクトを 1 と数え、
+# 値（文字列や数）は数えない。# GitHub の正しい応答はずっと浅い。
 # json の RecursionError に頼ると、Python の版によっては深い入れ子も読めてしまうため、自分で数える
 MAX_JSON_DEPTH = 64
+_END = object()
 # API のパス。`/` で区切った空でない部分だけにし、ホストを差し替えられないようにする
 # （`.`・`..` の部分は別に止める）
 _PATH = re.compile(r"(?:/[A-Za-z0-9_.\-]+)+")
@@ -259,18 +261,17 @@ def load_json(body: bytes | str) -> Any:
     深さは再帰を使わずに数える。
     """
     data = json.loads(body)
-    stack = [(data, 1)]
+    # 子を1つずつ取り出すイテレータを積むので、追加のメモリは深さに比例する（幅によらない）
+    stack: list[Iterator[Any]] = [iter((data,))]
     while stack:
-        value, depth = stack.pop()
-        if isinstance(value, dict):
-            children = value.values()
-        elif isinstance(value, list):
-            children = value
-        else:
+        value = next(stack[-1], _END)
+        if value is _END:
+            stack.pop()
             continue
-        if depth > MAX_JSON_DEPTH:
-            raise ValueError("JSON の入れ子が深すぎる")
-        stack.extend((child, depth + 1) for child in children)
+        if isinstance(value, dict | list):
+            if len(stack) > MAX_JSON_DEPTH:
+                raise ValueError("JSON の入れ子が深すぎる")
+            stack.append(iter(value.values() if isinstance(value, dict) else value))
     return data
 
 

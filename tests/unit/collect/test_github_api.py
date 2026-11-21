@@ -442,5 +442,17 @@ def test_json_depth_limit_does_not_depend_on_python_recursion(limits):
 
 def test_json_at_the_depth_limit_is_read():
     ok = "[" * github_api.MAX_JSON_DEPTH + "]" * github_api.MAX_JSON_DEPTH
-    assert github_api.load_json(ok) is not None
+    assert github_api.load_json(ok) == json.loads(ok)
     assert github_api.load_json('{"a": {"b": [1, {"c": 2}]}}') == {"a": {"b": [1, {"c": 2}]}}
+
+
+def test_json_depth_counts_nesting_not_width():
+    wide = "[" + ",".join(["[1]"] * 10_000) + "]"
+    assert len(github_api.load_json(wide)) == 10_000
+    nested_in_dict = '{"a":' * github_api.MAX_JSON_DEPTH + "1" + "}" * github_api.MAX_JSON_DEPTH
+    assert github_api.load_json(nested_in_dict) == json.loads(nested_in_dict)
+    too_deep = (
+        '{"a":' * (github_api.MAX_JSON_DEPTH + 1) + "1" + "}" * (github_api.MAX_JSON_DEPTH + 1)
+    )
+    with pytest.raises(ValueError):
+        github_api.load_json(too_deep)
