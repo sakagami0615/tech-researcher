@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from urllib.parse import urlencode
 
-from tech_researcher.collect.http import FetchError, fetch
+from tech_researcher.collect.http import INVALID_RESPONSE, FetchError, classify, fetch
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.collect.rss import html_links
 from tech_researcher.config import Limits, Qiita
@@ -60,12 +60,12 @@ def collect_qiita(qiita: Qiita, period: Period, limits: Limits, *, fetch_url=fet
         try:
             response = fetch_url(url, page_limits)
         except FetchError as e:
-            return _failure(attempts + e.attempts, str(e))
+            return _failure(attempts + e.attempts, str(e), classify(e))
         attempts += response.attempts
         try:
             items = parse_items(response.body, fetched_at)
         except ValueError as e:
-            return _failure(attempts, str(e))
+            return _failure(attempts, str(e), INVALID_RESPONSE)
         for record in items:
             records.setdefault(record.url, record)
         if len(items) < PER_PAGE:
@@ -77,8 +77,8 @@ def collect_qiita(qiita: Qiita, period: Period, limits: Limits, *, fetch_url=fet
     return SourceResult(SOURCE_ID, tuple(records.values()), attempts)
 
 
-def _failure(attempts: int, message: str) -> SourceResult:
-    return SourceResult(SOURCE_ID, (), attempts, message)
+def _failure(attempts: int, message: str, category: str | None = None) -> SourceResult:
+    return SourceResult(SOURCE_ID, (), attempts, message, error_category=category)
 
 
 def parse_items(body: bytes, fetched_at: datetime) -> list[Record]:

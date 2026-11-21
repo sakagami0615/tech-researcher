@@ -45,6 +45,7 @@ FETCH_REASONS = {
     "redirect": "リダイレクトの異常",
     "invalid_response": "応答の形の異常",
     "graphql_error": "GraphQL のエラー",
+    "exit_code": "実行の失敗（終了コード）",
     "truncated": "取りこぼしたおそれ",
 }
 FETCH_FAILED_TEXT = "取得に失敗"

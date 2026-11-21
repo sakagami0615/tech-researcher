@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import feedparser
 
-from tech_researcher.collect.http import FetchError, fetch
+from tech_researcher.collect.http import INVALID_RESPONSE, FetchError, classify, fetch
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.config import Feed, Limits
 
@@ -36,12 +36,14 @@ def collect_feed(feed: Feed, limits: Limits, *, fetch_url=fetch) -> SourceResult
         try:
             response = fetch_url(_page_url(feed.url, page), limits)
         except FetchError as e:
-            return SourceResult(source_id, (), attempts + e.attempts, str(e))
+            return SourceResult(
+                source_id, (), attempts + e.attempts, str(e), error_category=classify(e)
+            )
         attempts += response.attempts
         try:
             page_records = parse_feed(response.body, feed, fetched_at)
         except ValueError as e:
-            return SourceResult(source_id, (), attempts, str(e))
+            return SourceResult(source_id, (), attempts, str(e), error_category=INVALID_RESPONSE)
         before = len(records)
         for record in page_records:
             records.setdefault(record.url, record)

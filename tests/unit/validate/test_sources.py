@@ -87,6 +87,6 @@ def test_duplicate_id_is_judged_after_other_checks():
         )
 
     a, b = make(("i1",), None), make(("i1", "i2"), "出来事")
-    kept, excluded, _ = _check_entries([a, b], data, ITEMS, QuoteLimits())
+    kept, excluded, *_ = _check_entries([a, b], data, ITEMS, QuoteLimits())
     assert kept == [b]
     assert [(c, x.entry) for c, x in excluded] == [("missing_period_event", a)]

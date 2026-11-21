@@ -25,7 +25,6 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from tech_researcher.agent.daily import (
-    CATEGORIES,
     DailyEntry,
     InputItem,
     build_daily_input,
@@ -38,7 +37,7 @@ from tech_researcher.db.reports import EntryRow, ReportRow, save_report
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
 from tech_researcher.render.common import Report
-from tech_researcher.render.daily import render_daily
+from tech_researcher.render.daily import display_key, render_daily
 from tech_researcher.stages.collect import (
     COLLECTED,
     load_collected,
@@ -86,7 +85,7 @@ def run_verify(
     validation.json（合否と除外の理由）と secret-scan.json（検出の有無と種類）を書く。
     合格して秘匿情報もなければ、作るはずの Issue を issue.md に書く。
     db は本番の接続で、渡されたら結果を reports・report_entries に保存する（ドライランは渡さない）。
-    保存できなければ例外にし、結果のファイルは書かない（secret-scan.json は先に書く場合がある）。
+    保存はどの分岐でも結果のファイルを書く前に行う。保存できなければ例外にし、ファイルは書かない。
     """
     log.write("verify", "start")
     items = _numbered(run_dir)
@@ -109,6 +108,7 @@ def run_verify(
             (),
             {"secret_detected": "failed"},
             ["secret_detected"],
+            ai_count=_output_count(output),
         )
         _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
         log.write(
@@ -131,9 +131,10 @@ def run_verify(
             ["invalid_output"],
             output=output,
             scanner=scanner,
+            ai_count=_output_count(output),
         )
         return _finish(run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[])
-    kept, excluded, verification = _check_entries(entries, data, items, config.quote)
+    kept, excluded, verification, outcomes = _check_entries(entries, data, items, config.quote)
     for category, x in excluded:
         log.write("verify", "excluded", error_category=category, detail=x.reason)
     # ID と理由には AI が返した文字列が入るので、マスクしてから残す（ログは RunLog がマスクする）
@@ -153,6 +154,7 @@ def run_verify(
             excluded,
             verification,
             ["all_excluded"],
+            outcomes=outcomes,
             output=output,
             scanner=scanner,
         )
@@ -197,6 +199,7 @@ def run_verify(
         excluded,
         verification,
         [],
+        outcomes=outcomes,
         output=output,
         scanner=scanner,
         body=report.body,
@@ -212,15 +215,20 @@ def _check_entries(
     data: dict,
     items: Mapping[str, Item],
     quote: QuoteLimits,
-) -> tuple[list[DailyEntry], list[tuple[str, Excluded]], dict[str, str]]:
+) -> tuple[
+    list[DailyEntry], list[tuple[str, Excluded]], dict[str, str], dict[int, tuple[str, str]]
+]:
     """項目単位の検査を順に行う。違反した項目は除外し、検査の分類と一緒に返す。
 
-    3つ目は検査ごとの合否（passed・failed。reports の verification）。
+    3つ目は検査ごとの合否（passed・failed。reports の verification）、4つ目は除外した項目の
+    （AI の出力の順の番号 → 検査の分類、理由）。
 
     ID の存在（D6(b)）を先に確かめる。後ろの検査は ID から値を引くので、存在する ID だけを渡す。
     ID の重複は最後に判定する。
     """
     excluded: list[tuple[str, Excluded]] = []
+    pending = list(enumerate(entries))  # （AI の出力の順の番号、項目）。通った項目だけ残る
+    outcomes: dict[int, tuple[str, str]] = {}
     verification = {"invalid_output": "passed"}  # スキーマ（D6(a)）は、ここに来る前に通っている
     for category, check in (
         ("invalid_id", lambda e: check_daily_ids(e, data)),
@@ -236,7 +244,22 @@ def _check_entries(
         entries, rejected = check(entries)
         excluded += [(category, x) for x in rejected]
         verification[category] = "failed" if rejected else "passed"
-    return entries, excluded, verification
+        # 検査は通った項目を元の順に、同じ項目として返す。順に突き合わせて番号を引き継ぐ
+        rest = iter(rejected)
+        survivors = []
+        for number, entry in pending:
+            if len(survivors) < len(entries) and entry is entries[len(survivors)]:
+                survivors.append((number, entry))
+            else:
+                outcomes[number] = (category, next(rest).reason)
+        pending = survivors
+    return entries, excluded, verification, outcomes
+
+
+def _output_count(output: object) -> int:
+    """AI の出力の項目の数。形が崩れていて数えられなければ 0。"""
+    items = output.get("items") if isinstance(output, dict) else None
+    return len(items) if isinstance(items, list) else 0
 
 
 def _strings(value: object) -> Iterator[str]:
@@ -281,21 +304,25 @@ def _save(
     body: str | None = None,
     kept: Sequence[DailyEntry] = (),
     keep_entries: bool = True,
+    outcomes: Mapping[int, tuple[str, str]] = {},
+    ai_count: int | None = None,
 ) -> None:
     """③ の結果を reports・report_entries に保存する。db がなければ（ドライラン）何もしない。
 
     項目は AI の出力の順に残す。掲載した項目には、本文の通し番号（display_no。カテゴリの固定順、
-    同じカテゴリでは rank 順）を付ける。AI が返した文は、マスクしてから保存する。
+    同じカテゴリでは rank 順。display_key）を付ける。AI が返した文は、マスクしてから保存する。
+    outcomes は除外した項目の（AI の出力の順の番号 → 検査の分類、理由）。
     秘匿情報を検出した実行は、AI の出力も本文も保存しない（output・body を渡さない）。
+    ai_count は AI の出力の項目の数（entries を渡さないとき、出力の項目の数を数えて渡す）。
     """
     if db is None:
         return
-    reasons = {id(x.entry): (category, x.reason) for category, x in excluded}
-    shown = sorted(kept, key=lambda e: (CATEGORIES.index(e.category), e.rank))
-    numbers = {id(e): n for n, e in enumerate(shown, start=1)}
+    published = [i for i in range(len(entries)) if i not in outcomes]
+    ranked = sorted(published, key=lambda i: display_key(entries[i]))
+    numbers = {i: n for n, i in enumerate(ranked, start=1)}
     rows = []
-    for entry in entries if keep_entries else ():
-        found = reasons.get(id(entry))
+    for index, entry in enumerate(entries if keep_entries else ()):
+        found = outcomes.get(index)
         rows.append(
             EntryRow(
                 section="daily_item",
@@ -303,13 +330,13 @@ def _save(
                 item_ids=tuple(entry.item_ids),
                 payload=_mask(_payload(entry, found), scanner),
                 exclusion_reasons=() if found is None else (found[0],),
-                display_no=numbers.get(id(entry)),
+                display_no=numbers.get(index),
             )
         )
     by_reason = Counter(category for category, _ in excluded)
     counts = {
         "collected": collected,
-        "ai_output": len(entries),
+        "ai_output": len(entries) if ai_count is None else ai_count,
         "excluded": len(excluded),
         "excluded_by_reason": dict(by_reason),
         "published": len(kept),  # 掲載した件数（公開しない不合格は kept を渡さず 0）

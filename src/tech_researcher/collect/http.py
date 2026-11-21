@@ -32,6 +32,23 @@ MAX_BODY_BYTES = 20_000_000
 ERROR_BODY_BYTES = 4096
 
 
+# 取得の失敗の理由の分類（error_category・source_fetches。classify が付ける）
+AUTH = "auth"  # 401。トークンがない・無効
+RATE_LIMITED = "rate_limited"  # 429、または 403 でレート制限の印がある
+FORBIDDEN = "forbidden"  # レート制限以外の 403
+NOT_FOUND = "not_found"
+HTTP_4XX = "http_4xx"
+HTTP_5XX = "http_5xx"
+TIMEOUT = "timeout"
+DNS = "dns"
+NETWORK = "network"
+BUDGET = "budget"  # この実行の利用量の上限に達した
+REDIRECT = "redirect"  # API の外へのリダイレクト、またはリダイレクトが多すぎる
+INVALID_RESPONSE = "invalid_response"  # 応答が読めない・契約に合わない
+EXIT_CODE = "exit_code"  # 子プロセス（last30days-skill）の終了コードの異常
+GRAPHQL = "graphql_error"  # GraphQL の応答の errors（問い合わせ全体の誤り）
+
+
 class FetchError(Exception):
     """再試行を使い切ったか、再試行しない失敗。attempts は初回を含めた要求の回数。
 
@@ -254,3 +271,44 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
 
     def https_open(self, req):
         return self.do_open(self._conn, req, context=self._context)
+
+
+def classify(error: FetchError) -> str:
+    """http.fetch の失敗を error_category の語にする。"""
+    status = error.status
+    if status is None:
+        return _network_category(error)
+    headers = {k.lower(): v for k, v in error.headers.items()}
+    if status == 401:
+        return AUTH
+    if status == 429 or (
+        status == 403
+        and (
+            headers.get("x-ratelimit-remaining") == "0"
+            or "retry-after" in headers
+            or b"rate limit" in error.body.lower()
+        )
+    ):
+        # 一次のレート制限は残り0、二次のレート制限は Retry-After か本文の文言で示される
+        return RATE_LIMITED
+    if status == 403:
+        return FORBIDDEN
+    if status == 404:
+        return NOT_FOUND
+    if status >= 500:
+        return HTTP_5XX
+    return HTTP_4XX
+
+
+def _network_category(error: BaseException) -> str:
+    """原因の例外をたどり、タイムアウト・名前解決・それ以外の通信の失敗に分ける。"""
+    seen: BaseException | None = error
+    while seen is not None:
+        reason = getattr(seen, "reason", None)
+        for cause in (seen, reason):
+            if isinstance(cause, TimeoutError):
+                return TIMEOUT
+            if isinstance(cause, socket.gaierror):
+                return DNS
+        seen = seen.__cause__
+    return NETWORK

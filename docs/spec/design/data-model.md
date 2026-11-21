@@ -232,7 +232,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `attempts` | INTEGER | 試行回数 |
 | `record_count`・`in_period_count` | INTEGER | 取得件数・期間内に残った件数 |
 | `fetched_at` | TEXT | 取得を終えた時刻 |
-| `failed_parts_json` | TEXT | 一部だけ取れなかった部分の `[[名前, 理由の分類], …]`（GitHub Releases の追跡先。2.8）。なければ NULL（版7で追加） |
+| `failed_parts_json` | TEXT | 一部だけ取れなかった部分の `[[名前, 理由の分類], …]`（GitHub Releases の追跡先。2.8）。なければ NULL（版6で追加） |
 
 - PK（`run_id`, `source_id`）。同じ実行の中の再試行は同じ行を更新する
 - 実装での対応（`src/tech_researcher/stages/collect_store.py`）
@@ -329,7 +329,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - 除外した項目もここに残す（US-E7-01「ログと履歴に記録」。Issue には書かない）
 - 除外の理由・不合格の検査の名前は、検査の分類（D1・D6b など）ではなく、③ のログの `error_category` と同じ名前にそろえる。ログと履歴を同じ語で検索でき、検査の実装が分類名を1か所に持てるため（D1 は `invalid_source`、D6(a) は `invalid_output`、D6(b) の ID の存在は `invalid_id`・重複は `duplicate_id`、D2・D3・D4 は各検査の分類名）。DB は名前の形（小文字の英数字と `_`）だけを確かめ、一覧は持たない。検査が増えても版を上げないため
 - 項目と items の対応は JSON の列で持つ。使う問い合わせが少ない（3.5）ので、結合用のテーブルは作らない
-- 実装での対応（`src/tech_researcher/stages/daily.py`）：本番の ③ が、合格・不合格・秘匿情報の検出のいずれも保存する。`counts_json` は `collected`・`ai_output`・`excluded`・`excluded_by_reason`・`published`。`verification_json` は検査の名前（`invalid_output`・`invalid_id`・`invalid_source`・…・`secret_detected`）→ `passed`・`failed`（実行しなかった検査は入れない）。項目は AI の出力の順に残し、除外した項目の `payload_json` には文章の部品と除外の詳細（`exclusion_detail`）を入れる。秘匿情報を検出したときは、AI の出力・本文・項目を残さない。ドライランは書かない
+- 実装での対応（`src/tech_researcher/stages/daily.py`）：本番の ③ が、合格・不合格・秘匿情報の検出のいずれも保存する。`counts_json` は `collected`・`ai_output`・`excluded`・`excluded_by_reason`・`published`。`verification_json` は検査の名前（`invalid_output`・`invalid_id`・`invalid_source`・…・`secret_detected`）→ `passed`・`failed`（実行しなかった検査は入れない）。項目は AI の出力の順に残し、除外した項目の `payload_json` には文章の部品と除外の詳細（`exclusion_detail`）を入れる。秘匿情報を検出したときは、AI の出力・本文・項目を残さない（`counts_json` の `ai_output` には出力の項目の数を入れる。読めない出力は 0）。ドライランは書かない
 - 実装での対応（`src/tech_researcher/db/reports.py`）
   - `reports.run_id` と `report_entries.run_id` は runs・reports への外部キー。`save_report` が1つのトランザクションで、同じ実行のレポートを置き換え（再試行）、項目を消して入れ直す。`entry_no` は AI の出力の順（1から）
   - `display_no`（実行の中で一意）は、掲載した日次の項目にだけ付ける。`theme_id` は `T0007` の形で、掲載したテーマにだけ付け、必須（新しいテーマの番号はコードが振る。3.6）。除外したテーマで AI が返した値は形が不正でありうるので列に入れず、`payload_json` に（例：`ai_theme_id`）残す
@@ -434,7 +434,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - 月曜の日次・週次の重なりの制御。WAL と `busy_timeout` で足りるか、⑤ の Projects 登録を両方が同時に行わないよう実行の単位のロックが要るか（同じ Issue を Projects に2回追加したときの GitHub の応答は未確認）
 - 一部だけ取れなかった情報源（GitHub Releases の追跡先。2.8）の、取れなかった部分を source_fetches にどう記録するか
   - 決めたこと：列を足す（`failed_parts_json`。行は情報源につき1つのまま、PK を変えない）。情報源の `status` は、部分の失敗では `ok`（0件なら `no_results`）のままにし、すべてが取れなかったときだけ `failed`（`error_category` は理由が1つに決まるときだけ。なければ `fetch_failed`）。レポート末尾の「取得できなかった情報源」は、① が取得結果（`status` が `failed` の行と `failed_parts_json` を持つ行。`ok` の行の `error_category`（github_repos の測り残しの印）は見ない）から `unavailable.json` に書き、③ が本文にする。内訳のある情報源は部分ごとの行だけを出す
-  - 理由の分類の日本語の表記（`render/common.py` の `FETCH_REASONS`）：`timeout` タイムアウト・`auth` 認証エラー・`rate_limited` レート制限・`forbidden` アクセス拒否（HTTP 403）・`not_found` 見つからない（HTTP 404）・`http_4xx`・`http_5xx` は「HTTP 4xx」「HTTP 5xx」・`dns` 名前解決の失敗・`network` 接続の失敗・`budget` 利用量の上限・`redirect` リダイレクトの異常・`invalid_response` 応答の形の異常・`graphql_error` GraphQL のエラー・`truncated` 取りこぼしたおそれ。一覧にない分類（例外の型の名前など）は、名前を本文に出さず「取得に失敗」にする
+  - 理由の分類の日本語の表記（`render/common.py` の `FETCH_REASONS`）：`timeout` タイムアウト・`auth` 認証エラー・`rate_limited` レート制限・`forbidden` アクセス拒否（HTTP 403）・`not_found` 見つからない（HTTP 404）・`http_4xx`・`http_5xx` は「HTTP 4xx」「HTTP 5xx」・`dns` 名前解決の失敗・`network` 接続の失敗・`budget` 利用量の上限・`redirect` リダイレクトの異常・`invalid_response` 応答の形の異常・`graphql_error` GraphQL のエラー・`exit_code` 実行の失敗（終了コード。last30days-skill）・`truncated` 取りこぼしたおそれ。分類は共通の `collect/http.py` の `classify` が HTTP の失敗に付け（RSS・Qiita・GitHub）、応答が読めない失敗には `invalid_response`、last30days-skill のタイムアウト・終了コード・出力の契約違反には `timeout`・`exit_code`・`invalid_response` を付ける。一覧にない分類（例外の型の名前など）は、名前を本文に出さず「取得に失敗」にする
   - 残りの未決：情報源ごとの時間の上限（structure.md 6.4）を `collect_releases` と `fetch_readmes` の `deadline` に渡すこと（README の時間をどちらの上限に数えるか。Releases はリポジトリの間とページの間、README はリポジトリの間で確かめ、過ぎた後は `timeout` にする。要求の途中では止めないので、超過は最大で要求1回分（再試行を含む）。`failed_parts` の内訳を実行エラー Issue の表（report-templates.md）にどう出すかと、`truncated`・`forbidden`・`redirect`・`invalid_response`・`budget` の日本語の表記の対応も、配線の Issue で決める）
 - star_snapshots のキーを `owner/repo` にするか GraphQL のノード ID にするか（初期案は `owner/repo`）
   - 実装での対応：`owner/repo`（GitHub が返す `nameWithOwner` の小文字）。3.5 の「名前の変更をまたいで同じものとはみなさない」に合わせ、増分も名前で比べる

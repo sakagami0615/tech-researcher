@@ -257,3 +257,31 @@ def test_gives_up_after_busy_timeout(tmp_path):
     assert time.monotonic() - started >= 0.2
     holder.execute("COMMIT")
     holder.close()
+
+
+def test_upgrades_version_5_db_with_failed_parts_column(tmp_path, monkeypatch):
+    """版5の DB の source_fetches の行は、版6で足す failed_parts_json が NULL のまま残る。"""
+    path = tmp_path / "x.sqlite3"
+    run_id = "20261024-060000-abcd"
+    with monkeypatch.context() as m:
+        m.setattr(schema, "MIGRATIONS", schema.MIGRATIONS[:5])
+        m.setattr(schema, "SCHEMA_VERSION", 5)
+        conn = open_db(path)
+        start_run(
+            conn, run_id, daily_target(date(2026, 10, 24), 1), datetime(2026, 10, 23, tzinfo=UTC)
+        )
+        conn.execute(
+            "INSERT INTO source_fetches VALUES (?, 'rss:a', 'ok', NULL, 1, 2, 1,"
+            " '2026-10-23T21:00:00Z')",
+            (run_id,),
+        )
+        conn.close()
+    conn = open_db(path)
+    assert pragma(conn, "user_version") == SCHEMA_VERSION == 6
+    assert conn.execute("SELECT status, failed_parts_json FROM source_fetches").fetchall() == [
+        ("ok", None)
+    ]
+    conn.execute('UPDATE source_fetches SET failed_parts_json = \'[["a/b", "timeout"]]\'')
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE source_fetches SET failed_parts_json = '{}'")
+    conn.close()

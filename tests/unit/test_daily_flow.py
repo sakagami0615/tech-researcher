@@ -682,7 +682,7 @@ def test_observation_with_all_sources_failed_is_recorded_as_failed(host):
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         assert conn.execute(
             "SELECT source_id, status, error_category, attempts FROM source_fetches"
-        ).fetchall() == [("rss:example", "failed", "fetch_failed", 3)]
+        ).fetchall() == [("rss:example", "failed", "http_5xx", 3)]
 
 
 def test_observation_failure_in_collect_closes_run_as_failed(host, monkeypatch):
@@ -996,6 +996,18 @@ def test_secret_in_ai_output_saves_neither_output_nor_body(host):
         None,
     )
     assert entries == [] and TOKEN not in str(row)
+    assert json.loads(row[3])["ai_output"] == 2  # 保存しなくても、出力の項目の数は残す
+
+
+def test_excluded_entries_keep_their_own_position_even_when_equal(host):
+    """同じ内容の項目が並んでも、除外の理由は AI の出力の順の番号で結び付ける。"""
+    host.ai = lambda data: {"items": [entry("i1", 1), entry("i1", 1)]}
+    host.run()
+    _, entries, _ = saved_report(host)
+    assert [(e[0], e[1], json.loads(e[2]), e[3]) for e in entries] == [
+        (1, "published", [], 1),
+        (2, "excluded", ["duplicate_id"], None),
+    ]
 
 
 def test_secret_found_only_in_the_body_is_not_saved_either(host, monkeypatch):

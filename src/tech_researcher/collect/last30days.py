@@ -37,6 +37,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 
+from tech_researcher.collect.http import EXIT_CODE, INVALID_RESPONSE, TIMEOUT
 from tech_researcher.collect.records import Attention, Event, Record, SourceResult
 from tech_researcher.config import Config, Limits, Subquery
 from tech_researcher.periods import Period, last30days_window
@@ -65,9 +66,10 @@ class ContractError(ValueError):
 
 
 class _CliError(Exception):
-    def __init__(self, message: str, attempts: int):
+    def __init__(self, message: str, attempts: int, category: str | None = None):
         super().__init__(message)
         self.attempts = attempts
+        self.category = category
 
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -128,10 +130,16 @@ def _collect(
             )
             data = parse_agent_json(stdout)
         except _CliError as e:
-            return {sid: SourceResult(sid, (), e.attempts, str(e)) for sid in source_ids}
+            return {
+                sid: SourceResult(sid, (), e.attempts, str(e), error_category=e.category)
+                for sid in source_ids
+            }
         except ContractError as e:
             error = f"契約に合わない出力：{e}"
-            return {sid: SourceResult(sid, (), attempts, error) for sid in source_ids}
+            return {
+                sid: SourceResult(sid, (), attempts, error, error_category=INVALID_RESPONSE)
+                for sid in source_ids
+            }
     fetched_at = now()
     results = {}
     for sid, name in zip(source_ids, names, strict=True):
@@ -221,16 +229,17 @@ def _run(
             )
         except subprocess.TimeoutExpired:
             # 外側から止めると stdout は空になるので、部分結果は使えない（D-01）
-            error = f"{limits.last30days_timeout_s} 秒の上限を超えた"
+            error, category = f"{limits.last30days_timeout_s} 秒の上限を超えた", TIMEOUT
         else:
             if done.returncode in (0, EXIT_PARTIAL):
                 return done.stdout, done.stderr, attempt
             error = f"終了コード {done.returncode}：{_tail(done.stderr)}"
+            category = EXIT_CODE
             if done.returncode == EXIT_USAGE:
-                raise _CliError(error, attempt)
+                raise _CliError(error, attempt, category)
         if attempt < attempts:
             log.warning("last30days-skill を再試行する（%d 回目の失敗）：%s", attempt, error)
-    raise _CliError(error, attempts)
+    raise _CliError(error, attempts, category)
 
 
 def parse_agent_json(stdout: str) -> dict:

@@ -255,3 +255,13 @@ def test_one_github_client_is_shared_so_the_rest_limit_counts_everything(tmp_pat
     )
     run_collect(cfg, TARGET, tmp_path, prod_log(tmp_path), collectors=collected)
     assert len(made) == 1 and used == made
+
+
+def test_classified_failures_of_other_sources_are_shown_with_their_reason(tmp_path):
+    cfg = replace(CONFIG, feeds=(feed("a"),))
+    broken = replace(
+        all_collectors([]),
+        feed=lambda f, limits: SourceResult("rss:a", (), 3, "x", error_category="http_5xx"),
+    )
+    run_collect(cfg, TARGET, tmp_path, prod_log(tmp_path), collectors=broken)
+    assert unavailable_notes(tmp_path, cfg) == [("a", "HTTP 5xx")]
