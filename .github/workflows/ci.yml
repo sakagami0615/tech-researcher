@@ -11,11 +11,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # ランナーのシステムの Python（ubuntu-latest に入った 3.14.4 など）を使わず、uv の管理する
-    # Python を使う。ビルドでスタックの大きさが違い、深い入れ子の JSON の扱い（RecursionError）が
-    # 変わるため（2026-11-21 に test_github_api で確認）
-    env:
-      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0

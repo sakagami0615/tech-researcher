@@ -624,6 +624,8 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...]]:
             job.log.write("analyze", "failure", error_category="launch_failed", exc=e)
             return "launch_failed", ()
         except Exception as e:
+            # AI を呼んだ後の想定外の失敗。値の分からない記録でも、1回の呼び出しとして残す
+            _log_usage(job, data, body, started, (), None)
             job.log.write("analyze", "failure", error_category="agent_failed", exc=e)
             return "agent_failed", ()
         _log_usage(job, data, body, started, result.models, result.usage)

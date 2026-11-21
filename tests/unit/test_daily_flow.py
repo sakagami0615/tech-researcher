@@ -470,6 +470,13 @@ def test_ai_failure_stops_before_verify(host):
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "agent_failed")
     assert [c["args"][0] for c in host.calls("compose")] == ["collect"]
     assert not (Path(summary["output_dir"]) / "agent-output.json").exists()
+    # 想定外の失敗でも、1回の呼び出しの記録（値は unknown）を残す
+    log = [
+        json.loads(x) for x in (Path(summary["output_dir"]) / "log.jsonl").read_text().splitlines()
+    ]
+    [usage] = [r for r in log if r["event"] == "usage"]
+    assert usage["detail"].startswith("model=unknown input_bytes=")
+    assert "num_turns=unknown" in usage["detail"]
 
 
 @pytest.mark.parametrize("feed", [FEED, EMPTY_FEED])

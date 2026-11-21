@@ -4,6 +4,13 @@
 同じものを検査に使う。スキーマに書くのは型・必須・enum・null の可否・追加のプロパティの禁止だけ。
 文字数・要素数・ID の存在は、スキーマに入れずコードで確かめる（入れると全体が不合格になり、
 仕様より厳しくなる）。
+
+スキーマには `$schema` を書かない。Claude Code（2.1.311）の `--json-schema` が draft 2020-12 の
+`$schema` を受け付けず、起動の時点で止まるため。② の側（Claude Code）がどの規格でスキーマを
+解釈するかは明示されていないので、② と ③ で意味が同じと確かめたキーワード（型・必須・enum・
+anyOf・追加のプロパティの禁止など）だけを使う。③ はここで draft 2020-12 の検査器を名指しで使う。
+使えるキーワードは tests/unit/validate/test_schema.py の ALLOWED_KEYWORDS で守る（data-model.md
+4.5）。
 """
 
 import json
