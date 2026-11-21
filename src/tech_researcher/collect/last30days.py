@@ -53,6 +53,9 @@ SOURCE_NAMES = {"hackernews": "hackernews", "github_search": "github"}
 # 注目度の metric の接頭辞（data-model.md 2.4）
 METRIC_PREFIXES = {"hackernews": "hn", "github": "github"}
 OK_STATES = frozenset({"ok", "no-results"})
+# 取り決めにある情報源の状態（decisions.md の last30days-skill の節）。ここにない値は、出力の
+# 契約に合わないものとして invalid_response にする。失敗の状態に理由は付かないので、分類はしない
+KNOWN_STATES = OK_STATES | {"skipped-unconfigured", "timeout", "rate-limited", "error"}
 EXIT_PARTIAL = 3  # LAST30DAYS_STRICT_EXIT=1 で、一部の情報源が失敗した
 EXIT_USAGE = 2  # 引数・設定の誤り。再試行しても直らない
 STDERR_TAIL_CHARS = 2000  # 失敗の原因の分類に使う stderr の末尾（D-01）
@@ -146,7 +149,16 @@ def _collect(
         state = data["source_status"].get(name)
         if state not in OK_STATES:
             reason = f"状態が {state}" if state is not None else "状態が出力にない"
-            results[sid] = SourceResult(sid, (), attempts, f"{name} の{reason}：{_tail(stderr)}")
+            # 取り決めにない状態（ない・知らない値）は出力の契約違反。取り決めにある失敗の状態には
+            # 理由が付かない（分類なし）
+            known = isinstance(state, str) and state in KNOWN_STATES
+            results[sid] = SourceResult(
+                sid,
+                (),
+                attempts,
+                f"{name} の{reason}：{_tail(stderr)}",
+                error_category=None if known else INVALID_RESPONSE,
+            )
             continue
         records = tuple(_record(sid, r, fetched_at) for r in data["results"] if r["source"] == name)
         if not records:

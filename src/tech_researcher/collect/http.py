@@ -55,6 +55,8 @@ class FetchError(Exception):
     headers・body は HTTP の誤りの応答のヘッダ（キーは小文字）と本文の先頭（レート制限の
     判定などに使う）。
     本文は再試行しない誤りのときだけ持つ。それ以外は空。
+    category は、応答の大きさの超過・gzip を展開できないなど、応答が読めない失敗の分類
+    （invalid_response）。
     """
 
     def __init__(
@@ -64,8 +66,10 @@ class FetchError(Exception):
         status: int | None = None,
         headers: Mapping[str, str] | None = None,
         body: bytes = b"",
+        category: str | None = None,
     ):
         super().__init__(message)
+        self.category = category  # 状態コードから決められない失敗の分類（classify が先に返す）
         self.attempts = attempts
         self.status = status
         self.headers = headers or {}
@@ -145,7 +149,9 @@ def _get(open_url, request, attempt: int) -> Response:
         with open_url(request) as res:
             body = res.read(MAX_BODY_BYTES + 1)
             if len(body) > MAX_BODY_BYTES:
-                raise FetchError(f"応答が {MAX_BODY_BYTES} バイトを超えた", attempt)
+                raise FetchError(
+                    f"応答が {MAX_BODY_BYTES} バイトを超えた", attempt, category=INVALID_RESPONSE
+                )
             encoding = (res.headers.get("Content-Encoding") or "").strip().lower()
             if encoding in ("gzip", "x-gzip"):
                 body = _gunzip(body, attempt)
@@ -193,11 +199,17 @@ def _gunzip(data: bytes, attempt: int) -> bytes:
             # max_length は 1 以上（0 だと上限なし）。上限を 1 バイト超えるまでで止める
             out += d.decompress(data, MAX_BODY_BYTES + 1 - len(out))
         except zlib.error as e:
-            raise FetchError(f"gzip を展開できない：{e}", attempt) from e
+            raise FetchError(f"gzip を展開できない：{e}", attempt, category=INVALID_RESPONSE) from e
         if len(out) > MAX_BODY_BYTES:
-            raise FetchError(f"展開した応答が {MAX_BODY_BYTES} バイトを超えた", attempt)
+            raise FetchError(
+                f"展開した応答が {MAX_BODY_BYTES} バイトを超えた",
+                attempt,
+                category=INVALID_RESPONSE,
+            )
         if not d.eof:
-            raise FetchError("gzip を展開できない：途中で終わっている", attempt)
+            raise FetchError(
+                "gzip を展開できない：途中で終わっている", attempt, category=INVALID_RESPONSE
+            )
         data = d.unused_data.lstrip(b"\0")  # 末尾のゼロ埋めは無視する（gzip モジュールと同じ）
     return bytes(out)
 
@@ -275,9 +287,13 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
 
 def classify(error: FetchError) -> str:
     """http.fetch の失敗を error_category の語にする。"""
+    if error.category is not None:
+        return error.category
     status = error.status
     if status is None:
         return _network_category(error)
+    if 300 <= status < 400:  # たどらないリダイレクト
+        return REDIRECT
     headers = {k.lower(): v for k, v in error.headers.items()}
     if status == 401:
         return AUTH
