@@ -877,6 +877,8 @@ def _post_summary(stdout: str) -> dict | None:
         ):
             return None
         url = f"https://github.com/{repo}/issues/{number}"
+    if data["result"] in (post.CREATED, post.EXISTING) and url is None:
+        return None  # 作った・あった Issue の番号がない
     category = data.get("error_category")
     if category is not None and not (isinstance(category, str) and CATEGORY.fullmatch(category)):
         return None

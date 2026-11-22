@@ -189,7 +189,7 @@ class Poster:
         except (OSError, UnicodeDecodeError, BadIssue) as e:
             self.log.write("post", "failure", error_category="bad_issue", exc=e)
             return self._stop(kind, "bad_issue")
-        if stopped is not None:
+        if stopped is not None and kind == RUN_ERROR_SECRET:
             self._record_blocked(stopped)
         found = self._secret_kinds(report)
         if found is None:
