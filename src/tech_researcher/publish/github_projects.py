@@ -85,7 +85,7 @@ def projects_config(environ: Mapping[str, str] = os.environ) -> ProjectsConfig:
         raise ProjectsError(f"{'・'.join(missing)} が設定されていない", CONFIG)
     if not TOKEN_FORMAT.fullmatch(values[TOKEN_ENV]):
         raise ProjectsError(f"{TOKEN_ENV} に使えない文字が含まれる", CONFIG)
-    if not _OWNER.fullmatch(values[OWNER_ENV]):
+    if len(values[OWNER_ENV]) > 39 or not _OWNER.fullmatch(values[OWNER_ENV]):
         raise ProjectsError(f"{OWNER_ENV} がユーザー名の形でない", CONFIG)
     if not _NUMBER.fullmatch(values[NUMBER_ENV]) or int(values[NUMBER_ENV]) <= 0:
         raise ProjectsError(f"{NUMBER_ENV} が正の整数でない", CONFIG)
@@ -106,6 +106,8 @@ class ProjectsRegistrar:
         fetch_url: Callable[..., Response] = fetch,
         clock: Callable[[], float] = time.monotonic,
     ):
+        if not TOKEN_FORMAT.fullmatch(config.token):
+            raise ProjectsError("トークンに使えない文字が含まれる", CONFIG)
         self._headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": API_VERSION,
@@ -165,5 +167,6 @@ def _check(response: Response) -> None:
         response.status not in (200, 201)
         or not isinstance(data, dict)
         or type(data.get("id")) is not int
+        or data["id"] <= 0
     ):
         raise ProjectsError("応答の形が違う", INVALID_RESPONSE, response.status)

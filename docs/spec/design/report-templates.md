@@ -747,4 +747,5 @@ AI による調査結果を掲載できませんでした。
 - 根拠の抜粋（3.2）で、バッククォートを含むログ行がコードフェンスを閉じないか（Markdown API では、4つのバッククォートのフェンスは中の3つで閉じなかった。2026-10-25）
 - fine-grained トークン（Issues の読み書きだけ）で作った Issue に、作成の要求のラベルが付くこと（権限が足りないと GitHub はラベルを黙って外し、ラベルの探索による重複判定が効かない。コードは応答のラベルを確かめて警告を残す）
 - Projects への登録（REST の `POST /users/{owner}/projectsV2/{number}/items`）が、project スコープだけの classic トークンで公開リポジトリの Issue に対して成功するか。同じ Issue を再び追加したときの応答（項目は増えないか）。404 が「Issue がない」のか「Projects の指定・権限の誤り」なのかを応答から見分けられるか（見分けられないと 4.4 の issue_missing が設定の誤りでも付く）
+- Projects への登録の応答が、追加した Issue と一致するか（`content_type` が `Issue`、`content.number` が Issue の番号）。コードでは確かめていない
 - 4.3 の手順で、DB に記録がある Issue を削除したとき（410。GitHub の文書による）に作れるか、転送した Issue が 301 を返すか、Issue 作成後に Projects 登録だけ失敗したとき登録だけが行われるか

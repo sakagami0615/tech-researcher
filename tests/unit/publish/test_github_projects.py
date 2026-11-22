@@ -95,6 +95,7 @@ def test_config_needs_every_variable(name):
         (OWNER_ENV, "a/b"),
         (OWNER_ENV, "-x"),
         (OWNER_ENV, "../x"),
+        (OWNER_ENV, "a-" * 19 + "aa"),  # 40 文字
         (NUMBER_ENV, "0"),
         (NUMBER_ENV, "-1"),
         (NUMBER_ENV, "3a"),
@@ -139,6 +140,7 @@ def test_existing_item_response_is_accepted(limits):
         item(status=204, body={"id": 1}),
         item(body={"no": "id"}),
         item(body={"id": True}),
+        item(body={"id": 0}),
         item(body=[1]),
         Response("u", 201, b"not json", 1),
     ],
@@ -304,3 +306,8 @@ def test_retries_stop_at_the_budget(limits):
 def test_owner_shape_matches_github_usernames(owner):
     with pytest.raises(ProjectsError):
         projects_config({**ENV, OWNER_ENV: owner})
+
+
+def test_registrar_rejects_unusable_token(limits):
+    with pytest.raises(ProjectsError):
+        ProjectsRegistrar(ProjectsConfig("bad token\n", CONFIG.target), limits, WriteBudget(1))
