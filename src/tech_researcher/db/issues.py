@@ -198,7 +198,14 @@ def mark_projects_done(conn: sqlite3.Connection, issue_id: int, run_id: str) -> 
 
 def mark_projects_abandoned(conn: sqlite3.Connection, issue_id: int, run_id: str) -> None:
     """転送された Issue を何度試しても登録できない。pending から外し、運用者に任せる。"""
-    _finish_projects(conn, issue_id, run_id, "abandoned")
+    check_writable_run_id(run_id)
+    cursor = conn.execute(  # 失敗の記録で数えた試行回数は増やさない
+        "UPDATE issues SET projects_state = 'abandoned', projects_last_run_id = ?"
+        " WHERE id = ? AND state = 'created' AND projects_state = 'pending'",
+        (run_id, issue_id),
+    )
+    if cursor.rowcount != 1:
+        raise LookupError(f"登録待ちの Issue の記録がない: {issue_id}")
 
 
 def move_issue(conn: sqlite3.Connection, issue_id: int, repo: str, number: int) -> None:

@@ -35,6 +35,7 @@ from tech_researcher.publish.github_issues import (
     IssueReader,
     IssueReadError,
     IssueRef,
+    issue_repo,
     issue_token,
 )
 from tech_researcher.publish.github_projects import (
@@ -183,6 +184,10 @@ class ProjectsSync:
         if gone is True:
             return self._finish(row, outcome, missing=True)
         if gone is False:
+            # 設定の誤りと言えるのは、設定の投稿先にある Issue のときだけ。転送先・別の投稿先の
+            # Issue は、この1件の問題として扱い、止めずに試行の上限で諦める
+            if moved or ref.repo.lower() != self._configured_repo():
+                return self._give_up_transfer(row, outcome)
             return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
         if isinstance(gone, IssueRef):  # 転送されている。記録を転送先に更新して、登録し直す
             if not moved:
@@ -197,6 +202,12 @@ class ProjectsSync:
         self._fail(row, UNCHECKED, outcome)
         # Issue 用トークンの認証・権限・レート制限の失敗は、残りの確かめも同じ理由で失敗する
         return gone if gone in _STOP else UNCHECKED
+
+    def _configured_repo(self) -> str:
+        try:
+            return issue_repo(self.environ)
+        except IssueReadError, ValueError:
+            return ""
 
     def _give_up_transfer(self, row: IssueRow, outcome: ProjectsOutcome) -> str:
         """転送先に更新できない・転送先でも登録できない。この1件だけ pending のまま続け、上限を

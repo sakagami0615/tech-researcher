@@ -499,7 +499,7 @@ def test_a_transfer_that_cannot_be_registered_is_abandoned_after_three_attempts(
         outcome = h.run()
         assert moved_row(h, OLD)[2] == expected
 
-    assert moved_row(h, OLD)[3] == 4  # 失敗の記録3回と、外すときの1回
+    assert moved_row(h, OLD)[3] == 3  # 外すときは試行回数を増やさない
     assert outcome.as_dict()["abandoned"] == 1
     assert h.run() is None  # 外れた行は、もう試さない
 
@@ -523,3 +523,41 @@ class TransferredReader:
     def get_issue(self, repo, number):
         moved = self.fixed or number + 1000
         return IssueLookup(IssueRef("tester/moved", moved), transferred=True)
+
+
+class MovedIssueReader:
+    """元の投稿先では転送されたと答え、転送先では Issue があると答える。"""
+
+    def get_issue(self, repo, number):
+        if repo == REPO:
+            return IssueLookup(IssueRef("tester/moved", number + 1000), transferred=True)
+        return IssueLookup(IssueRef(repo, number))
+
+
+def test_404_at_the_destination_with_an_existing_issue_does_not_stop_the_rest(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.failures[5] = http_error(404, category="not_found")
+    h.failures[1005] = http_error(404, category="not_found")
+    h.make_reader = lambda token, limits, **kw: MovedIssueReader()
+
+    outcome = h.run()
+
+    assert moved_row(h, OLD) == ("tester/moved", 1005, "pending", 1)
+    assert h.state(9)[1] == "done"  # 後ろの行は試される
+    assert outcome.as_dict()["not_attempted"] == 0
+    assert h.log_lines()[-1]["event"] == "end"
+
+
+def test_404_for_an_issue_of_another_repository_does_not_stop_the_rest(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.conn.execute("UPDATE issues SET repo = 'tester/elsewhere' WHERE number = 5")
+    h.failures[5] = http_error(404, category="not_found")
+    h.existing = {5, 9}
+
+    outcome = h.run()
+
+    assert moved_row(h, OLD)[2:] == ("pending", 1)
+    assert h.state(9)[1] == "done"
+    assert outcome.as_dict()["not_attempted"] == 0

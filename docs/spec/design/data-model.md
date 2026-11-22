@@ -349,7 +349,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `state` | TEXT | `created`・`blocked_secret`（検査で公開を止めた）・`failed`（GitHub に登録できなかった）・`uncertain`（作成の応答が読めず、Issue が作られたか分からない。運用者が確かめる。report-templates.md 4.3） |
 | `repo`・`number` | TEXT・INTEGER | 作った Issue（`created` のときだけ）。転送（HTTP 301）されていたら転送先で更新する（report-templates.md 4.3） |
 | `created_at` | TEXT | |
-| `projects_state` | TEXT | `pending`・`done`・`issue_missing`（登録しようとした Issue が見つからない。report-templates.md 4.4）。`created` 以外は空 |
+| `projects_state` | TEXT | `pending`・`done`・`issue_missing`（登録しようとした Issue が見つからない。report-templates.md 4.4）・`abandoned`（転送先でも登録できず、試行の上限（3回）で `pending` から外した。運用者が確かめる）。`created` 以外は空 |
 | `projects_attempts`・`projects_last_error`・`projects_last_run_id` | INTEGER・TEXT・TEXT | 登録の失敗の記録（US-E4-03「ログと履歴に記録」、US-E5-02「登録の失敗が別に記録」） |
 
 - UQ（`run_id`, `kind`）：1回の実行で同じ種別の Issue を2件作らない（US-E7-02「1回の実行で不合格 Issue は1件」）。秘匿情報でレポートを止めて定型の実行エラー Issue を作ると、同じ実行に `report`（`blocked_secret`）と `run_error_secret` の2行ができる
@@ -357,7 +357,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - GitHub 側の状態（Open/Closed、Projects のステータス、コメント）は持たない（US-E5-03）。持つのは「登録の処理を済ませたか」だけ
 - 実装での対応（`src/tech_researcher/db/issues.py`）
   - `record_issue` が（`run_id`, `kind`）で upsert する。`created` は `repo`・`number` が必須で `projects_state` は `pending` で始まり、それ以外の状態は持たない。作った Issue（`created`）の行は、止めた・失敗した記録に戻さない
-  - 同じ番号の書き直しは `projects_state` と `created_at` を保つ。レポート Issue は、同じ（`cadence`, `target`）の記録が別の実行にあるときは、`replaces` で扱いを指定する。`transfer`（転送先の番号。301）は行の `run_id` と `created_at` を元のまま残して番号だけ置き換え、`recreate`（410・404 の後に別の実行で作り直した番号）は行の `run_id` を本文を投稿した実行に付け替える（「載せた」の導出が、その実行の項目を指すため）。番号が変わると `pending` に戻り、`projects_attempts`・`projects_last_error`・`projects_last_run_id` も消す
+  - 同じ番号の書き直しは `projects_state` と `created_at` を保つ。レポート Issue は、同じ（`cadence`, `target`）の記録が別の実行にあるときは、`replaces` で扱いを指定する。`transfer`（転送先の番号。301）は行の `run_id` と `created_at` を元のまま残して番号だけ置き換え、`recreate`（410・404 の後に別の実行で作り直した番号）は行の `run_id` を本文を投稿した実行に付け替える（「載せた」の導出が、その実行の項目を指すため）。転送（301）を登録のときに見つけたときは、`record_issue` を通さず `move_issue` で `repo`・`number` だけを転送先に更新し、登録の状態と試行回数は保つ。番号が変わると `pending` に戻り、`projects_attempts`・`projects_last_error`・`projects_last_run_id` も消す
   - 登録の結果は `mark_projects_done`・`mark_projects_issue_missing`・`record_projects_failure`（`pending` のまま試行回数・失敗の分類・実行を記録）で書く。未登録は `pending_projects`（古い順）で引く
 
 ### 3.5 判定に使う問い合わせ
