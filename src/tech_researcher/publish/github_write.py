@@ -46,6 +46,21 @@ _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 _TRANSIENT = frozenset({TIMEOUT, DNS, NETWORK, HTTP_5XX})
 
 
+class WriteBudget:
+    """GitHub への書き込みの要求の回数（Issue 用・Projects 用を合わせて数える。6.5）。
+
+    Issue の作成と Projects の登録が同じものを共有する。再試行も1回と数える。
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.used = 0
+
+    @property
+    def left(self) -> int:
+        return max(self.limit - self.used, 0)
+
+
 class IssueWriteError(Exception):
     """Issue を作れなかった。category は http.py の分類の語（budget・invalid_response を含む）。
 
@@ -101,6 +116,7 @@ class IssueWriter:
         *,
         fetch_url: Callable[..., Response] = fetch,
         clock: Callable[[], float] = time.monotonic,
+        budget: WriteBudget | None = None,
     ):
         if not TOKEN_FORMAT.fullmatch(token):
             raise IssueWriteError("トークンに使えない文字が含まれる", "auth")
@@ -113,12 +129,18 @@ class IssueWriter:
         self._limits = limits
         self._fetch = fetch_url
         self._clock = clock
-        self.calls = 0  # この実行の書き込みの要求の回数
+        # Projects の登録と共有するときは、同じ WriteBudget を渡す
+        self.budget = budget or WriteBudget(limits.github_write_calls)
         # 要求を出してよい時間の上限（clock の値。⑤ の段階の上限。6.4）。None なら制限なし
         self.deadline: float | None = None
 
     def __repr__(self) -> str:  # トークンを repr に出さない
         return "IssueWriter()"
+
+    @property
+    def calls(self) -> int:
+        """この実行の書き込みの要求の回数（Projects の分を含む）"""
+        return self.budget.used
 
     def create_issue(
         self, repo: str, title: str, body: str, labels: tuple[str, ...]
@@ -128,7 +150,7 @@ class IssueWriter:
             raise ValueError("投稿先が owner/repo の形でない")
         if not title or len(title) > TITLE_MAX:
             raise ValueError("タイトルの長さが使えない")
-        if self.calls >= self._limits.github_write_calls:
+        if self.budget.left <= 0:
             raise IssueWriteError("この実行の書き込みの上限に達した", BUDGET, unsent=True)
         path = "/".join(quote(part, safe="") for part in repo.split("/"))
         url = f"{API_ROOT}/repos/{path}/issues"
@@ -143,7 +165,7 @@ class IssueWriter:
                 **time_limit(self.deadline, self._clock),
             )
         except FetchError as e:
-            self.calls += e.attempts
+            self.budget.used += e.attempts
             category = REDIRECT if e.status in _REDIRECTS else classify(e)
             raise IssueWriteError(
                 f"{category}（HTTP {e.status}）",
@@ -152,7 +174,7 @@ class IssueWriter:
                 _retry_after(e.headers),
                 unsent=_unsent(e, category),
             ) from e
-        self.calls += response.attempts
+        self.budget.used += response.attempts
         return _created(repo, labels, response)
 
 
