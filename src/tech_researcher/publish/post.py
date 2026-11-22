@@ -204,7 +204,9 @@ class Poster:
                 self._close("failed", "secret_detected")
                 if posted["result"] in (CREATED, EXISTING):
                     return {**posted, "result": BLOCKED, "error_category": "secret_detected"}
-                return posted
+                # 定型の投稿に失敗した。要約の分類は検出のまま、書き込みの分類は別に残す
+                write_error = posted.get("error_category")
+                return {**posted, "error_category": "secret_detected", "write_error": write_error}
             self._record_blocked(RUN_ERROR_SECRET)
         # 定型でも検出した。作らず、記録だけにする
         self._close("failed", "secret_detected")
@@ -220,7 +222,8 @@ class Poster:
         if kind != REPORT:
             row = find_issue(self.conn, self.run_id, kind)
             if row is not None and row.state == "created":  # 同じ実行の再試行。作らない
-                return _result(EXISTING, kind, ref=IssueRef(str(row.repo), int(row.number or 0)))
+                ref = IssueRef(str(row.repo), int(row.number or 0))
+                return self._existing(kind, ref, close, "db")
         try:
             found = self._create(kind, report)
         except IssueReadError as e:
@@ -228,11 +231,11 @@ class Poster:
         except IssueWriteError as e:
             self.log.write("post", "failure", error_category=e.category, detail=str(e))
             return self._write_failed(kind, _category(e, "write_failed"), close)
+        except (sqlite3.Error, OSError) as e:
+            self.log.write("post", "failure", error_category="db_error", exc=e)
+            return self._write_failed(kind, "db_error", close)
         if isinstance(found, Existing):
-            if close:
-                self._close("succeeded", None)
-            self.log.write("post", "end", detail=f"existing via {found.via}")
-            return _result(EXISTING, kind, ref=found.ref)
+            return self._existing(kind, found.ref, close, found.via)
         created, replaces = found
         try:
             record_issue(
@@ -247,7 +250,7 @@ class Poster:
                 number=created.ref.number,
                 replaces=replaces,
             )
-            record_issue_repo(self.conn, self.repo)
+            self._record_repo(created.ref, "created")
         except Exception as e:  # Issue はある。次の重複判定がラベルで見つける（report）
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e)
             if close:
@@ -267,6 +270,30 @@ class Poster:
         self.log.write("post", "end", count=1)
         return _result(CREATED, kind, ref=created.ref, labels_missing=bool(created.missing_labels))
 
+    def _existing(self, kind: str, ref: IssueRef, close: bool, via: str) -> dict:
+        """すでにある Issue。投稿先の記録（meta）が済んでいることも確かめてから、成功にする。"""
+        try:
+            self._record_repo(ref, via)
+        except Exception as e:  # 記録できないまま成功にしない（次の実行でやり直す）
+            self.log.write("post", "failure", error_category="issue_record_failed", exc=e)
+            if close:
+                self._close("failed", "issue_record_failed")
+            return _result(FAILED, kind, ref=ref, error_category="issue_record_failed")
+        if close:
+            self._close("succeeded", None)
+        self.log.write("post", "end", detail=f"existing via {via}")
+        return _result(EXISTING, kind, ref=ref)
+
+    def _record_repo(self, ref: IssueRef, via: str) -> None:
+        """設定の投稿先を meta に記録し、記録されたことを読み直して確かめる。転送された Issue
+        以外で、Issue の repo が設定の投稿先と違えば、記録しない（失敗にする）。"""
+        if ref.repo.lower() != self.repo and via != "transferred":
+            raise ValueError("Issue の repo が設定の投稿先と違う")
+        record_issue_repo(self.conn, self.repo)
+        row = self.conn.execute("SELECT value FROM meta WHERE key = 'issue_repo'").fetchone()
+        if row is None or row[0] != self.repo:
+            raise RuntimeError("投稿先を記録できていない")
+
     def _create(self, kind: str, report: Report) -> Existing | tuple[CreatedIssue, str | None]:
         """重複判定（レポートだけ）の後に作る。再試行の前には、重複判定をやり直す。"""
         assert self.writer is not None
@@ -285,8 +312,16 @@ class Poster:
                 )
                 return created, replaces
             except IssueWriteError as e:
+                if kind == REPORT and e.category == "invalid_response":
+                    # 応答が読めないが、Issue は作られていることがある。重複判定を1回だけ行う
+                    again = self._decide()
+                    if isinstance(again, Existing):
+                        return again
+                    raise
                 if not e.retryable or attempt == len(waits):
                     raise
+                if kind != REPORT and not e.unsent:
+                    raise  # 識別子がなく、再試行で2件作りうる（応答が返らない失敗）
                 wait = waits[attempt]
                 if e.retry_after is not None:
                     wait = min(e.retry_after, limits.retry_after_max_s)
@@ -314,6 +349,12 @@ class Poster:
 
     def _write_failed(self, kind: str, category: str, close: bool) -> dict:
         """作れなかった。issues に failed を記録し、runs を failed（post）で閉じる。"""
+        self._record_failed(kind)
+        if close:
+            self._close("failed", category)
+        return _result(FAILED, kind, error_category=category)
+
+    def _record_failed(self, kind: str) -> None:
         try:
             record_issue(
                 self.conn,
@@ -326,13 +367,11 @@ class Poster:
             )
         except Exception as e:
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e)
-        if close:
-            self._close("failed", category)
-        return _result(FAILED, kind, error_category=category)
 
     def _stop(self, kind: str, category: str) -> dict:
         """投稿の準備で止まった失敗（設定・トークン・issue.md）。何も作らず、runs だけ閉じる。"""
         self.log.write("post", "failure", error_category=category)
+        self._record_failed(kind)
         self._close("failed", category)
         return _result(FAILED, kind, error_category=category)
 

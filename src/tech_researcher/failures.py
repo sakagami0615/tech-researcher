@@ -433,6 +433,8 @@ def _close_run(job: Job, outcome: Outcome, minute: float) -> None:
         args += ["--retry-count", "0"]
     elif outcome.kind == RUN_ERROR and outcome.stage is not None:
         count = retries(job.config, outcome.stage, load_fetches(job.files.dir), outcome.retries)[0]
+        if outcome.stage == "post":  # ⑤ の失敗でも、② の再試行の回数は残す
+            count = outcome.retries
         args += ["--retry-count", str(count)]
     if outcome.models:
         args += ["--model", ",".join(outcome.models)]

@@ -654,6 +654,7 @@ def test_dry_run_prints_summary_only_and_keeps_it(host, capfd):
         "partial_sources": [],
         "output_dir": str(out_dir),
         "issue_url": None,
+        "issue_post_failed": None,
     }
     assert json.loads((out_dir / "summary.json").read_text(encoding="utf-8")) == summary
     assert [(r["stage"], r["event"]) for r in host.log(run_id)] == [
@@ -763,6 +764,32 @@ def test_report_post_results_are_reflected(host, capfd, post, category, url):
         assert (summary["result"], summary["failed_stage"]) == ("error", "post")
         assert summary["error_category"] == category
     assert summary["issue_url"] == (f"https://github.com/{url}" if url else None)
+
+
+@pytest.mark.parametrize(
+    ("post", "failed"),
+    [
+        ("fail", "exit_1"),
+        ({"result": "failed", "kind": "rejected", "error_category": "http_4xx"}, "http_4xx"),
+        (
+            {
+                "result": "blocked",
+                "kind": "run_error_secret",
+                "error_category": "secret_detected",
+                "write_error": "timeout",
+            },
+            "timeout",
+        ),
+    ],
+)
+def test_failed_failure_issue_keeps_the_result_and_reports_issue_post_failed(
+    host, capfd, post, failed
+):
+    host.behave("ok", lock="daily", verify="rejected", post=post)
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["result"] == "rejected"  # 元の結果のまま
+    assert summary["issue_url"] is None and summary["issue_post_failed"] == failed
 
 
 def test_dry_run_never_posts(host, capfd):

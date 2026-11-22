@@ -109,6 +109,27 @@ def test_failures_are_classified(limits, failure, category, retryable):
     assert TOKEN not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("failure", "unsent"),
+    [
+        (FetchError("t", 0, None, category="timeout"), True),  # 時間の上限のため送らなかった
+        (FetchError("再試行を使い切った：gaierror", 1, None), False),
+        (FetchError("URLError: ConnectionRefusedError: x", 1, None), True),
+        (FetchError("t", 1, None, category="timeout"), False),  # 応答の読み取りのタイムアウト
+        (FetchError("reset", 1, None), False),
+        (error(503), False),
+        (error(429), True),
+        (error(403, **{"retry-after": "5"}), True),
+        (error(422), False),
+    ],
+)
+def test_unsent_marks_only_failures_where_no_issue_was_created(limits, failure, unsent):
+    w, _ = writer(limits, failure)
+    with pytest.raises(IssueWriteError) as raised:
+        w.create_issue(REPO, "t", "b", LABELS)
+    assert raised.value.unsent is unsent
+
+
 def test_retry_after_is_exposed(limits):
     w, _ = writer(limits, error(403, **{"retry-after": "30"}))
     with pytest.raises(IssueWriteError) as raised:

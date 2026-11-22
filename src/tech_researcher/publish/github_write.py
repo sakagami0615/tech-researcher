@@ -58,11 +58,15 @@ class IssueWriteError(Exception):
         category: str,
         status: int | None = None,
         retry_after: float | None = None,
+        unsent: bool = False,
     ):
         super().__init__(message)
         self.category = category
         self.status = status
         self.retry_after = retry_after
+        # Issue が作られていないと分かる失敗（送る前に失敗した・GitHub が作らずに断った）。
+        # 応答が返らない失敗は、Issue が作られていることがあるので False
+        self.unsent = unsent
 
     @property
     def retryable(self) -> bool:
@@ -135,10 +139,23 @@ class IssueWriter:
             self.calls += e.attempts
             category = REDIRECT if e.status in _REDIRECTS else classify(e)
             raise IssueWriteError(
-                f"{category}（HTTP {e.status}）", category, e.status, _retry_after(e.headers)
+                f"{category}（HTTP {e.status}）",
+                category,
+                e.status,
+                _retry_after(e.headers),
+                unsent=_unsent(e, category),
             ) from e
         self.calls += response.attempts
         return _created(repo, labels, response)
+
+
+def _unsent(error: FetchError, category: str) -> bool:
+    """Issue が作られていないと言える失敗か。時間の上限のため送らなかった（attempts が 0）、名前解決
+    の失敗、接続の拒否、レート制限の拒否（429・403。GitHub は作らずに断る）。応答の読み取りの
+    タイムアウト・送った後の通信の失敗・5xx は、作られていることがあるので含めない。"""
+    if error.attempts == 0 or category in (DNS, RATE_LIMITED):
+        return True
+    return "ConnectionRefusedError" in str(error)
 
 
 def _retry_after(headers: Mapping[str, str]) -> float | None:

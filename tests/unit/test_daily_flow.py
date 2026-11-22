@@ -283,6 +283,7 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "partial_sources": [],
         "output_dir": str(out_dir),
         "issue_url": None,
+        "issue_post_failed": None,
     }
     assert "モデル" not in out  # 収集した文は標準出力に出さない
     assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify"]  # ⑤ は呼ばない

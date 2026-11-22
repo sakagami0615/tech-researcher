@@ -107,6 +107,7 @@ class FakeGitHub:
         self.read_error = None
         self.writers = []
         self.token = None
+        self.reader_args = []
 
     def make_writer(self, token, limits, clock=None):
         self.token = token
@@ -115,6 +116,7 @@ class FakeGitHub:
         return writer
 
     def make_reader(self, token, limits, **kw):
+        self.reader_args.append(kw)
         return FakeReader(self)
 
 
@@ -475,7 +477,8 @@ def test_destination_mismatch_stops_before_any_write(env, github):
     result = env.post("report")
 
     assert (result["result"], result["error_category"]) == ("failed", "config")
-    assert github.attempts == [] and env.issue_rows() == []
+    assert github.attempts == []
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "failed")]  # 作れなかった記録
     assert env.run_row() == ("failed", "post", "config", None)
 
 
@@ -542,3 +545,127 @@ def test_expected_labels_follow_d08():
 def test_is_secret_stop_only_for_the_notice():
     assert is_secret_stop(secret_stop_report(TARGET, "verify"))
     assert not is_secret_stop(report_for())
+
+
+# --- 再試行してよい失敗（種別ごと）---
+
+
+def _error(category, unsent, **kw):
+    return IssueWriteError("x", category, unsent=unsent, **kw)
+
+
+@pytest.mark.parametrize("kind", ["rejected", "run_error"])
+@pytest.mark.parametrize("category", ["timeout", "network", "http_5xx"])
+def test_failure_issue_is_not_retried_when_the_response_may_be_lost(env, github, kind, category):
+    """識別子がない失敗の Issue は、応答が返らない失敗の後に再試行すると2件作りうる。"""
+    github.failures = [_error(category, False)]
+    result = env.post(kind)
+
+    assert (result["result"], result["error_category"]) == ("failed", category)
+    assert len(github.attempts) == 1 and env.sleeps == []
+    assert [row[1:3] for row in env.issue_rows()] == [(kind, "failed")]
+
+
+@pytest.mark.parametrize("category", ["dns", "timeout", "network"])
+def test_failure_issue_is_retried_when_it_was_certainly_not_sent(env, github, category):
+    github.failures = [_error(category, True)]
+    result = env.post("run_error")
+
+    assert (result["result"], result["number"]) == ("created", 100)
+    assert len(github.attempts) == 2 and env.sleeps == [5]
+
+
+def test_report_is_retried_even_when_the_response_may_be_lost(env, github):
+    github.failures = [_error("timeout", False)]
+    assert env.post("report")["result"] == "created"
+
+
+def test_invalid_response_for_a_report_runs_the_dedup_once(env, github):
+    class Odd(FakeWriter):
+        def create_issue(self, repo, title, body, labels):
+            github.created.append(
+                {"repo": repo, "title": title, "body": body, "labels": labels, "number": 60}
+            )
+            raise IssueWriteError("x", "invalid_response", 201)
+
+    github.make_writer = lambda token, limits, clock=None: Odd(github)
+    result = env.post("report")
+
+    assert (result["result"], result["number"]) == ("existing", 60)
+    assert env.issue_rows() == [(RUN, "report", "created", REPO, 60, "pending")]  # 記録された
+
+
+def test_invalid_response_without_a_found_issue_fails(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    result = env.post("report")
+    assert (result["result"], result["error_category"]) == ("failed", "invalid_response")
+
+
+# --- 投稿先の記録（meta）---
+
+
+def test_existing_issue_is_not_a_success_until_the_destination_is_recorded(
+    env, github, monkeypatch
+):
+    env.post("report")
+    calls = []
+
+    def broken(conn, repo):
+        calls.append(repo)
+        raise OSError("disk")
+
+    monkeypatch.setattr("tech_researcher.publish.post.record_issue_repo", broken)
+    monkeypatch.setattr("tech_researcher.publish.dedup.record_issue_repo", broken)
+    env.conn.execute("DELETE FROM meta")  # 記録に失敗した後の状態
+    result = env.post("report", run=RETRY)
+
+    assert (result["result"], result["error_category"]) == ("failed", "db_error")
+    assert env.run_row(RETRY)[:3] == ("failed", "post", "db_error")
+
+
+def test_destination_is_recorded_when_returning_to_an_existing_issue(env, github):
+    env.post("report")
+    env.conn.execute("DELETE FROM meta")  # record_issue_repo が失敗した後の状態
+    result = env.post("report", run=RETRY)
+
+    assert result["result"] == "existing"
+    assert env.conn.execute("SELECT value FROM meta").fetchall() == [(REPO,)]
+
+
+def test_config_change_after_a_failed_record_does_not_record_the_new_destination(env, github):
+    """記録に失敗した後に設定が変わっても、別のリポジトリの Issue を投稿先として記録しない。"""
+    env.post("report")
+    env.conn.execute("DELETE FROM meta")
+    env.environ["GITHUB_ISSUE_REPO"] = "other/prod"
+    result = env.post("report", run=RETRY)
+
+    assert (result["result"], result["error_category"]) == ("failed", "issue_record_failed")
+    assert env.conn.execute("SELECT value FROM meta").fetchall() == []
+
+
+def test_same_run_failure_issue_also_records_the_destination(env, github):
+    env.post("run_error")
+    env.conn.execute("DELETE FROM meta")
+    assert env.poster().run("run_error")["result"] == "existing"
+    assert env.conn.execute("SELECT value FROM meta").fetchall() == [(REPO,)]
+
+
+# --- 公開停止の定型の投稿に失敗したとき ---
+
+
+def test_failed_notice_keeps_the_secret_category_and_the_write_error_separately(env, github):
+    github.failures = [IssueWriteError("x", "http_4xx", 422)]
+    result = env.post("report", report_for(text=f"キーは {SECRET}"))
+
+    assert (result["result"], result["error_category"]) == ("failed", "secret_detected")
+    assert result["write_error"] == "http_4xx"
+    assert env.run_row()[:3] == ("failed", "post", "secret_detected")
+
+
+# --- 読み取りの時間の上限 ---
+
+
+def test_dedup_reader_gets_the_deadline_and_clock(env, github):
+    env.post("report", deadline=42.0)
+    assert github.reader_args[0]["deadline"] == 42.0
+    assert github.reader_args[0]["clock"] is env.clock

@@ -145,6 +145,8 @@ class Summary:
     partial_sources: list[str] = field(default_factory=list)
     output_dir: str | None = None
     issue_url: str | None = None
+    # 失敗の Issue（不合格・実行エラー・公開停止）の投稿が失敗したときの分類。結果と runs は元のまま
+    issue_post_failed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -593,7 +595,9 @@ def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
     """⑤ でレポートを投稿する。worker が runs を閉じる（成功・公開停止・失敗）。"""
     posted, category = _post(job, post.REPORT, retries=retries)
     if posted is None:  # worker が動かなかった・結果を読めなかった。runs が閉じていなければ閉じる
-        failures.close_run(job, failures.Outcome(failures.RUN_ERROR, "post", category), MINUTE)
+        failures.close_run(
+            job, failures.Outcome(failures.RUN_ERROR, "post", category, retries=retries), MINUTE
+        )
         return job.summary("error", failed_stage="post", error_category=category, **fields)
     if posted["result"] in (post.CREATED, post.EXISTING):
         return job.summary("report", issue_url=posted["issue_url"], **fields)
@@ -612,8 +616,15 @@ def _publish_failure(job: Job, posting: failures.Posting | None) -> dict:
     Issue の URL だけを足す。投稿できなくても元の結果のまま（ログには worker が残す）。"""
     if posting is None or job.files.dry_run:
         return {}
-    posted, _ = _post(job, posting.kind, posting.stopped)
-    return {} if posted is None else {"issue_url": posted["issue_url"]}
+    posted, category = _post(job, posting.kind, posting.stopped)
+    if posted is None:
+        return {"issue_post_failed": category}
+    out = {"issue_url": posted["issue_url"]}
+    if posted["result"] == post.FAILED or posted["issue_url"] is None:
+        out["issue_post_failed"] = (
+            posted["write_error"] or posted["error_category"] or "post_failed"
+        )
+    return out
 
 
 def _post(
@@ -882,7 +893,17 @@ def _post_summary(stdout: str) -> dict | None:
     category = data.get("error_category")
     if category is not None and not (isinstance(category, str) and CATEGORY.fullmatch(category)):
         return None
-    return {"result": data["result"], "error_category": category, "issue_url": url}
+    write_error = data.get("write_error")
+    if write_error is not None and not (
+        isinstance(write_error, str) and CATEGORY.fullmatch(write_error)
+    ):
+        return None
+    return {
+        "result": data["result"],
+        "error_category": category,
+        "issue_url": url,
+        "write_error": write_error,
+    }
 
 
 def _count(value: object) -> bool:
