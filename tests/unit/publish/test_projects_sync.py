@@ -586,3 +586,30 @@ def test_404_for_an_issue_moved_into_the_configured_repository_stops_the_rest(h)
     assert h.state(9)[1:3] == ("pending", 0)  # 設定の誤りなので、後ろは試さない
     assert outcome.as_dict()["not_attempted"] == 1
     assert outcome.as_dict()["error_category"] == "projects_not_found"
+
+
+def test_a_chain_of_transfers_is_abandoned_by_the_total_attempts(h):
+    h.add(OLD, "report", 5)
+    for number in (5, 1005, 2005, 3005):
+        h.failures[number] = http_error(404, category="not_found")
+    h.make_reader = lambda token, limits, **kw: TransferredReader()  # 毎回、さらに転送される
+
+    for expected in ("pending", "pending", "abandoned"):
+        h.run()
+        assert moved_row(h, OLD)[2] == expected
+
+    assert moved_row(h, OLD)[3] == 3
+
+
+def test_unreadable_configured_repository_is_a_config_stop(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.existing = {5, 9}
+    h.failures[5] = http_error(404, category="not_found")
+    del h.environ["GITHUB_ISSUE_REPO"]
+
+    outcome = h.run()
+
+    assert h.state(5)[1:4] == ("pending", 1, "config")
+    assert h.state(9)[1:3] == ("pending", 0)
+    assert outcome.as_dict()["not_attempted"] == 1

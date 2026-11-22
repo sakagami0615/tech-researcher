@@ -186,11 +186,14 @@ class ProjectsSync:
         if gone is False:
             # 設定の誤りと言えるのは、Issue が今ある repo（ref。転送後を含む）が設定の投稿先の
             # ときだけ。別の投稿先の Issue は、この1件の問題として扱い、止めずに試行の上限で諦める
-            if ref.repo.lower() != self._configured_repo():
+            configured = self._configured_repo()
+            if not configured:  # 比べる投稿先を読めない。設定の誤りとして、残りも止める
+                return self._fail(row, CONFIG, outcome)
+            if ref.repo.lower() != configured:
                 return self._give_up_transfer(row, outcome)
             return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
         if isinstance(gone, IssueRef):  # 転送されている。記録を転送先に更新して、登録し直す
-            if not moved and gone != ref:  # 同じ場所なら、更新も回数の戻しもしない
+            if not moved and gone != ref:  # 同じ場所なら更新しない
                 try:
                     move_issue(self.conn, row.id, gone.repo, gone.number)
                 except (sqlite3.Error, LookupError) as e:
@@ -216,7 +219,7 @@ class ProjectsSync:
         try:
             attempts = self.conn.execute(
                 "SELECT projects_attempts FROM issues WHERE id = ?", (row.id,)
-            ).fetchone()[0]  # 転送先に更新したときに 0 に戻った後の、失敗の記録まで含めた回数
+            ).fetchone()[0]  # 転送をまたいだ合計（今の失敗の記録を含む）
         except sqlite3.Error:
             attempts = row.projects_attempts + 1
         if attempts >= MAX_TRANSFER_ATTEMPTS:
