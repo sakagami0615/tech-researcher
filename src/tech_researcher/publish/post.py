@@ -263,7 +263,7 @@ class Poster:
         except RecordError as e:  # 見つけたが、DB に記録できなかった
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e.__cause__)
             category = "issue_record_failed"
-            if kind == REPORT and self._maybe_created:
+            if kind == REPORT and self._maybe_created and not self._recorded(kind, e.ref):
                 # 作られたかもしれない失敗の後に見つけた Issue。ラベルが外れていると、次の実行は
                 # 見つけられず重複して作りうるので、次の自動作成を止める記録（uncertain）を残す。
                 # 番号は uncertain の行に持てないので、結果に載せる。記録まで失敗したら
@@ -483,6 +483,19 @@ class Poster:
         if close:
             self._close("failed", category)
         return _result(FAILED, kind, error_category=category)
+
+    def _recorded(self, kind: str, ref: IssueRef) -> bool:
+        """この実行の行が、見つけた Issue の番号の `created` として、すでに書けているか。
+        書けているなら、正しい記録なので書き換えない（meta の記録だけが失敗した場合など）。"""
+        try:
+            row = find_issue(self.conn, self.run_id, kind)
+        except Exception:
+            return False
+        return (
+            row is not None
+            and row.state == "created"
+            and (row.repo, row.number) == (ref.repo, ref.number)
+        )
 
     def _record_failed(self, kind: str, state: str = "failed") -> bool:
         """issues に failed・uncertain を記録する。記録できた（守りで書かなかった場合を含む）か。"""

@@ -1126,6 +1126,27 @@ def test_unrecordable_uncertain_after_the_unlabeled_lookup_is_a_db_error(env, gi
     assert env.run_row()[:3] == ("failed", "post", "db_error")
 
 
+def test_correct_created_row_is_kept_when_only_the_destination_record_fails(
+    env, github, monkeypatch
+):
+    """行は書けたが meta の記録だけが失敗した。正しい `created #N` を uncertain に書き換えない。"""
+    github.make_writer = _label_stripped_lost_writer(github)
+
+    def broken(conn, repo):
+        raise OSError("disk")
+
+    monkeypatch.setattr("tech_researcher.publish.dedup.record_issue_repo", broken)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "issue_record_failed",
+        70,
+    )
+    assert env.issue_rows() == [(RUN, "report", "created", REPO, 70, "pending")]
+    assert env.run_row()[:3] == ("failed", "post", "issue_record_failed")
+
+
 def test_record_failure_without_a_maybe_created_failure_stays_issue_record_failed(
     env, github, monkeypatch
 ):
