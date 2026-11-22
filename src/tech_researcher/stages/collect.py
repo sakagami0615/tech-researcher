@@ -17,7 +17,7 @@ Star 数の測定の後に、急上昇・新規のリポジトリを判定し（
 まとめて期間で絞った後、すでに載せた急上昇・新規と前日に載せた記事は、AI に渡さない（collected.json
 に入れない）。DB の items には hold_reason を付けて残す（collect/holds.py）。
 週次は、取り直した分と DB にある日次の items を URL でまとめ（stages/weekly_items.py）、まとめた分を
-collected.json と週次の items にする（日次の掲載除外は持ち込まない。Star・人気型フィードは測らない）。
+collected.json と週次の items にする（日次の掲載除外は持ち込まない。Star・人気型は測らない）。
 時間の上限（structure.md 6.4）：① 全体の上限（段階の上限から collect_wrapup_s を引いた時刻）を
 過ぎたら、残りの情報源は取得せずに timeout の失敗にして、終わった情報源の分で続ける。情報源ごとの
 上限は last30days-skill・Qiita・GitHub Releases に、全体の上限は README の取得に渡す（Deadlines）。

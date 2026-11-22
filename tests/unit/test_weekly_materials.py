@@ -346,3 +346,19 @@ def test_write_weekly_input_uses_materials_and_compare_weeks(tmp_path, conn):
     write_weekly_input(CONFIG, WEEK, run_dir, None)
     data = json.loads((run_dir / "agent-input.json").read_text("utf-8"))
     assert (data["past_observations"], data["target"]["compare_weeks"]) == ([], [])
+
+
+def test_weekly_input_uses_the_same_representative_and_inclusion_as_items():
+    """出典の並びや出来事の早さによらず、items の代表の値・掲載の根拠と同じものを渡す。"""
+    day = date(2026, 10, 21)
+    spike = Event("attention_spike", noon(day - timedelta(days=1)), "feed_entry")
+    early_hn = replace(hn(day - timedelta(days=1), 10, noon(day)), events=(spike,), title="HN")
+    item = item_of(early_hn, rss(X, day, "公開日時のある記事"))
+    assert item.sources[0].source_id == "hackernews"
+    data = build_weekly_input(WEEK, [InputItem("i1", item)], {"rss:a": "A", "hackernews": "HN"})
+    entry = data["items"][0]
+    assert entry["untrusted"] == {
+        "title": "公開日時のある記事",
+        "excerpt": "公開日時のある記事の抜粋",
+    }
+    assert (entry["event"]["type"], entry["date"]) == ("published", "2026-10-21")

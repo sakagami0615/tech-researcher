@@ -16,7 +16,7 @@ from tech_researcher.collect.urls import normalize_url
 from tech_researcher.db.history import PastTheme
 from tech_researcher.db.weekly import PastObservation
 from tech_researcher.periods import JST, Target
-from tech_researcher.stages.collect_store import item_kind
+from tech_researcher.stages.collect_store import INCLUSION_ORDER, item_kind, representative
 
 # 日次の増分は日ごとの値で、週次には合わない。期間の合計を github の star_delta_period に入れる
 _DAILY_ONLY_METRICS = frozenset({"star_delta_24h"})
@@ -89,6 +89,7 @@ def _item(
     gains: Mapping[str, int],
 ) -> dict:
     item, first = entry.item, entry.item.sources[0]
+    rep = representative(item)  # items の代表の値と同じ出典（週次の items と食い違わせない）
     event = _event(item, target)
     github = item.github
     return {
@@ -115,13 +116,15 @@ def _item(
                 )
             ),
         },
-        "untrusted": {"title": first.title or _title(item), "excerpt": _excerpt(item)},
+        "untrusted": {"title": rep.title or _title(item), "excerpt": rep.excerpt or _excerpt(item)},
     }
 
 
 def _event(item: Item, target: Target) -> Event:
-    """日付に使う出来事。調査期間の判定の窓に入る最も早いもの（なければ最も早い出来事）。"""
-    return min(window_events(item, target) or item.events, key=lambda e: e.at)
+    """掲載の根拠とする出来事（items の inclusion と同じ順位。2.4）。判定の窓に入るものから選び、
+    なければ（日次の行に由来する項目など）すべての出来事から選ぶ。"""
+    events = window_events(item, target) or item.events
+    return min(events, key=lambda e: (INCLUSION_ORDER[e.type], e.at))
 
 
 def _normalized(url: str) -> str:
