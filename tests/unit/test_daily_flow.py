@@ -30,6 +30,9 @@ from tech_researcher.db.runs import SourceFetch, finish_run, record_source_fetch
 from tech_researcher.db.schema import open_db
 from tech_researcher.orchestrator import StageResult
 from tech_researcher.periods import JST, daily_target
+from tech_researcher.publish.github_issues import IssueLookup, IssueRef, ListedIssue, parse_marker
+from tech_researcher.publish.github_write import CreatedIssue
+from tech_researcher.publish.post import Poster
 from tech_researcher.runfiles import db_path, new_run_id
 from tech_researcher.stages.collect import Collectors, run_collect
 
@@ -39,6 +42,57 @@ EMPTY_FEED = b'<?xml version="1.0"?><rss version="2.0"><channel><title>E</title>
 LIMITS = (ROOT / "config" / "tech-researcher.toml").read_text(encoding="utf-8").split("[limits]")[1]
 STARTED = datetime(2026, 10, 24, 6, 0, tzinfo=JST)  # 対象日は 2026-10-23（金）
 TOKEN = "ghp" + "_" + "z" * 36  # テスト用のダミー。実行時に組み立てる
+ISSUE_TOKEN = "fake-issue-credential-9876"  # Issue 用トークンの代わり（トークンの形ではない）
+ISSUE_REPO = "tester/tr-sandbox"
+
+
+class FakeGitHub:
+    """GitHub の代わり。作った Issue をファイルに残し（ジョブは fork した子プロセスで動くため）、
+    重複判定の読み取り（番号・ラベル）に答える。"""
+
+    def __init__(self, path: Path):
+        self._path = path
+        self.errors: list[Exception] = []  # 次の作成で順に投げる（子プロセスに引き継がれる）
+
+    @property
+    def created(self) -> list[dict]:
+        if not self._path.exists():
+            return []
+        rows = [json.loads(x) for x in self._path.read_text().splitlines()]
+        return [{**r, "labels": tuple(r["labels"])} for r in rows]
+
+    def writer(self, token, limits, clock=None):
+        github = self
+
+        class Writer:
+            deadline = None
+
+            def create_issue(self, repo, title, body, labels):
+                if github.errors:
+                    raise github.errors.pop(0)
+                number = 100 + len(github.created)
+                row = {"repo": repo, "title": title, "body": body, "labels": labels}
+                with github._path.open("a") as f:
+                    f.write(json.dumps({**row, "number": number}, ensure_ascii=False) + "\n")
+                return CreatedIssue(IssueRef(repo, number))
+
+        return Writer()
+
+    def reader(self, token, limits):
+        github = self
+
+        class Reader:
+            def get_issue(self, repo, number):
+                found = any(c["number"] == number and c["repo"] == repo for c in github.created)
+                ref = IssueRef(repo, number) if found else None
+                return IssueLookup(ref, status=None if found else 404)
+
+            def list_report_issues(self, repo, cadence):
+                for c in github.created:
+                    if "type:report" in c["labels"] and f"cadence:{cadence}" in c["labels"]:
+                        yield ListedIssue(c["number"], parse_marker(c["body"]))
+
+        return Reader()
 
 
 def entry(item_id, rank, **kw):
@@ -98,7 +152,13 @@ class Host:
             "TR_SECRETS_DIR": str(self.secrets),
         }
         # worker の env_file（worker.env）から compose が渡す秘匿値（D-05）の代わり
-        self.worker_env = {"TR_DATA_DIR": str(self.data), "GITHUB_TOKEN": TOKEN}
+        self.worker_env = {
+            "TR_DATA_DIR": str(self.data),
+            "GITHUB_TOKEN": TOKEN,
+            "GITHUB_ISSUE_TOKEN": ISSUE_TOKEN,
+            "GITHUB_ISSUE_REPO": ISSUE_REPO,
+        }
+        self.github = FakeGitHub(tmp_path / "github.jsonl")
         self.feed = FEED
         self.ai = select_all
         self.investigator = investigation  # ④ の偽の AI
@@ -184,6 +244,9 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
     )
     monkeypatch.setattr(orchestrator.Compose, "run", lambda c, *a: h.fake_compose_run(c, *a))
     monkeypatch.setattr(invoke, "call_agent", h.fake_call_agent)
+    monkeypatch.setattr(
+        cli, "Poster", partial(Poster, make_writer=h.github.writer, make_reader=h.github.reader)
+    )
     collect = partial(collect_feed, fetch_url=lambda url, limits, **_: h.fake_fetch(url, limits))
     collectors = Collectors(feed=collect)
     monkeypatch.setattr(cli, "run_collect", partial(run_collect, collectors=collectors))
@@ -219,6 +282,7 @@ def test_dry_run_goes_round_and_keeps_results(host):
         "failed_sources": [],
         "partial_sources": [],
         "output_dir": str(out_dir),
+        "issue_url": None,
     }
     assert "モデル" not in out  # 収集した文は標準出力に出さない
     assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify"]  # ⑤ は呼ばない
@@ -353,32 +417,85 @@ def test_ai_choosing_nothing_is_a_report_saying_so(host):
     assert "**該当なし**：" in issue and "（収集 2 件）" in issue
 
 
-def test_production_saves_collect_but_does_not_post(host):
+def test_production_posts_the_report_and_closes_the_run(host):
     code, summary, _ = host.run()
 
-    assert code == 1
-    assert not summary["run_id"].startswith("dry-")
+    assert code == 0
+    run_id = summary["run_id"]
+    assert not run_id.startswith("dry-")
     assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
-        "error",
-        "post",
-        "not_implemented",
+        "report",
+        None,
+        None,
     )
-    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify"]
+    assert summary["issue_url"] == f"https://github.com/{ISSUE_REPO}/issues/100"
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify", "post"]
     assert [p.name for p in (host.data / "work").iterdir()] == [".lock"]  # 実行中のファイルは消した
     assert not (host.data / "dry-run").exists()
-    # ① は runs の開始・取得結果・収集項目を書く。終わりは ⑤ で書くので running のまま
+    # ラベルは作成の要求に含め、本文の1行目は識別子（重複判定が読む）
+    [created] = host.github.created
+    assert created["labels"] == ("type:report", "cadence:daily")
+    assert created["title"] == "[日次] 2026-10-23（金）の技術動向"
+    assert created["body"].startswith(
+        f"<!-- tech-researcher kind=report cadence=daily target=2026-10-23 run={run_id} -->"
+    )
     with contextlib.closing(open_db(db_path(host.data))) as conn:
-        assert conn.execute("SELECT run_id, status, finished_at FROM runs").fetchall() == [
-            (summary["run_id"], "running", None)
+        assert conn.execute(
+            "SELECT run_id, status, finished_at IS NOT NULL FROM runs"
+        ).fetchall() == [(run_id, "succeeded", 1)]
+        assert conn.execute(
+            "SELECT run_id, kind, cadence, target, state, repo, number, projects_state FROM issues"
+        ).fetchall() == [
+            (run_id, "report", "daily", "2026-10-23", "created", ISSUE_REPO, 100, "pending")
+        ]
+        assert conn.execute("SELECT key, value FROM meta").fetchall() == [
+            ("issue_repo", ISSUE_REPO)
         ]
         assert conn.execute("SELECT source_id, status FROM source_fetches").fetchall() == [
             ("rss:example", "ok")
         ]
         (count,) = conn.execute("SELECT count(*) FROM items").fetchone()
         assert count == summary["items"] > 0
-    log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
+    log = host.data / "logs" / "2026" / "10" / f"{run_id}.jsonl"
     assert ("verify", "end") in stages_of(log)
-    assert ("post", "failure") in stages_of(log)
+    assert ("post", "end") in stages_of(log)
+
+
+def test_second_run_for_the_same_target_does_not_create_a_second_issue(host, monkeypatch):
+    """同じ対象の再実行は、重複判定（DB の番号）で作らない。runs は閉じる（M 3.7）。"""
+    host.run()
+    host.capfd.readouterr()
+    monkeypatch.setattr(
+        orchestrator,
+        "new_run_id",
+        lambda now, **kwargs: new_run_id(STARTED + timedelta(hours=1), **kwargs),
+    )
+    code, summary, _ = host.run()
+
+    assert (code, summary["result"]) == (0, "report")
+    assert summary["issue_url"] == f"https://github.com/{ISSUE_REPO}/issues/100"
+    assert len(host.github.created) == 1
+    assert [r[3] for r in host.runs()] == ["succeeded", "succeeded"]
+
+
+def test_post_failure_records_failed_and_closes_run_as_failed_post(host):
+    from tech_researcher.publish.github_write import IssueWriteError
+
+    host.github.errors = [IssueWriteError("x", "http_4xx", 422)]
+    code, summary, _ = host.run()
+
+    assert code == 1
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "post",
+        "http_4xx",
+    )
+    [run] = host.runs()
+    assert run[3:] == ("failed", "post", "http_4xx", 1)
+    with contextlib.closing(open_db(db_path(host.data))) as conn:
+        assert conn.execute("SELECT kind, state, number FROM issues").fetchall() == [
+            ("report", "failed", None)
+        ]
 
 
 def test_invalid_id_is_excluded_and_others_are_reported(host):
@@ -887,7 +1004,7 @@ def test_product_call_agent_uses_the_skill_and_schema(agent):
 
 def test_production_records_model_and_warns_when_it_changes(agent):
     code, first, _ = agent.run()
-    assert (code, first["failed_stage"]) == (1, "post")  # ⑤ はまだない
+    assert (code, first["failed_stage"]) == (0, None)
     assert models_of(agent) == [(first["run_id"], MODEL)]
     assert not [r for r in log_of(agent, first["run_id"]) if r["event"] == "warning"]
 
@@ -915,7 +1032,7 @@ def test_model_record_failure_does_not_stop_verify(agent, monkeypatch):
 
     monkeypatch.setattr(cli, "record_model", broken)
     code, summary, _ = agent.run()
-    assert (code, summary["failed_stage"]) == (1, "post")  # ③ は最後まで進んだ
+    assert (code, summary["failed_stage"]) == (0, None)  # ③ の後の ⑤ まで進んだ
     log = log_of(agent, summary["run_id"])
     assert ("analyze", "warning", "model_record_failed") in [
         (r["stage"], r["event"], r.get("error_category")) for r in log
@@ -966,7 +1083,7 @@ def test_production_saves_the_report_with_item_ids_from_items(host):
     host.ai = lambda data: {"items": [entry(data["items"][0]["id"], 1), entry("i99999", 2)]}
     code, summary, _ = host.run()
 
-    assert code == 1  # ⑤ がまだない
+    assert code == 0
     [data] = host.calls("agent")
     assert [i["id"] for i in data["items"]] == ["i1", "i2"]
     [row], entries, items = saved_report(host)
@@ -1008,7 +1125,7 @@ def test_verify_rerun_in_the_same_run_replaces_the_saved_report(host, monkeypatc
 
     monkeypatch.setattr(cli, "main", twice)
     code, _, _ = host.run()
-    assert code == 1
+    assert code == 0
     [row], entries, items = saved_report(host)
     assert row[1] == "passed" and [e[0] for e in entries] == [1, 2]
     assert [i[0] for i in items] == [1, 2]
@@ -1139,7 +1256,10 @@ def test_production_rejected_closes_run_as_rejected_with_investigation(host):
     assert json.loads(investigation_json(host))["confidence"] == "medium"
     # ④ は1回だけ。② を呼び直さない
     assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
-    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify", "finish"]
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "verify", "finish", "post"]
+    [created] = host.github.created  # 不合格の Issue も投稿する
+    assert created["labels"] == ("type:rejected", "cadence:daily")
+    assert summary["issue_url"] == f"https://github.com/{ISSUE_REPO}/issues/100"
     log = host.data / "logs" / "2026" / "10" / f"{summary['run_id']}.jsonl"
     records = [json.loads(x) for x in log.read_text().splitlines()]
     assert [(r["stage"], r["event"]) for r in records if r["stage"] == "investigate"] == [
@@ -1183,7 +1303,7 @@ def test_production_agent_failure_closes_run_and_records_model(host):
         )
     assert investigation_json(host) is not None
     assert [c["task"] for c in host.calls("agent")] == ["daily", "investigate"]
-    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish"]
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish", "post"]
 
 
 @pytest.mark.parametrize("category", ["missing_skill", "launch_failed"])
@@ -1256,7 +1376,7 @@ def test_production_all_sources_failed_keeps_workers_close_and_adds_investigatio
     [run] = host.runs()
     assert run[3:] == ("failed", "collect", "all_sources_failed", 1)
     assert json.loads(investigation_json(host))["event"] == "処理が失敗した"
-    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish"]
+    assert [c["args"][0] for c in host.calls("compose")] == ["collect", "finish", "post"]
     with contextlib.closing(open_db(db_path(host.data))) as conn:
         # ① の worker は再試行回数を書かない。finish が補う（rss の3回の試行は再試行2回）
         assert conn.execute("SELECT retry_count FROM runs").fetchone() == (2,)

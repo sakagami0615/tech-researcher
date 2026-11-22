@@ -318,3 +318,51 @@ def test_finish_for_a_run_not_started_does_not_read_the_investigation(env, capsy
     args = ["finish", "daily", "--run-id", PROD, "--status", "failed", "--failed-stage", "collect"]
     assert cli.main(args, env) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "not_started"
+
+
+# post：⑤ 投稿（publish/post.py）
+
+
+def test_post_runs_the_poster_with_arguments_and_a_deadline(env, capsys, monkeypatch):
+    data = Path(env["TR_DATA_DIR"])
+    (data / "work" / PROD).mkdir(parents=True)
+    seen = {}
+
+    class FakePoster:
+        def __init__(self, config, target, run_id, run_dir, log, scanner, conn, **kw):
+            seen.update(run_id=run_id, run_dir=run_dir, kw=kw, target=target)
+
+        def run(self, kind, stopped):
+            seen.update(kind=kind, stopped=stopped)
+            return {"result": "created", "kind": kind, "repo": "o/r", "number": 3}
+
+    monkeypatch.setattr(cli, "Poster", FakePoster)
+    args = ["post", "daily", "--run-id", PROD, "--kind", "run_error_secret", "--stopped", "report"]
+    assert cli.main([*args, "--retry-count", "2"], {**env, "GITHUB_ISSUE_REPO": "o/r"}) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert (out["stage"], out["result"], out["number"]) == ("post", "created", 3)
+    assert (seen["kind"], seen["stopped"]) == ("run_error_secret", "report")
+    assert seen["kw"]["retry_count"] == 2
+    assert seen["kw"]["environ"]["GITHUB_ISSUE_REPO"] == "o/r"
+    assert seen["kw"]["deadline"] > 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["--kind", "unknown"],
+        ["--kind", "report", "--stopped", "run_error_secret"],
+        ["--kind", "report", "--retry-count", "-1"],
+    ],
+)
+def test_post_rejects_bad_arguments(env, bad):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["post", "daily", "--run-id", PROD, *bad], env)
+    assert e.value.code == 2
+
+
+def test_post_rejects_dry_run_and_observation(env, capsys):
+    for run_id in (DRY, "obs-20261024-060000-abcd"):
+        assert cli.main(["post", "daily", "--run-id", run_id, "--kind", "report"], env) == 2
+        assert "通常の本番の実行だけ" in capsys.readouterr().err

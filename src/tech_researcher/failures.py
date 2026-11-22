@@ -20,7 +20,8 @@ report-templates.md 3章）。
    上書きせず、再試行回数（worker は書かない）と ④ の出力だけを補う
 
 後始末の失敗（④ の失敗、本文を書けない、runs を閉じられない）は実行の結果を変えない。ログに残し、
-要約は元の失敗のまま出す。⑤ の投稿（Issue を作ること）はここでは行わない。
+要約は元の失敗のまま出す。⑤ の投稿（Issue を作ること）はここでは行わない。投稿する種別（本文を
+置き換えて公開停止の定型にしたときは、止めた種別も）を Posting で返し、統括スクリプトが ⑤ を呼ぶ。
 """
 
 import json
@@ -38,6 +39,9 @@ from tech_researcher.collect.sources import GITHUB_REPOS_SOURCE_ID, source_names
 from tech_researcher.config import Config
 from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.runs import recent_runs
+from tech_researcher.publish.post import REJECTED as KIND_REJECTED
+from tech_researcher.publish.post import RUN_ERROR as KIND_RUN_ERROR
+from tech_researcher.publish.post import RUN_ERROR_SECRET, is_secret_stop
 from tech_researcher.render.common import Report, body_too_long, fetch_reason
 from tech_researcher.render.failure import (
     Counts,
@@ -117,26 +121,50 @@ class Outcome:
     retries: int = 0
 
 
-def handle(job: Job, outcome: Outcome, minute: float) -> None:
-    """失敗の後始末を行う（モジュールの説明）。例外は出さない。minute は設定の上限（分）の秒数。"""
+@dataclass(frozen=True)
+class Posting:
+    """⑤ に渡す投稿の指示。kind は issue.md の種別（issues.kind）。stopped は、本文を公開停止の
+    定型に置き換えたときの、止めた種別（⑤ が blocked_secret で記録する）。"""
+
+    kind: str
+    stopped: str | None = None
+
+
+def handle(job: Job, outcome: Outcome, minute: float) -> Posting | None:
+    """失敗の後始末を行う（モジュールの説明）。例外は出さない。minute は設定の上限（分）の秒数。
+
+    本文（issue.md）を書けたときは、⑤ で投稿するもの（Posting）を返す。書けなければ None。
+    """
+    posting = None
     try:
-        _write_issue(job, outcome, minute)
+        posting = _write_issue(job, outcome, minute)
     except Exception as e:
         _quiet(job, "investigate", "failure", error_category=type(e).__name__, exc=e)
-    if job.files.dry_run:
-        return
+    if not job.files.dry_run:
+        close_run(job, outcome, minute)
+    return posting
+
+
+def close_run(job: Job, outcome: Outcome, minute: float) -> None:
+    """本番の runs を閉じる。失敗はログに残して続ける（すでに閉じていれば値を変えない）。"""
     try:
         _close_run(job, outcome, minute)
     except Exception as e:
         _quiet(job, "job", "failure", error_category="run_close_failed", exc=e)
 
 
-def _write_issue(job: Job, outcome: Outcome, minute: float) -> None:
+def _write_issue(job: Job, outcome: Outcome, minute: float) -> Posting:
     """④ の調査・本文を作り、investigation.json・issue.md を書く（先に ④ の出力を残す）。"""
     report, result = _report(job, outcome, minute)
     if result.output is not None:
         _write(job.files.dir / INVESTIGATION, json.dumps(result.output, ensure_ascii=False))
     _write(job.files.dir / ISSUE, issue_text(report))
+    kind = KIND_REJECTED if outcome.kind == REJECTED else KIND_RUN_ERROR
+    if outcome.kind == SECRET_STOP:  # ③ が止めたレポート
+        return Posting(RUN_ERROR_SECRET, "report")
+    if is_secret_stop(report):  # 本文の検査で置き換えた（_report）
+        return Posting(RUN_ERROR_SECRET, kind)
+    return Posting(kind)
 
 
 def partial_source_names(run_dir: Path, names: Mapping[str, str]) -> list[str]:

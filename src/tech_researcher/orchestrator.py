@@ -22,9 +22,11 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
 とつなぐ。② で使われたモデルの名前は ③ に渡し、本番では worker が runs の model に記録して前回の
 本番と比べる（structure.md 3.3）。日次の ① 〜 ③ の失敗（実行エラー・不合格・秘匿情報の検出）は
-failures.py が ④ の調査・本文（issue.md）・本番の runs の終わりへつなぐ。⑤ 投稿はまだないので、
-本番は ③ の後に実行エラーで終わる。週次は ① の後に終わる（ドライランは ① だけ、本番は
-not_implemented）。⑤ への分岐は、その Issue で足す。
+failures.py が ④ の調査・本文（issue.md）・本番の runs の終わりへつなぎ、本文を ⑤ で投稿する。
+レポートが合格したときも ⑤ で投稿する。⑤ は worker の `post` で、Issue 用トークンは worker だけが
+持つ（publish/post.py）。投稿した Issue の URL は要約の issue_url に出す。投稿できなかったときは
+実行エラー（failed_stage は post）。ドライランは ⑤ を飛ばす。週次は ① の後に終わる（ドライランは
+① だけ、本番は not_implemented）。週次の ② 〜 ⑤ への分岐は、週次の Issue で足す。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -63,6 +65,7 @@ from tech_researcher.envfiles import (
 )
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import JST, Target, daily_target, weekly_target
+from tech_researcher.publish import post
 from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
 from tech_researcher.stages.collect import collect_failure
 from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
@@ -127,8 +130,8 @@ class Summary:
     result：report（レポート）・rejected（不合格）・error（実行エラー）・dry_run（ドライラン）・
     observed（D-13 の観測。observe.py）。
     failed_sources は取得に失敗した情報源、partial_sources は一部だけ取れなかった情報源（取れた分は
-    使った部分レポート。US-E6-03）の、設定ファイルの表示名。Issue の番号と URL は ⑤ を実装する
-    Issue で足す。
+    使った部分レポート。US-E6-03）の、設定ファイルの表示名。issue_url は ⑤ で作った
+    （すでにあった）Issue の URL（不合格・実行エラー・公開停止の Issue も）。
     """
 
     run_id: str
@@ -141,6 +144,7 @@ class Summary:
     failed_sources: list[str] = field(default_factory=list)
     partial_sources: list[str] = field(default_factory=list)
     output_dir: str | None = None
+    issue_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -568,17 +572,59 @@ def _run_stages(job: Job) -> Summary:
         return _fail(job, "verify", category, fields)
     if verified["result"] == REJECTED:  # 不合格（US-E7-02）。不合格の後に再生成はしない
         reason = _validation_reason(job)
-        failures.handle(job, failures.Outcome(failures.REJECTED, category=reason), MINUTE)
-        return job.summary("rejected", **fields)
+        posting = failures.handle(job, failures.Outcome(failures.REJECTED, category=reason), MINUTE)
+        return job.summary("rejected", **fields, **_publish_failure(job, posting))
     if verified["result"] == SECRET_DETECTED:  # 本文を公開しない（US-E7-05）
         outcome = failures.Outcome(failures.SECRET_STOP, "verify", SECRET_DETECTED)
-        failures.handle(job, outcome, MINUTE)
-        return job.summary("error", failed_stage="verify", error_category=SECRET_DETECTED, **fields)
+        posting = failures.handle(job, outcome, MINUTE)
+        return job.summary(
+            "error",
+            failed_stage="verify",
+            error_category=SECRET_DETECTED,
+            **fields,
+            **_publish_failure(job, posting),
+        )
     if job.files.dry_run:  # ドライランは ⑤ だけを飛ばす（D-04）
         return job.summary("dry_run", **fields)
-    # ⑤ 投稿はまだない。本番はレポートを公開できないので実行エラーにする
-    job.log.write("post", "failure", error_category="not_implemented")
-    return job.summary("error", failed_stage="post", error_category="not_implemented", **fields)
+    return _publish_report(job, fields, retries)
+
+
+def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
+    """⑤ でレポートを投稿する。worker が runs を閉じる（成功・公開停止・失敗）。"""
+    posted, category = _post(job, post.REPORT, retries=retries)
+    if posted is None:  # worker が動かなかった・結果を読めなかった。runs が閉じていなければ閉じる
+        failures.close_run(job, failures.Outcome(failures.RUN_ERROR, "post", category), MINUTE)
+        return job.summary("error", failed_stage="post", error_category=category, **fields)
+    if posted["result"] in (post.CREATED, post.EXISTING):
+        return job.summary("report", issue_url=posted["issue_url"], **fields)
+    # 秘匿情報の検出（⑤ で公開停止の定型を作った）か、作れなかった
+    return job.summary(
+        "error",
+        failed_stage="post",
+        error_category=posted["error_category"] or "post_failed",
+        issue_url=posted["issue_url"],
+        **fields,
+    )
+
+
+def _publish_failure(job: Job, posting: failures.Posting | None) -> dict:
+    """失敗の Issue（不合格・実行エラー・公開停止）を ⑤ で投稿する。結果の要約は変えず、作った
+    Issue の URL だけを足す。投稿できなくても元の結果のまま（ログには worker が残す）。"""
+    if posting is None or job.files.dry_run:
+        return {}
+    posted, _ = _post(job, posting.kind, posting.stopped)
+    return {} if posted is None else {"issue_url": posted["issue_url"]}
+
+
+def _post(
+    job: Job, kind: str, stopped: str | None = None, retries: int | None = None
+) -> tuple[dict | None, str | None]:
+    extra = ["--kind", kind]
+    if stopped is not None:
+        extra += ["--stopped", stopped]
+    if retries is not None:
+        extra += ["--retry-count", str(retries)]
+    return _worker(job, "post", job.limits.post, _post_summary, extra)
 
 
 def _fail(
@@ -595,9 +641,10 @@ def _fail(
     """
     assert category is not None
     if job.cadence == "daily":
-        failures.handle(
+        posting = failures.handle(
             job, failures.Outcome(failures.RUN_ERROR, stage, category, models, retries), MINUTE
         )
+        fields = {**(fields or {}), **_publish_failure(job, posting)}
     return job.summary("error", failed_stage=stage, error_category=category, **(fields or {}))
 
 
@@ -807,6 +854,33 @@ def _verify_summary(stdout: str) -> dict | None:
     if data is None or data.get("result") not in VERIFY_RESULTS:
         return None
     return {"result": data["result"]}
+
+
+_ISSUE_REPO = re.compile(r"[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+")
+
+
+def _post_summary(stdout: str) -> dict | None:
+    """⑤ の要約を読む。形が違えば None。issue_url は repo・number から作る（worker の文字列を
+    そのまま出さない）。error_category は分類の名前の形のときだけ使う。"""
+    data = _last_json(stdout)
+    if data is None or data.get("result") not in post.RESULTS:
+        return None
+    url = None
+    repo, number = data.get("repo"), data.get("number")
+    if repo is not None or number is not None:
+        if not (
+            isinstance(repo, str)
+            and _ISSUE_REPO.fullmatch(repo)
+            and not {".", ".."} & set(repo.split("/"))
+            and _count(number)
+            and number > 0
+        ):
+            return None
+        url = f"https://github.com/{repo}/issues/{number}"
+    category = data.get("error_category")
+    if category is not None and not (isinstance(category, str) and CATEGORY.fullmatch(category)):
+        return None
+    return {"result": data["result"], "error_category": category, "issue_url": url}
 
 
 def _count(value: object) -> bool:
