@@ -110,7 +110,7 @@ def render_weekly(
     sections = [
         _header(target, run_id, window, observed),
         _theme_table(themes, counts, window),
-        *_theme_sections(themes, counts, target, items, names, window),
+        *_theme_sections(themes, counts, items, names, window),
         _changes(output.tech_changes, items, names),
         _comparisons(output.comparisons, items, names),
         _watch(output.watch, items, names),
@@ -187,7 +187,6 @@ def _average(c: ThemeCounts) -> str:
 def _theme_sections(
     themes: Sequence[ThemeEntry],
     counts: Sequence[ThemeCounts],
-    target: Target,
     items: Mapping[str, Item],
     names: Mapping[str, str],
     window: PastWindow,
@@ -238,7 +237,7 @@ def _theme_sources(
 ) -> str:
     """AI が選んだ今週の観測の順に最大5件。今週の観測がなければ、最後に観測した過去の記事。"""
     if theme.item_ids:
-        return source_line(theme.item_ids[:MAX_SOURCES], items, names)
+        return source_line(theme.item_ids, items, names, limit=MAX_SOURCES)
     return _past_sources(theme.past_ids, names, window)
 
 

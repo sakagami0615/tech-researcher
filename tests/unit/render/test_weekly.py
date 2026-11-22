@@ -264,3 +264,17 @@ def test_ai_text_is_sanitized(text):
     assert "\n# 見出し" not in body
     assert "<b>" not in body.replace("\\<b>", "")  # HTML は \< でエスケープされる
     assert "@user" not in body.replace("`@user`", "")
+
+
+def test_theme_sources_count_every_source_of_an_item_toward_the_limit():
+    from dataclasses import replace
+
+    many = aggregate(
+        replace(record(n), link_url="https://example.com/multi") for n in range(11, 15)
+    )[0]
+    assert len(many.sources) == 4
+    items = {**ITEMS, "i20": many}
+    output = WeeklyOutput((theme(item_ids=("i20", "i1", "i2", "i3")),), (), (), ())
+    body = render_weekly(TARGET, RUN, output, items, NAMES, WINDOW, 4).body
+    line = next(ln for ln in body.splitlines() if ln.startswith("- **主な出典"))
+    assert line.count("](") == 5  # 1項目の4出典 + 次の項目の1出典
