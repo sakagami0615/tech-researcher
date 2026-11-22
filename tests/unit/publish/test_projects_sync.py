@@ -227,7 +227,7 @@ def test_auth_and_rate_limit_failures_stop_the_rest(h, category):
     assert h.state(5)[1:3] == ("pending", 0)
 
 
-def test_missing_projects_settings_fail_every_pending_issue_without_a_request(h):
+def test_missing_projects_settings_record_one_failure_without_a_request(h):
     h.add(OLD, "report", 5)
     h.add(RUN, "report", 9)
     del h.environ["GITHUB_PROJECTS_NUMBER"]
@@ -403,3 +403,33 @@ def test_issue_read_rate_limit_stops_the_rest(h):
     assert h.state(5)[1:4] == ("pending", 1, "projects_not_found_unchecked")
     assert h.state(9)[1:3] == ("pending", 0)
     assert outcome.as_dict()["not_attempted"] == 1
+
+
+def test_a_transferred_issue_does_not_stop_the_other_registrations(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.failures[5] = http_error(404, category="not_found")
+    h.make_reader = lambda token, limits, **kw: TransferredReader()
+
+    outcome = h.run(first=IssueRef(REPO, 9))
+
+    assert h.state(5)[1:4] == ("pending", 1, "issue_transferred")
+    assert h.state(9)[1] == "done"
+    assert outcome.as_dict()["failed"] == 1
+
+
+def test_an_unexpected_error_is_recorded_on_the_row_and_stops(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.failures[9] = RuntimeError("想定外")
+
+    outcome = h.run(first=IssueRef(REPO, 9))
+
+    assert h.state(9)[1:4] == ("pending", 1, "unexpected")
+    assert h.state(5)[1:3] == ("pending", 0)
+    assert outcome.as_dict()["not_attempted"] == 1
+
+
+class TransferredReader:
+    def get_issue(self, repo, number):
+        return IssueLookup(IssueRef("tester/moved", number), transferred=True)

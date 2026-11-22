@@ -44,6 +44,7 @@ from tech_researcher.publish.github_projects import (
 from tech_researcher.publish.github_write import WriteBudget
 
 NOT_FOUND_WITH_ISSUE = "projects_not_found"  # 404 だが Issue はある（設定の誤り）
+TRANSFERRED = "issue_transferred"  # 404 で、Issue は別の場所に転送されている（1件の問題）
 UNCHECKED = "projects_not_found_unchecked"  # 404 で、Issue があるか確かめられなかった
 INVALID_ISSUE = "invalid_issue"  # 記録の repo・number が使えない形
 DB_ERROR = "db_error"
@@ -127,7 +128,13 @@ class ProjectsSync:
             if self._out_of_time() or self.budget.left <= 0:
                 outcome.not_attempted += len(rows) - index
                 break
-            category = self._register(registrar, row, outcome)
+            try:
+                category = self._register(registrar, row, outcome)
+            except Exception as e:  # 想定外。この行に記録して止める（ジョブには影響させない）
+                self.log.write("post", "failure", error_category="projects_unexpected", exc=e)
+                category = self._fail(row, "unexpected", outcome)
+                outcome.not_attempted += len(rows) - index - 1
+                break
             if category in _STOP:
                 outcome.not_attempted += len(rows) - index - 1
                 break
@@ -155,6 +162,8 @@ class ProjectsSync:
                     return self._finish(row, outcome, missing=True)
                 if gone is False:
                     return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
+                if gone == TRANSFERRED:  # 設定の誤りとは言えない。この1件だけ pending のまま続ける
+                    return self._fail(row, TRANSFERRED, outcome)
                 self._fail(row, UNCHECKED, outcome)
                 # Issue 用トークンの認証・権限・レート制限の失敗は、残りの確かめも同じ理由で失敗する
                 return gone if gone in _STOP else UNCHECKED
@@ -172,7 +181,8 @@ class ProjectsSync:
                     deadline=self.deadline,
                     clock=self.clock,
                 )
-            return self._reader.get_issue(ref.repo, ref.number).ref is None
+            found = self._reader.get_issue(ref.repo, ref.number)
+            return TRANSFERRED if found.transferred else found.ref is None
         except IssueReadError as e:
             return e.category
 
@@ -199,7 +209,12 @@ class ProjectsSync:
         category = category if CATEGORY.fullmatch(category) else "unknown"
         outcome.failed += 1
         outcome.error_categories.append(category)
-        self.log.write("post", "warning", error_category=f"projects_{category}", detail=_name(row))
+        self.log.write(
+            "post",
+            "warning",
+            error_category=category if category.startswith("projects_") else f"projects_{category}",
+            detail=_name(row),
+        )
         try:
             record_projects_failure(self.conn, row.id, self.run_id, category)
         except (sqlite3.Error, LookupError) as e:
