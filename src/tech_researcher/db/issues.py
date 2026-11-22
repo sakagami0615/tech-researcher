@@ -24,7 +24,7 @@ _COLUMNS = (
 
 @dataclass(frozen=True)
 class IssueRow:
-    """projects_state は、pending・done・issue_missing（created 以外は None）。"""
+    """projects_state は、pending・done・issue_missing・abandoned（created 以外は None）。"""
 
     id: int
     run_id: str
@@ -194,6 +194,30 @@ def pending_projects(conn: sqlite3.Connection) -> list[IssueRow]:
 
 def mark_projects_done(conn: sqlite3.Connection, issue_id: int, run_id: str) -> None:
     _finish_projects(conn, issue_id, run_id, "done")
+
+
+def mark_projects_abandoned(conn: sqlite3.Connection, issue_id: int, run_id: str) -> None:
+    """転送された Issue を何度試しても登録できない。pending から外し、運用者に任せる。"""
+    check_writable_run_id(run_id)
+    cursor = conn.execute(  # 失敗の記録で数えた試行回数は増やさない
+        "UPDATE issues SET projects_state = 'abandoned', projects_last_run_id = ?"
+        " WHERE id = ? AND state = 'created' AND projects_state = 'pending'",
+        (run_id, issue_id),
+    )
+    if cursor.rowcount != 1:
+        raise LookupError(f"登録待ちの Issue の記録がない: {issue_id}")
+
+
+def move_issue(conn: sqlite3.Connection, issue_id: int, repo: str, number: int) -> None:
+    """Issue が転送されていたとき、記録の repo・number を転送先に更新する（4.3）。登録の状態・
+    試行回数・最後の失敗の記録は保つ（試行回数は転送をまたいだ合計で数える）。"""
+    cursor = conn.execute(
+        "UPDATE issues SET repo = ?, number = ? WHERE id = ? AND state = 'created'"
+        " AND projects_state = 'pending'",
+        (repo, number, issue_id),
+    )
+    if cursor.rowcount != 1:
+        raise LookupError(f"登録待ちの Issue の記録がない: {issue_id}")
 
 
 def mark_projects_issue_missing(conn: sqlite3.Connection, issue_id: int, run_id: str) -> None:

@@ -61,7 +61,7 @@ class FakeGitHub:
         rows = [json.loads(x) for x in self._path.read_text().splitlines()]
         return [{**r, "labels": tuple(r["labels"])} for r in rows]
 
-    def writer(self, token, limits, clock=None):
+    def writer(self, token, limits, clock=None, budget=None):
         github = self
 
         class Writer:
@@ -96,6 +96,19 @@ class FakeGitHub:
                         yield ListedIssue(c["number"], parse_marker(c["body"]))
 
         return Reader()
+
+
+class FakeRegistrar:
+    """Projects への登録の代わり（本物は GitHub に要求を出すので、テストでは使わない）。"""
+
+    deadline = None
+
+    def add_issue(self, ref):
+        pass
+
+
+def make_registrar(config, limits, budget, clock=None):
+    return FakeRegistrar()
 
 
 def entry(item_id, rank, **kw):
@@ -160,6 +173,9 @@ class Host:
             "GITHUB_TOKEN": TOKEN,
             "GITHUB_ISSUE_TOKEN": ISSUE_TOKEN,
             "GITHUB_ISSUE_REPO": ISSUE_REPO,
+            "GITHUB_PROJECTS_TOKEN": "fake-projects-credential-1234",
+            "GITHUB_PROJECTS_OWNER": "tester",
+            "GITHUB_PROJECTS_NUMBER": "3",
         }
         self.github = FakeGitHub(tmp_path / "github.jsonl")
         self.feed = FEED
@@ -248,7 +264,14 @@ def host(tmp_path, monkeypatch, capfd) -> Host:
     monkeypatch.setattr(orchestrator.Compose, "run", lambda c, *a: h.fake_compose_run(c, *a))
     monkeypatch.setattr(invoke, "call_agent", h.fake_call_agent)
     monkeypatch.setattr(
-        cli, "Poster", partial(Poster, make_writer=h.github.writer, make_reader=h.github.reader)
+        cli,
+        "Poster",
+        partial(
+            Poster,
+            make_writer=h.github.writer,
+            make_reader=h.github.reader,
+            make_registrar=make_registrar,
+        ),
     )
     collect = partial(collect_feed, fetch_url=lambda url, limits, **_: h.fake_fetch(url, limits))
     collectors = Collectors(feed=collect)
@@ -450,7 +473,7 @@ def test_production_posts_the_report_and_closes_the_run(host):
         assert conn.execute(
             "SELECT run_id, kind, cadence, target, state, repo, number, projects_state FROM issues"
         ).fetchall() == [
-            (run_id, "report", "daily", "2026-10-23", "created", ISSUE_REPO, 100, "pending")
+            (run_id, "report", "daily", "2026-10-23", "created", ISSUE_REPO, 100, "done")
         ]
         assert conn.execute("SELECT key, value FROM meta").fetchall() == [
             ("issue_repo", ISSUE_REPO)

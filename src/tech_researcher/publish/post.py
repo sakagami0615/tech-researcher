@@ -20,6 +20,9 @@ Issue として作り、DB に記録する。Issue 用トークンと投稿先�
    作られていても、ラベルで見つかる）。4xx と再試行を使い切った失敗は、issues に `failed` を記録する
 7. 本番の実行がまだ閉じていなければ（レポートの投稿）、runs を閉じる：投稿・既存で succeeded、
    公開停止・失敗で failed（段階は post）
+8. 続けて、未登録（pending）の Issue を Projects に登録する（projects_sync.py。今回の分を先に、
+   前回までの分を古い順に。書き込みの予算は Issue の作成と共有する）。登録の失敗は、ジョブの
+   結果とは別に記録する（runs の閉じ方・結果の result には影響させない）
 
 秘匿情報の検査の役割：③ と失敗の分岐（failures.py）は、本文を作る時点で検査して公開停止の定型に
 置き換える。⑤ の検査は、その後の最後の砦で、検出の分類だけをログに残す（位置・文字列は残さない）。
@@ -57,12 +60,15 @@ from tech_researcher.publish.github_issues import (
     issue_token,
     parse_marker,
 )
+from tech_researcher.publish.github_projects import ProjectsRegistrar
 from tech_researcher.publish.github_write import (
     TITLE_MAX,
     CreatedIssue,
     IssueWriteError,
     IssueWriter,
+    WriteBudget,
 )
+from tech_researcher.publish.projects_sync import ProjectsSync
 from tech_researcher.render.common import Report, body_too_long
 from tech_researcher.render.failure import SECRET_NOTICE, secret_stop_report
 from tech_researcher.stages.daily import ISSUE, issue_text
@@ -155,6 +161,7 @@ class Poster:
         now: datetime | None = None,
         make_writer: Callable[..., IssueWriter] = IssueWriter,
         make_reader: Callable[..., IssueReader] = IssueReader,
+        make_registrar: Callable[..., ProjectsRegistrar] = ProjectsRegistrar,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         deadline: float | None = None,
@@ -171,16 +178,52 @@ class Poster:
         self.now = now or datetime.now(UTC)
         self.make_writer = make_writer
         self.make_reader = make_reader
+        self.make_registrar = make_registrar
         self.sleep = sleep
         self.clock = clock
         self.deadline = deadline  # 要求を出してよい時間の上限（clock の値。structure.md 6.4）
         self.repo = ""
         self.writer: IssueWriter | None = None
+        self._repo_checked = False  # 投稿先が DB の記録と合うと確かめられたか
+        # Issue の作成と Projects の登録で共有する書き込みの予算（structure.md 6.5）
+        self.budget = WriteBudget(config.limits.github_write_calls)
         # この実行の作成で、Issue が作られたかもしれない失敗があったか。あれば POST を繰り返さない
         self._maybe_created = False
 
     def run(self, kind: str, stopped: str | None = None) -> dict:
         """issue.md を投稿して記録し、結果（result・kind・repo・number・error_category）を返す。
+
+        続けて、未登録の Issue（今回の分と前回までの分）を Projects に登録する（4.4）。登録の
+        結果は `projects` に分けて返し、result・error_category には影響させない。
+        """
+        out = self._post_issue(kind, stopped)
+        if not self._repo_checked:
+            return out  # 投稿先を確かめられていない（設定の食い違いなど）。登録もしない
+        ref = IssueRef(out["repo"], out["number"]) if "number" in out else None
+        try:
+            return self._sync_projects(out, ref)
+        except Exception as e:  # 登録の想定外の失敗で、投稿の結果を壊さない
+            self.log.write("post", "failure", error_category="projects_unexpected", exc=e)
+            return {**out, "projects": {"error_category": "projects_unexpected"}}
+
+    def _sync_projects(self, out: dict, ref: IssueRef | None) -> dict:
+        sync = ProjectsSync(
+            self.conn,
+            self.run_id,
+            self.config.limits,
+            self.budget,
+            self.log,
+            environ=self.environ,
+            make_registrar=self.make_registrar,
+            make_reader=self.make_reader,
+            deadline=self.deadline,
+            clock=self.clock,
+        )
+        projects = sync.run(ref)
+        return out if projects is None else {**out, "projects": projects.as_dict()}
+
+    def _post_issue(self, kind: str, stopped: str | None) -> dict:
+        """Issue の投稿だけ（run の前半）。
 
         stopped は、すでに公開を止めた種別（③ が秘匿情報を検出したときの report など。kind は定型の
         run_error_secret）。その種別を `blocked_secret` で記録する。想定外の例外は呼び出し側
@@ -192,10 +235,14 @@ class Poster:
         try:
             self.repo = issue_repo(self.environ)
             self.writer = self.make_writer(
-                issue_token(self.environ), self.config.limits, clock=self.clock
+                issue_token(self.environ),
+                self.config.limits,
+                clock=self.clock,
+                budget=self.budget,
             )
             self.writer.deadline = self.deadline
             check_issue_repo(self.conn, self.repo)
+            self._repo_checked = True
         except (IssueReadError, IssueWriteError, ConfigError) as e:
             return self._stop(kind, _category(e, "config"))
         except sqlite3.Error as e:
