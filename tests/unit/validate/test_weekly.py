@@ -486,3 +486,30 @@ def test_verification_marks_only_the_failed_checks():
 def test_everything_excluded_leaves_nothing_published():
     result = check(themes=[theme("T0099")], changes=[change(["i99"])], watches=[watch([])])
     assert result.published == 0 and len(result.excluded) == 3
+
+
+def test_unreadable_url_excludes_rows_changes_and_watch_and_empties_the_comparison():
+    items = {**ITEMS, "i3": item("https://user:pw@evil.example/x", "Baz")}
+    result = check(
+        changes=[change(["i3"]), change(["i2"])],
+        watches=[watch(["i3"])],
+        comparisons=[comparison(row("i3", "Baz")), comparison(row("i4"))],
+        items=items,
+    )
+    assert reasons(result) == [
+        ("tech_change", "invalid_source"),
+        ("watch", "invalid_source"),
+        ("comparison_row", "invalid_source"),
+        ("comparison", "empty_comparison"),
+    ]
+    assert len(result.output.tech_changes) == 1 and len(result.output.comparisons) == 1
+
+
+@pytest.mark.parametrize("name", ["Foo|DB", "Foo*DB", "Foo DB"])
+def test_product_name_must_match_the_title_with_symbols(name):
+    items = {**ITEMS, "i1": item("https://a.example.com/1", "C# FooDB 3.0")}
+    data = {**DATA, "items": [{"id": "i1", "untrusted": {"title": "C# FooDB 3.0"}}]}
+    result = check(comparisons=[comparison(row("i1", name))], data=data, items=items)
+    assert reasons(result)[0] == ("comparison_row", "unknown_product")
+    ok = check(comparisons=[comparison(row("i1", "C# FooDB"))], data=data, items=items)
+    assert ok.excluded == ()

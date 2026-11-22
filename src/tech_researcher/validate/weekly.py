@@ -13,6 +13,7 @@ D2（forbidden_link）→ D3（forbidden_html）→ 文字数（too_long）→ D
 （領域）ごと除外する。
 """
 
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -31,7 +32,6 @@ from tech_researcher.config import QuoteLimits
 from tech_researcher.validate.quote import (
     Prepared,
     meta_terms_by_id,
-    normalize,
     quote_sources,
     quote_violation,
 )
@@ -340,12 +340,17 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
     item = ctx.items[entry.item_id]
     if item.github is not None:
         return None
-    name = normalize(entry.product_name or "")
+    name = _fold(entry.product_name or "")
     if not name:
         return "GitHub 外の行に製品名がない"
-    if name in normalize(ctx.titles.get(entry.item_id, "")):
+    if name in _fold(ctx.titles.get(entry.item_id, "")):
         return None
     return "製品名が収集タイトルにない"
+
+
+def _fold(text: str) -> str:
+    """製品名の照合用：NFKC、大文字・小文字の統一、空白の圧縮だけ（記号は残す）。"""
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
 def _forbidden(entry: Entry, found: Callable[[str], bool], label: str) -> str | None:
