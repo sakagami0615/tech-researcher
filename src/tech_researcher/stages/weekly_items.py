@@ -5,8 +5,8 @@ RSS などはフィードに載る期間が短く（D-12）、週次の時点で
 
 - 日次の掲載除外（hold_reason）は持ち込まない。AI に渡さなかった項目も、週次では観測として使う
   （D-13 の「注目が続いていることは、観測を DB に残して週次で扱う」）
-- 同じ URL の行は1つにまとめる。出典・出来事・リンクは和集合、注目度は指標ごとに最新の値、
-  代表のタイトル・抜粋・公開日時は時刻まで分かる公開日時を持つ行を優先する
+- 同じ URL の行は1つにまとめる。出典・出来事・リンクは和集合、注目度は（出典、URL、指標）ごとに
+  最新の値、代表のタイトル・抜粋・公開日時は時刻まで分かる公開日時を持つ行を優先する
 - 日次の行は一次情報の本文を持たない（ハッシュだけ）。週次の AI にも本文は渡さない（4.3）
 """
 
@@ -67,7 +67,7 @@ def _merge(target: Target, rows: list[ItemRow]) -> tuple[ItemRow, date]:
         sources=sources,
         events=events,
         attention=_latest_attention(
-            (s.source_id, a) for i in items for s in i.sources for a in s.attention
+            ((s.source_id, s.url), a) for i in items for s in i.sources for a in s.attention
         ),
         links=_unique((link for i in items for link in i.links), lambda x: x),
         meta_terms=_unique((t for i in items for t in i.meta_terms), lambda x: x),
@@ -101,14 +101,21 @@ def _merge(target: Target, rows: list[ItemRow]) -> tuple[ItemRow, date]:
 
 
 def _inclusion_date(rows: Sequence[ItemRow], event: Event) -> date:
-    if event.type == "new_repo" or (
+    """前日の記録と比べて決まる出来事と、日付だけの公開（時刻が 0:00 UTC になり、調査期間より前の
+    日付になりうる）は、その出来事を持つ日次の行の対象日。それ以外は出来事の時刻の JST の日付。"""
+    compared = event.type == "new_repo" or (
         event.type == "attention_spike" and event.basis in ("feed_entry", "star_growth")
-    ):
-        for row in rows:  # 取り直した分は持たない。新しい対象日の日次の行から
-            if row.cadence == "daily" and any(
-                _event_key(e) == _event_key(event) for e in row.item.events
-            ):
-                return row.target
+    )
+    for row in rows:  # 取り直した分は持たない。新しい対象日の日次の行から
+        if row.cadence != "daily" or not any(
+            _event_key(e) == _event_key(event) for e in row.item.events
+        ):
+            continue
+        date_only = event.type == "published" and any(
+            r.published_precision == "date" and r.published_at == event.at for r in row.item.sources
+        )
+        if compared or date_only:
+            return row.target
     return event.at.astimezone(JST).date()
 
 
@@ -137,11 +144,14 @@ def _merge_repo(values: Sequence[GitHubRepo | None]) -> GitHubRepo | None:
     return replace(found[0], mentioned_by=mentions)
 
 
-def _latest_attention(values: Iterable[tuple[str, Attention]]) -> tuple[Attention, ...]:
-    """（出典、指標）ごとに、測定が最も新しい値。同じ時刻なら先のもの。並びは最初に見た順。"""
-    latest: dict[tuple[str, str], Attention] = {}
-    for source_id, a in values:
-        old = latest.get((source_id, a.metric))
+def _latest_attention(values: Iterable[tuple[tuple[str, str], Attention]]) -> tuple[Attention, ...]:
+    """（出典、URL、指標）ごとに、測定が最も新しい値。同じ時刻なら先のもの。並びは最初に見た順。
+
+    URL も見るのは、同じ情報源の別の投稿（HN の別のスレッドなど）の値を1つに減らさないため。
+    """
+    latest: dict[tuple[str, str, str], Attention] = {}
+    for (source_id, url), a in values:
+        old = latest.get((source_id, url, a.metric))
         if old is None or a.measured_at > old.measured_at:
-            latest[source_id, a.metric] = a
+            latest[source_id, url, a.metric] = a
     return tuple(latest.values())

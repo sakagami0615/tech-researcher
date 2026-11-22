@@ -537,3 +537,31 @@ def test_write_weekly_input_with_themes_star_gains_and_readonly_db(tmp_path, con
     line = json.loads((run_dir / "log2.jsonl").read_text("utf-8").splitlines()[-1])
     assert (line["event"], line["count"]) == ("input", 1)
     assert "past_observations=1" in line["detail"] and "bytes=" in line["detail"]
+
+
+def test_attention_of_different_posts_of_one_source_are_both_kept(conn):
+    day = date(2026, 10, 20)
+    thread_a = hn(day, 300, noon(day))
+    thread_b = replace(
+        hn(day, 50, noon(day)),
+        url="https://news.ycombinator.com/item?id=2",
+        attention=(Attention("hn_points", 50, noon(day)),),
+    )
+    store_daily(conn, day, item_of(rss(X, day, "X"), thread_a, thread_b))
+    (row,) = weekly_rows(WEEK, [], load_daily_rows(conn, WEEK))
+    assert sorted(a.value for a in row.item.attention) == [50, 300]
+
+
+def test_date_only_published_uses_the_daily_target_as_date(conn):
+    """日付だけの公開（0:00 UTC）は、JST の日付が期間より前にならないよう、日次の対象日にする。"""
+    day = date(2026, 10, 19)
+    midnight = datetime(2026, 10, 18, tzinfo=UTC)  # UTC の日付は窓の中。JST の日付は期間の前日
+    record = replace(
+        rss(X, day, "日付だけ"),
+        published_precision="date",
+        published_at=midnight,
+        events=(Event("published", midnight),),
+    )
+    store_daily(conn, day, item_of(record))
+    ((row, row_day),) = weekly_rows_dated(WEEK, [], load_daily_rows(conn, WEEK))
+    assert (row.inclusion.type, row_day) == ("published", day)
