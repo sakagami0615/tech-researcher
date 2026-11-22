@@ -266,7 +266,7 @@ class Poster:
             if kind == REPORT and self._maybe_created:
                 # 作られたかもしれない失敗の後に見つけた Issue。ラベルが外れていると、次の実行は
                 # 見つけられず重複して作りうるので、次の自動作成を止める記録（uncertain）を残す。
-                # 番号は uncertain の行に持てないので、結果に載せる（要約・ログ）。記録まで失敗したら
+                # 番号は uncertain の行に持てないので、結果に載せる。記録まで失敗したら
                 # db_error
                 if not self._record_failed(kind, "uncertain"):
                     category = "db_error"
