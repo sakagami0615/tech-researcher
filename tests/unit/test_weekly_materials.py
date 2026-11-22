@@ -692,6 +692,28 @@ def test_verify_weekly_checks_the_output_and_renders_the_body(tmp_path, conn):
     assert "> **今週の観測**：1 件" in body
     assert "不正なテーマ" not in body
 
+    # 取得できなかった情報源は、週次でも unavailable.json から本文の末尾に出る
+    (run_dir / "unavailable.json").write_text(
+        json.dumps([{"source_id": "rss:a", "category": "timeout"}]), encoding="utf-8"
+    )
+    again = verify_weekly(CONFIG, WEEK, "20261026-070000-abcd", run_dir, output, conn)
+    assert again.report.body.rstrip().endswith("## 取得できなかった情報源\n\n- A：タイムアウト")
+
     # 出力全体がスキーマに合わなければ ValueError（呼ぶ側が不合格にする）
     with pytest.raises(ValueError):
         verify_weekly(CONFIG, WEEK, "20261026-070000-abcd", run_dir, {"themes": []}, conn)
+
+
+def test_weekly_collect_writes_unavailable_sources_for_the_body(tmp_path, conn):
+    def failing(feed, limits, **_):
+        return SourceResult("rss:a", (), 0, error="接続の失敗", error_category="network")
+
+    run_dir = tmp_path / "fail"
+    run_dir.mkdir()
+    start_run(conn, "20261026-070000-fail", WEEK, STARTED)
+    log = RunLog(run_dir / "log.jsonl", "20261026-070000-fail", "weekly", WEEK.key, SecretScanner())
+    run_collect(
+        CONFIG, WEEK, run_dir, log, collectors=Collectors(feed=failing), db=conn, write_db=True
+    )
+    found = json.loads((run_dir / "unavailable.json").read_text("utf-8"))
+    assert [(e["source_id"], e["category"]) for e in found] == [("rss:a", "network")]

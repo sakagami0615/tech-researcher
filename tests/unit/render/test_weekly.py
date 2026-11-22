@@ -278,3 +278,10 @@ def test_theme_sources_count_every_source_of_an_item_toward_the_limit():
     body = render_weekly(TARGET, RUN, output, items, NAMES, WINDOW, 4).body
     line = next(ln for ln in body.splitlines() if ln.startswith("- **主な出典"))
     assert line.count("](") == 5  # 1項目の4出典 + 次の項目の1出典
+
+
+def test_fading_theme_with_this_week_items_uses_the_plain_source_label():
+    t = theme("沈静", "fading", item_ids=("i3",), past_ids=("i90",))
+    fading = section(render([t]).body, "注目が落ち着いたテーマ")
+    assert "- **主な出典**：[公式ブログ（example.com）](https://example.com/3)" in fading
+    assert "最後に観測" not in fading

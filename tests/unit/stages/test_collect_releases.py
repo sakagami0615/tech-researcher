@@ -222,7 +222,7 @@ def test_production_item_ids_come_from_items_and_dry_run_reuses_them(tmp_path):
     ro.close()
 
 
-def test_weekly_writes_item_ids_but_not_daily_only_files(tmp_path):
+def test_weekly_writes_item_ids_and_unavailable_but_not_the_unjudged_note(tmp_path):
     weekly = weekly_target(date(2026, 10, 26), 7)
     run_collect(
         replace(CONFIG, feeds=(feed("a"),)),
@@ -232,7 +232,8 @@ def test_weekly_writes_item_ids_but_not_daily_only_files(tmp_path):
         collectors=all_collectors([]),
     )
     assert (tmp_path / ITEM_IDS).exists()
-    assert not (tmp_path / UNAVAILABLE).exists()
+    assert json.loads((tmp_path / UNAVAILABLE).read_text(encoding="utf-8")) == []
+    assert not (tmp_path / "unjudged.json").exists()  # 判定しなかった急上昇は日次のヘッダだけ
 
 
 def test_one_github_client_is_shared_so_the_rest_limit_counts_everything(tmp_path):

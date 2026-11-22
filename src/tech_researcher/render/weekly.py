@@ -215,7 +215,9 @@ def _theme(
         comparison = f"{sanitize_text(theme.comparison)}（{numbers}）"
     else:
         comparison = NO_PAST  # 比べる過去がないので、AI の比較の文は使わない
-    source_label = "主な出典（最後に観測した記事）" if theme.status == "fading" else "主な出典"
+    # 今週の観測がなく、過去の観測から出すときだけ「最後に観測した記事」と書く
+    last_observed = theme.status == "fading" and not theme.item_ids
+    source_label = "主な出典（最後に観測した記事）" if last_observed else "主な出典"
     return "\n".join(
         [
             f"### {sanitize_text(theme.name)}",

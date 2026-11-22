@@ -353,8 +353,9 @@ def run_collect(
     unjudged_star = github is not None and github.star_unjudged and not github.fetch.failed
     if target.cadence == "daily":
         _write_unjudged(run_dir, judged.unjudged, unjudged_star)
-        _write_json(run_dir / UNAVAILABLE, unavailable_sources(fetches))
-        _write_json(run_dir / FETCHES, fetch_entries(fetches))
+    # 取得できなかった情報源は週次の本文の末尾にも出す（report-templates.md 2.4）
+    _write_json(run_dir / UNAVAILABLE, unavailable_sources(fetches))
+    _write_json(run_dir / FETCHES, fetch_entries(fetches))
     _write_item_ids(run_dir, items, refs)
     log.write("collect", "end", count=len(items))
     failed = [r.source_id for r in results if r.error]
@@ -401,7 +402,7 @@ def _weekly_star_spikes(
         settings,
         period_star_gains(db, first, end),
         latest_star_snapshots(db, first, end),
-        featured_urls(db),
+        featured_urls(db, target.key),  # 日次と同じく、対象より前の日次レポートだけを数える
     )
 
 
