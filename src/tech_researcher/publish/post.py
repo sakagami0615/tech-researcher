@@ -41,7 +41,13 @@ from tech_researcher.db.meta import check_issue_repo, record_issue_repo
 from tech_researcher.db.runs import CATEGORY, finish_run
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
-from tech_researcher.publish.dedup import Create, Existing, Skipped, check_duplicate_from_env
+from tech_researcher.publish.dedup import (
+    Create,
+    Existing,
+    RecordError,
+    Skipped,
+    check_duplicate_from_env,
+)
 from tech_researcher.publish.github_issues import (
     IssueReader,
     IssueReadError,
@@ -81,6 +87,10 @@ EXISTING = (
 BLOCKED = "blocked"  # 秘匿情報を検出して公開を止めた（定型を作った、または記録だけ）
 FAILED = "failed"  # 作れなかった
 RESULTS = frozenset({CREATED, EXISTING, BLOCKED, FAILED})
+
+
+class NeedsReview(Exception):
+    """同じ対象のレポートが作られたか分からない記録（uncertain）がある。運用者が確かめる。"""
 
 
 class BadIssue(Exception):
@@ -174,6 +184,8 @@ class Poster:
         （cli）で段階の失敗にする。
         """
         self.log.write("post", "start")
+        if stopped is not None and kind == RUN_ERROR_SECRET:
+            self._record_blocked(stopped)  # 準備の失敗より前に、公開を止めた事実を残す
         try:
             self.repo = issue_repo(self.environ)
             self.writer = self.make_writer(
@@ -183,14 +195,15 @@ class Poster:
             check_issue_repo(self.conn, self.repo)
         except (IssueReadError, IssueWriteError, ConfigError) as e:
             return self._stop(kind, _category(e, "config"))
+        except sqlite3.Error as e:
+            self.log.write("post", "failure", error_category="db_error", exc=e)
+            return self._stop(kind, "db_error")
         try:
             report = parse_issue((self.run_dir / ISSUE).read_text(encoding="utf-8"))
             check_report(report, kind, self.target, self.run_id)
         except (OSError, UnicodeDecodeError, BadIssue) as e:
             self.log.write("post", "failure", error_category="bad_issue", exc=e)
             return self._stop(kind, "bad_issue")
-        if stopped is not None and kind == RUN_ERROR_SECRET:
-            self._record_blocked(stopped)
         found = self._secret_kinds(report)
         if found is None:
             return self._post(kind, report)
@@ -228,9 +241,18 @@ class Poster:
             found = self._create(kind, report)
         except IssueReadError as e:
             return self._write_failed(kind, _category(e, "read_failed", prefix="dedup_"), close)
+        except RecordError as e:  # 見つけたが、DB に記録できなかった
+            self.log.write("post", "failure", error_category="issue_record_failed", exc=e.__cause__)
+            if close:
+                self._close("failed", "issue_record_failed")
+            return _result(FAILED, kind, ref=e.ref, error_category="issue_record_failed")
+        except NeedsReview:
+            self.log.write("post", "failure", error_category="needs_review")
+            return self._write_failed(kind, "needs_review", close)
         except IssueWriteError as e:
             self.log.write("post", "failure", error_category=e.category, detail=str(e))
-            return self._write_failed(kind, _category(e, "write_failed"), close)
+            state = "uncertain" if kind == REPORT and e.category == "invalid_response" else "failed"
+            return self._write_failed(kind, _category(e, "write_failed"), close, state)
         except (sqlite3.Error, OSError) as e:
             self.log.write("post", "failure", error_category="db_error", exc=e)
             return self._write_failed(kind, "db_error", close)
@@ -285,10 +307,11 @@ class Poster:
         return _result(EXISTING, kind, ref=ref)
 
     def _record_repo(self, ref: IssueRef, via: str) -> None:
-        """設定の投稿先を meta に記録し、記録されたことを読み直して確かめる。転送された Issue
-        以外で、Issue の repo が設定の投稿先と違えば、記録しない（失敗にする）。"""
-        if ref.repo.lower() != self.repo and via != "transferred":
-            raise ValueError("Issue の repo が設定の投稿先と違う")
+        """設定の投稿先を meta に記録し、記録されたことを読み直して確かめる。作った Issue の repo が
+        設定の投稿先と違えば失敗にする。見つけた Issue（db・labels・transferred）は、転送で別の
+        リポジトリにあってよいので、repo は比べない。"""
+        if via == "created" and ref.repo.lower() != self.repo:
+            raise ValueError("作った Issue の repo が設定の投稿先と違う")
         record_issue_repo(self.conn, self.repo)
         row = self.conn.execute("SELECT value FROM meta WHERE key = 'issue_repo'").fetchone()
         if row is None or row[0] != self.repo:
@@ -345,16 +368,27 @@ class Poster:
             clock=self.clock,
         )
         assert not isinstance(decision, Skipped)  # 本番は Skipped にならない
+        if isinstance(decision, Create) and self._uncertain():
+            raise NeedsReview  # 作られたか分からない記録がある。自動で作り直さない（4.3）
         return decision
 
-    def _write_failed(self, kind: str, category: str, close: bool) -> dict:
-        """作れなかった。issues に failed を記録し、runs を failed（post）で閉じる。"""
-        self._record_failed(kind)
+    def _uncertain(self) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM issues WHERE kind = 'report' AND state = 'uncertain'"
+            " AND cadence = ? AND target = ? AND run_id != ?",
+            (self.target.cadence, self.target.key.isoformat(), self.run_id),
+        ).fetchone()
+        return row is not None
+
+    def _write_failed(self, kind: str, category: str, close: bool, state: str = "failed") -> dict:
+        """作れなかった。issues に failed（作成の結果が分からないときは uncertain）を記録し、runs を
+        failed（post）で閉じる。"""
+        self._record_failed(kind, state)
         if close:
             self._close("failed", category)
         return _result(FAILED, kind, error_category=category)
 
-    def _record_failed(self, kind: str) -> None:
+    def _record_failed(self, kind: str, state: str = "failed") -> None:
         try:
             record_issue(
                 self.conn,
@@ -362,7 +396,7 @@ class Poster:
                 kind,
                 self.target.cadence,
                 self.target.key,
-                "failed",
+                state,
                 self.now,
             )
         except Exception as e:

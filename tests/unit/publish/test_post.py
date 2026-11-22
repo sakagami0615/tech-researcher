@@ -1,6 +1,7 @@
 """⑤ 投稿（publish/post.py）。GitHub は偽物、DB と issue.md は本物。"""
 
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -619,8 +620,13 @@ def test_existing_issue_is_not_a_success_until_the_destination_is_recorded(
     env.conn.execute("DELETE FROM meta")  # 記録に失敗した後の状態
     result = env.post("report", run=RETRY)
 
-    assert (result["result"], result["error_category"]) == ("failed", "db_error")
-    assert env.run_row(RETRY)[:3] == ("failed", "post", "db_error")
+    # 重複判定の中の記録の失敗も、見つけた Issue の番号を結果に載せる
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "issue_record_failed",
+        100,
+    )
+    assert env.run_row(RETRY)[:3] == ("failed", "post", "issue_record_failed")
 
 
 def test_destination_is_recorded_when_returning_to_an_existing_issue(env, github):
@@ -630,17 +636,6 @@ def test_destination_is_recorded_when_returning_to_an_existing_issue(env, github
 
     assert result["result"] == "existing"
     assert env.conn.execute("SELECT value FROM meta").fetchall() == [(REPO,)]
-
-
-def test_config_change_after_a_failed_record_does_not_record_the_new_destination(env, github):
-    """記録に失敗した後に設定が変わっても、別のリポジトリの Issue を投稿先として記録しない。"""
-    env.post("report")
-    env.conn.execute("DELETE FROM meta")
-    env.environ["GITHUB_ISSUE_REPO"] = "other/prod"
-    result = env.post("report", run=RETRY)
-
-    assert (result["result"], result["error_category"]) == ("failed", "issue_record_failed")
-    assert env.conn.execute("SELECT value FROM meta").fetchall() == []
 
 
 def test_same_run_failure_issue_also_records_the_destination(env, github):
@@ -669,3 +664,104 @@ def test_dedup_reader_gets_the_deadline_and_clock(env, github):
     env.post("report", deadline=42.0)
     assert github.reader_args[0]["deadline"] == 42.0
     assert github.reader_args[0]["clock"] is env.clock
+
+
+# --- 転送された Issue（PR #99 の2回目の確認）---
+
+
+def test_transferred_issue_keeps_being_found_on_later_runs(env, github):
+    """作る → 別のリポジトリへ転送 → 次の実行が 301 をたどる → さらに次の実行、でも毎回成功する。"""
+    third = "20261024-090000-4567"
+    start_run(env.conn, third, TARGET, AT)
+    env.post("report")
+    moved = IssueRef("other/dest", 9)
+
+    class Reader(FakeReader):
+        def get_issue(self, repo, number):
+            if (repo, number) == (REPO, 100):
+                return IssueLookup(moved, transferred=True)
+            if (repo, number) == (moved.repo, moved.number):
+                return IssueLookup(moved)
+            return super().get_issue(repo, number)
+
+    github.make_reader = lambda token, limits, **kw: Reader(github)
+    second = env.post("report", run=RETRY)
+    assert (second["result"], second["repo"], second["number"]) == ("existing", "other/dest", 9)
+    later = env.post("report", run=third)
+    assert (later["result"], later["repo"], later["number"]) == ("existing", "other/dest", 9)
+    assert len(github.created) == 1
+    assert env.run_row(third)[0] == "succeeded"
+
+
+# --- 準備の失敗（PR #99 の2回目の確認）---
+
+
+def test_stopped_kind_is_recorded_even_when_preparation_fails(env, github):
+    env.environ["GITHUB_ISSUE_TOKEN"] = ""
+    env.write(other_for("run_error_secret"))
+    result = env.poster().run("run_error_secret", "report")
+
+    assert result["error_category"] == "auth"
+    assert [row[1:3] for row in env.issue_rows()] == [
+        ("report", "blocked_secret"),
+        ("run_error_secret", "failed"),
+    ]
+
+
+def test_sqlite_error_while_checking_the_destination_is_a_db_error(env, github, monkeypatch):
+    def broken(conn, repo):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr("tech_researcher.publish.post.check_issue_repo", broken)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "db_error")
+    assert env.run_row()[:3] == ("failed", "post", "db_error")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "failed")]
+
+
+# --- 作られたか分からないレポート（uncertain）---
+
+
+def test_unreadable_creation_without_a_found_issue_is_recorded_as_uncertain(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "invalid_response")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_next_run_does_not_recreate_when_an_uncertain_record_exists(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    env.post("report")
+    result = env.post("report", run=RETRY)
+
+    assert (result["result"], result["error_category"]) == ("failed", "needs_review")
+    assert github.created == []  # 自動で作り直さない
+    assert env.run_row(RETRY)[:3] == ("failed", "post", "needs_review")
+    assert [row[:3] for row in env.issue_rows()] == [
+        (RUN, "report", "uncertain"),
+        (RETRY, "report", "failed"),
+    ]
+
+
+def test_uncertain_record_does_not_block_when_the_issue_is_found(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    env.post("report")
+    github.created.append(  # 運用者がラベルを戻した、など
+        {
+            "repo": REPO,
+            "title": "t",
+            "body": report_for(RUN).body,
+            "labels": LABELS["report"],
+            "number": 8,
+        }
+    )
+    assert env.post("report", run=RETRY)["result"] == "existing"
+
+
+def test_operator_can_release_by_deleting_the_uncertain_record(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    env.post("report")
+    env.conn.execute("DELETE FROM issues WHERE state = 'uncertain'")  # 確かめて、作られていなかった
+    assert env.post("report", run=RETRY)["result"] == "created"

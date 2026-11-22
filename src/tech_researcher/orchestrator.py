@@ -607,6 +607,7 @@ def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
         failed_stage="post",
         error_category=posted["error_category"] or "post_failed",
         issue_url=posted["issue_url"],
+        issue_post_failed=posted["write_error"],
         **fields,
     )
 

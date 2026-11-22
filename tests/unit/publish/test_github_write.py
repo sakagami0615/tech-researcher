@@ -1,4 +1,5 @@
 import json
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
@@ -50,6 +51,14 @@ def created(number=7, repo=REPO, labels=LABELS, status=201, **extra):
 def writer(limits, *outcomes):
     fake = FakeFetch(*outcomes)
     return IssueWriter(TOKEN, limits, fetch_url=fake), fake
+
+
+def _refused(direct=False):
+    """接続の拒否（原因の鎖：FetchError → 再試行の印 → URLError → reason）。"""
+    refused = ConnectionRefusedError("x")
+    e = FetchError("再試行を使い切った：x", 1, None)
+    e.__cause__ = refused if direct else urllib.error.URLError(refused)
+    return e
 
 
 def error(status, **headers):
@@ -114,7 +123,8 @@ def test_failures_are_classified(limits, failure, category, retryable):
     [
         (FetchError("t", 0, None, category="timeout"), True),  # 時間の上限のため送らなかった
         (FetchError("再試行を使い切った：gaierror", 1, None), False),
-        (FetchError("URLError: ConnectionRefusedError: x", 1, None), True),
+        (_refused(), True),
+        (_refused(direct=True), True),
         (FetchError("t", 1, None, category="timeout"), False),  # 応答の読み取りのタイムアウト
         (FetchError("reset", 1, None), False),
         (error(503), False),

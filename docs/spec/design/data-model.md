@@ -346,7 +346,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `run_id` | TEXT | どの実行で作ろうとしたか |
 | `kind` | TEXT | `report`・`rejected`・`run_error`・`run_error_secret`（秘匿情報検出の定型） |
 | `cadence`・`target` | TEXT | 重複判定に使う |
-| `state` | TEXT | `created`・`blocked_secret`（検査で公開を止めた）・`failed`（GitHub に登録できなかった） |
+| `state` | TEXT | `created`・`blocked_secret`（検査で公開を止めた）・`failed`（GitHub に登録できなかった）・`uncertain`（作成の応答が読めず、Issue が作られたか分からない。運用者が確かめる。report-templates.md 4.3） |
 | `repo`・`number` | TEXT・INTEGER | 作った Issue（`created` のときだけ）。転送（HTTP 301）されていたら転送先で更新する（report-templates.md 4.3） |
 | `created_at` | TEXT | |
 | `projects_state` | TEXT | `pending`・`done`・`issue_missing`（登録しようとした Issue が見つからない。report-templates.md 4.4）。`created` 以外は空 |

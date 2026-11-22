@@ -17,6 +17,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -31,6 +32,23 @@ from tech_researcher.publish.github_issues import (
     issue_repo,
     issue_token,
 )
+
+
+class RecordError(Exception):
+    """同じ対象の Issue は見つかったが、DB への記録に失敗した。ref は見つけた Issue。"""
+
+    def __init__(self, ref: IssueRef):
+        super().__init__("DB への記録に失敗した")
+        self.ref = ref
+
+
+@contextmanager
+def _recording(ref: IssueRef):
+    """DB の書き込みの失敗に、見つけた ref を載せる（呼び出し側が結果に出せるように）。"""
+    try:
+        yield
+    except (sqlite3.Error, OSError) as e:
+        raise RecordError(ref) from e
 
 
 @dataclass(frozen=True)
@@ -113,12 +131,14 @@ def check_duplicate(
             found = reader.get_issue(row.repo, row.number)
             if found.ref is not None and not found.transferred:
                 if not dry_run and row.repo.lower() == repo:
-                    record_issue_repo(conn, repo)
+                    with _recording(found.ref):
+                        record_issue_repo(conn, repo)
                 return Existing(found.ref, "db")
             if found.ref is not None:
                 if not dry_run:
-                    _record(conn, run_id, run_id, cadence, target, at, found.ref, "transfer")
-                    record_issue_repo(conn, repo)
+                    with _recording(found.ref):
+                        _record(conn, run_id, run_id, cadence, target, at, found.ref, "transfer")
+                        record_issue_repo(conn, repo)
                 return Existing(found.ref, "transferred")
         stale = True  # 410・404。2 で確かめ直す
     return _search(conn, reader, repo, run_id, cadence, target, at, dry_run, stale)
@@ -143,9 +163,12 @@ def _search(
         ref = IssueRef(repo, listed.number)
         if not dry_run and conn is not None:
             # 本文を投稿した実行（識別子の run）がこの対象にあれば、その実行の記録として補う
-            owner = marker.run_id if _is_run_of(conn, marker.run_id, cadence, target) else run_id
-            _record(conn, run_id, owner, cadence, target, at, ref, "recreate")
-            record_issue_repo(conn, repo)
+            with _recording(ref):
+                owner = (
+                    marker.run_id if _is_run_of(conn, marker.run_id, cadence, target) else run_id
+                )
+                _record(conn, run_id, owner, cadence, target, at, ref, "recreate")
+                record_issue_repo(conn, repo)
         return Existing(ref, "labels")
     return Create("recreate" if stale else None)
 

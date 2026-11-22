@@ -155,7 +155,16 @@ def _unsent(error: FetchError, category: str) -> bool:
     タイムアウト・送った後の通信の失敗・5xx は、作られていることがあるので含めない。"""
     if error.attempts == 0 or category in (DNS, RATE_LIMITED):
         return True
-    return "ConnectionRefusedError" in str(error)
+    cause: BaseException | None = error
+    for _ in range(8):  # 原因の鎖（FetchError → 再試行の印 → URLError → reason）をたどる
+        if cause is None:
+            break
+        if isinstance(cause, ConnectionRefusedError) or isinstance(
+            getattr(cause, "reason", None), ConnectionRefusedError
+        ):
+            return True
+        cause = cause.__cause__
+    return False
 
 
 def _retry_after(headers: Mapping[str, str]) -> float | None:

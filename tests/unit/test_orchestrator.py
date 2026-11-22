@@ -792,6 +792,20 @@ def test_failed_failure_issue_keeps_the_result_and_reports_issue_post_failed(
     assert summary["issue_url"] is None and summary["issue_post_failed"] == failed
 
 
+def test_report_blocked_with_a_failed_notice_reports_the_write_error(host, capfd):
+    post = {
+        "result": "failed",
+        "kind": "run_error_secret",
+        "error_category": "secret_detected",
+        "write_error": "http_4xx",
+    }
+    host.behave("ok", lock="daily", post=post)
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("post", "secret_detected")
+    assert summary["issue_post_failed"] == "http_4xx"
+
+
 def test_dry_run_never_posts(host, capfd):
     host.behave("ok", lock="daily-dry-run")
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0

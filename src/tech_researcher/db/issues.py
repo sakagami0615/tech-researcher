@@ -13,7 +13,8 @@ from tech_researcher.db.runs import CADENCES, check_run_target, check_writable_r
 from tech_researcher.db.schema import transaction
 
 KINDS = frozenset({"report", "rejected", "run_error", "run_error_secret"})
-STATES = frozenset({"created", "blocked_secret", "failed"})
+# uncertain：作成の応答が読めず、Issue が作られたか分からない（運用者が確かめる。4.3）
+STATES = frozenset({"created", "blocked_secret", "failed", "uncertain"})
 
 _COLUMNS = (
     "id, run_id, kind, cadence, target, state, repo, number, created_at, projects_state,"
