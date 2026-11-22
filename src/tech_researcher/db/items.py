@@ -138,11 +138,13 @@ def _restore(cadence: str, r: dict) -> ItemRow:
             source_id=s["source_id"],
             url=s["url"],
             title=r["title"] if n == 0 else "",
-            published_precision=precision if n == 0 else "unknown",
+            published_precision=_source_precision(s, precision if n == 0 else "unknown"),
             fetched_at=datetime.fromisoformat(s["fetched_at"]),
             events=(),
             excerpt=r["excerpt"] if n == 0 else None,
-            published_at=published_at if n == 0 else None,
+            published_at=_time(s["published_at"])
+            if "published_at" in s
+            else (published_at if n == 0 else None),
             posted_at=_time(s["posted_at"]),
         )
         for n, s in enumerate(json.loads(r["sources_json"]))
@@ -186,6 +188,11 @@ def _restore(cadence: str, r: dict) -> ItemRow:
         posted_at=_time(r["posted_at"]),
         hold_reason=r["hold_reason"],
     )
+
+
+def _source_precision(source: dict, fallback: str) -> str:
+    # 出典ごとの公開日時を持たない古い行は、代表の値を先頭の出典だけに戻す
+    return source.get("published_precision", fallback)
 
 
 def _time(text: str | None) -> datetime | None:
@@ -282,6 +289,8 @@ def _source(r: Record) -> dict:
         "url": r.url,
         "posted_at": _when(r.posted_at),
         "fetched_at": utc_text(r.fetched_at),
+        "published_at": _when(r.published_at),
+        "published_precision": r.published_precision,
     }
 
 

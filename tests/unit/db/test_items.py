@@ -126,19 +126,23 @@ def test_writes_columns(conn):
     assert json.loads(saved["attention_json"]) == [
         {"metric": "hn_points", "value": 120, "measured_at": "2026-10-23T21:00:00Z"}
     ]
-    # 重複判定結果：まとめた元のレコード（情報源・URL・投稿日時・取得日時）
+    # 重複判定結果：まとめた元のレコード（情報源・URL・投稿日時・取得日時・公開日時・精度）
     assert json.loads(saved["sources_json"]) == [
         {
             "source_id": "rss:a",
             "url": "https://example.com/post",
             "posted_at": None,
             "fetched_at": "2026-10-23T21:00:00Z",
+            "published_at": "2026-10-23T03:00:00Z",
+            "published_precision": "datetime",
         },
         {
             "source_id": "hackernews",
             "url": "https://news.ycombinator.com/item?id=1",
             "posted_at": "2026-10-23T05:00:00Z",
             "fetched_at": "2026-10-23T21:00:00Z",
+            "published_at": None,
+            "published_precision": "unknown",
         },
     ]
     # 候補リンクの ID（i…-l1, -l2）の元になるので、順序を保つ

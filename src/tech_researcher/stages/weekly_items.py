@@ -62,7 +62,8 @@ def _merge(target: Target, rows: list[ItemRow]) -> ItemRow:
         meta_terms=_unique((t for i in items for t in i.meta_terms), lambda x: x),
         github=_merge_repo([r.item.github for r in rows]),
     )
-    candidates = [*(r.inclusion for r in ordered), *window_events(item, target)]
+    # 週次の判定の窓に入る出来事から選ぶ。なければ（窓が変わった場合など）日次の行の根拠を使う
+    candidates = window_events(item, target) or [r.inclusion for r in ordered]
     chosen = min(candidates, key=lambda e: (INCLUSION_ORDER[e.type], e.at))
     inclusion = next(e for e in events if _event_key(e) == _event_key(chosen))
     posted = [r.posted_at for r in ordered if r.posted_at is not None]

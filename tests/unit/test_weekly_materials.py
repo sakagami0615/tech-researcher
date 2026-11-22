@@ -375,3 +375,22 @@ def test_merged_repo_uses_the_newest_day_and_all_mentions(conn):
     (row,) = weekly_rows(WEEK, [], load_daily_rows(conn, WEEK))
     assert row.item.github.stars_total == 900
     assert row.item.github.mentioned_by == (Y, X)
+
+
+def test_old_article_reposted_stays_a_spike_after_restoring_the_daily_row(conn):
+    """古い記事（時刻ありの公開）への HN の日付だけの公開・基準超えを、週次の公開にしない。"""
+    day = date(2026, 10, 21)
+    old = rss(X, date(2026, 9, 1), "古い記事")
+    spike = Event("attention_spike", noon(day), "threshold")
+    date_only = replace(
+        hn(day, 300, noon(day)),
+        published_precision="date",
+        published_at=datetime(2026, 10, 21, tzinfo=UTC),
+        events=(Event("published", datetime(2026, 10, 21, tzinfo=UTC)), spike),
+    )
+    item = item_of(old, date_only)
+    store_daily(conn, day, item)
+    (row,) = weekly_rows(WEEK, [], load_daily_rows(conn, WEEK))
+    assert row.inclusion.type == "attention_spike"
+    data = build_weekly_input(WEEK, [InputItem("i1", row.item)], {"rss:a": "A", "hackernews": "HN"})
+    assert data["items"][0]["event"] == {"type": "attention_spike"}
