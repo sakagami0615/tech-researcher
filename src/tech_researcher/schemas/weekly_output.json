@@ -1,0 +1,85 @@
+{
+  "title": "週次 ② 評価・要約の出力（data-model.md 4.3）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["themes", "tech_changes", "comparisons", "watch"],
+  "properties": {
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "theme_id",
+          "name",
+          "status",
+          "change",
+          "comparison",
+          "item_ids",
+          "past_ids"
+        ],
+        "properties": {
+          "theme_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+          "name": {"type": "string"},
+          "status": {"type": "string", "enum": ["rising", "steady", "fading"]},
+          "change": {"type": "string"},
+          "comparison": {"type": "string"},
+          "item_ids": {"type": "array", "items": {"type": "string"}},
+          "past_ids": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "tech_changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["headline", "description", "item_ids"],
+        "properties": {
+          "headline": {"type": "string"},
+          "description": {"type": "string"},
+          "item_ids": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "comparisons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["domain", "rows", "summary"],
+        "properties": {
+          "domain": {"type": "string"},
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["item_id", "product_name", "feature", "use_case"],
+              "properties": {
+                "item_id": {"type": "string"},
+                "product_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "feature": {"type": "string"},
+                "use_case": {"type": "string"}
+              }
+            }
+          },
+          "summary": {"type": "string"}
+        }
+      }
+    },
+    "watch": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "reason", "item_ids"],
+        "properties": {
+          "name": {"type": "string"},
+          "reason": {"type": "string"},
+          "item_ids": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

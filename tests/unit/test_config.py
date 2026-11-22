@@ -83,6 +83,7 @@ def test_repository_config_loads():
     config = load_config(CONFIG_PATH)
     assert config.daily_period_days == 1
     assert config.weekly_period_days == 7
+    assert config.weekly_compare_weeks == 4
     assert {f.id: f.kind for f in config.feeds} == {
         **dict.fromkeys(OFFICIAL_FEEDS, "new"),
         **dict.fromkeys(["zenn-llm", "zenn-ai", "zenn-aws"], "new"),
@@ -191,6 +192,8 @@ def test_last30days_topic_is_read(base):
         lambda d: d["daily"].update(period_days="1"),
         lambda d: d["daily"].update(period_days=0),
         lambda d: d["weekly"].update(period_days=True),
+        lambda d: d["weekly"].update(compare_weeks=0),
+        lambda d: d["weekly"].update(compare_weeks=True),
         lambda d: d["sources"]["qiita"].update(enabled="yes"),
         lambda d: d["sources"]["qiita"].update(tags="LLM"),
         lambda d: d["sources"]["github_repos"].update(report_top_n=0),
@@ -510,3 +513,10 @@ def test_invalid_quote_limits_are_rejected(base, quote):
     data["quote"] = quote
     with pytest.raises(ConfigError):
         parse_config(data)
+
+
+def test_weekly_compare_weeks_is_configurable_and_defaults_to_four(base):
+    base["weekly"].update(compare_weeks=6)
+    assert parse_config(base).weekly_compare_weeks == 6
+    del base["weekly"]["compare_weeks"]
+    assert parse_config(base).weekly_compare_weeks == 4

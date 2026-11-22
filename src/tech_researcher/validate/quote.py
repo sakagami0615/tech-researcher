@@ -107,7 +107,7 @@ class Quote:
 
 
 @dataclass(frozen=True)
-class _Prepared:
+class Prepared:
     """正規化して語句を伏せた元のテキスト。1回だけ作って、出力のすべての欄との比較に使う。
 
     texts は、幅の狭い空白を取り除いた形と、普通の空白にした形（出力の同じ形と組にして比べる）。
@@ -179,7 +179,7 @@ def longest_quote(output: str, sources: Sequence[QuoteSource], limits: QuoteLimi
     return _compare(_base(output), _prepare(sources), limits)
 
 
-def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
+def _prepare(sources: Sequence[QuoteSource]) -> list[Prepared]:
     compiled: dict[tuple[str, ...], _Terms] = {}
     prepared = []
     for source in sources:
@@ -187,7 +187,7 @@ def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
         if key not in compiled:
             compiled[key] = _terms(key)
         texts = _forms(_base(source.text), compiled[key])
-        prepared.append(_Prepared(texts, source.primary, compiled[key], key))
+        prepared.append(Prepared(texts, source.primary, compiled[key], key))
     return prepared
 
 
@@ -198,7 +198,7 @@ def _prepare(sources: Sequence[QuoteSource]) -> list[_Prepared]:
 _PAIRS = ((0, 0), (1, 1), (0, 1))
 
 
-def _compare(output: str, sources: Sequence[_Prepared], limits: QuoteLimits) -> Quote | None:
+def _compare(output: str, sources: Sequence[Prepared], limits: QuoteLimits) -> Quote | None:
     """正規化の途中の形（_base）の出力を、用意した元のテキストすべてと比べ、最も長く違反した
     一致を返す。
 
@@ -358,14 +358,7 @@ def check_daily_quotes(
     AI が見ていない範囲はなぞれないので、渡した範囲だけで足りる（data-model.md 2.7）。
     meta_terms は item_id から語句への対応で、語句はその項目の元のテキストとの比較にだけ使う。
     """
-    sources: list[QuoteSource] = []
-    for item in data["items"]:
-        untrusted = item.get("untrusted", {})
-        terms = tuple(meta_terms.get(item["id"], ()))
-        texts = [(untrusted.get(k), False) for k in ("title", "excerpt")]
-        texts.append((untrusted.get("primary_text"), True))
-        sources += [QuoteSource(t, primary, terms) for t, primary in texts if t]
-    prepared = _prepare(sources)
+    prepared = quote_sources(data, meta_terms)
     kept: list[DailyEntry] = []
     excluded: list[Excluded] = []
     for entry in entries:
@@ -377,27 +370,56 @@ def check_daily_quotes(
     return kept, excluded
 
 
+def quote_sources(data: dict, meta_terms: Mapping[str, Sequence[str]]) -> list[Prepared]:
+    """D4 で出力と比べる元のテキスト（正規化済み）。AI に渡した入力 data のすべての観測のもの。
+
+    items の untrusted（title・excerpt・primary_text。週次は primary_text なし）と、週次の
+    past_observations の title。語句（meta_terms）は、その項目の元のテキストにだけ使う。
+    """
+    sources: list[QuoteSource] = []
+    for item in data["items"]:
+        untrusted = item.get("untrusted", {})
+        terms = tuple(meta_terms.get(item["id"], ()))
+        texts = [(untrusted.get(k), False) for k in ("title", "excerpt")]
+        texts.append((untrusted.get("primary_text"), True))
+        sources += [QuoteSource(t, primary, terms) for t, primary in texts if t]
+    for past in data.get("past_observations", ()):
+        title = past.get("untrusted", {}).get("title")
+        if title:
+            sources.append(QuoteSource(title))
+    return _prepare(sources)
+
+
 def meta_terms_by_id(items: Mapping[str, Item]) -> dict[str, tuple[str, ...]]:
     """項目 ID ごとの meta_terms（まとめた全レコードの語句。Item が持つ）。"""
     return {item_id: item.meta_terms for item_id, item in items.items()}
 
 
-def _violation(entry: DailyEntry, sources: Sequence[_Prepared], limits: QuoteLimits) -> str | None:
+def _violation(entry: DailyEntry, sources: Sequence[Prepared], limits: QuoteLimits) -> str | None:
     for text in (entry.headline, *entry.points, entry.importance, entry.period_event):
-        if not text:
-            continue
-        quote = _compare(_base(text), sources, limits)
-        if quote is not None and quote.unchecked:
-            return "同じ部分が元のテキストに多数あり、調べきれないため除外"
-        if quote is not None and quote.violates:
-            origin = "一次情報の本文" if quote.primary else "タイトル・抜粋"
-            if quote.partial:
-                return (
-                    f"{origin}との共通部分の長さ（日本語は2倍）が少なくとも {quote.weight} で、"
-                    f"上限 {quote.limit} を超えた（同じ部分が多く、途中で調べきれなかった）"
-                )
+        if reason := quote_violation(text, sources, limits):
+            return reason
+    return None
+
+
+def quote_violation(
+    text: str | None, sources: Sequence[Prepared], limits: QuoteLimits
+) -> str | None:
+    """1つの文章が元のテキストの長い引用になっていれば、除外の理由を返す。"""
+    if not text:
+        return None
+    quote = _compare(_base(text), sources, limits)
+    if quote is not None and quote.unchecked:
+        return "同じ部分が元のテキストに多数あり、調べきれないため除外"
+    if quote is not None and quote.violates:
+        origin = "一次情報の本文" if quote.primary else "タイトル・抜粋"
+        if quote.partial:
             return (
-                f"{origin}との共通部分の長さ（日本語は2倍）が {quote.weight} で、"
-                f"上限 {quote.limit} を超えた"
+                f"{origin}との共通部分の長さ（日本語は2倍）が少なくとも {quote.weight} で、"
+                f"上限 {quote.limit} を超えた（同じ部分が多く、途中で調べきれなかった）"
             )
+        return (
+            f"{origin}との共通部分の長さ（日本語は2倍）が {quote.weight} で、"
+            f"上限 {quote.limit} を超えた"
+        )
     return None

@@ -222,7 +222,7 @@ def test_production_item_ids_come_from_items_and_dry_run_reuses_them(tmp_path):
     ro.close()
 
 
-def test_weekly_writes_no_item_ids(tmp_path):
+def test_weekly_writes_item_ids_but_not_daily_only_files(tmp_path):
     weekly = weekly_target(date(2026, 10, 26), 7)
     run_collect(
         replace(CONFIG, feeds=(feed("a"),)),
@@ -231,7 +231,7 @@ def test_weekly_writes_no_item_ids(tmp_path):
         prod_log(tmp_path, target=weekly),
         collectors=all_collectors([]),
     )
-    assert not (tmp_path / ITEM_IDS).exists()
+    assert (tmp_path / ITEM_IDS).exists()
     assert not (tmp_path / UNAVAILABLE).exists()
 
 

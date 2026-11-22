@@ -153,18 +153,20 @@ def save_collect(
     fetches: Sequence[SourceFetch],
     items: Sequence[Item],
     holds: Mapping[str, str] = {},
+    rows: Sequence[ItemRow] | None = None,
 ) -> list[str]:
     """取得結果と収集項目を書き、項目の ID（i…）を items の順で返す。
 
     holds は項目の URL → AI に渡さない理由（hold_reason）。
 
-    runs の開始の行（start_run）は先に書いておく。items は日次だけ書く（週次の items は、日次の
-    items と合わせて作る週次の材料の Issue（#44）で書く。それまでは書かない）。
+    runs の開始の行（start_run）は先に書いておく。日次は items を項目から作る。週次は、日次の
+    items と合わせてまとめた材料（stages/weekly_items.py。3.8）を rows で渡す（渡さなければ
+    取得結果だけを書く）。
     """
     for fetch in fetches:
         record_source_fetch(conn, run_id, fetch)
-    if target.cadence != "daily":
-        return []
+    if target.cadence == "weekly":
+        return upsert_items(conn, run_id, rows) if rows is not None else []
     return upsert_items(
         conn, run_id, [item_row(item, target, holds.get(item.url)) for item in items]
     )
