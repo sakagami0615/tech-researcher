@@ -11,6 +11,7 @@
 
 import os
 import re
+import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -23,7 +24,7 @@ from tech_researcher.collect.github_api import (
     classify,
     load_json,
 )
-from tech_researcher.collect.http import FetchError, Response, fetch
+from tech_researcher.collect.http import FetchError, Response, fetch, time_limit
 from tech_researcher.config import GITHUB_REPO_NAME, Limits
 
 TOKEN_ENV = "GITHUB_ISSUE_TOKEN"
@@ -134,6 +135,8 @@ class IssueReader:
         limits: Limits,
         *,
         fetch_url: Callable[..., Response] = fetch,
+        deadline: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         if not TOKEN_FORMAT.fullmatch(token):
             raise IssueReadError("トークンに使えない文字が含まれる", "auth")
@@ -144,6 +147,9 @@ class IssueReader:
         }
         self._limits = limits
         self._fetch = fetch_url
+        # 要求を出してよい時間の上限（clock の値。⑤ の段階の上限。structure.md 6.4）
+        self._deadline = deadline
+        self._clock = clock
 
     def __repr__(self) -> str:  # トークンを repr に出さない
         return "IssueReader()"
@@ -229,7 +235,13 @@ class IssueReader:
         raise IssueReadError(f"ラベル付きの Issue が {MAX_PAGES} ページを超えた", "too_many")
 
     def _get(self, url: str) -> Response:
-        return self._fetch(url, self._limits, headers=self._headers, follow_redirects=False)
+        return self._fetch(
+            url,
+            self._limits,
+            headers=self._headers,
+            follow_redirects=False,
+            **time_limit(self._deadline, self._clock),
+        )
 
 
 def _same_repo(url: str, repo: str, repository_url) -> bool:

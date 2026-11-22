@@ -306,6 +306,8 @@ class Poster:
             self.now,
             environ=self.environ,
             make_reader=self.make_reader,
+            deadline=self.deadline,
+            clock=self.clock,
         )
         assert not isinstance(decision, Skipped)  # 本番は Skipped にならない
         return decision

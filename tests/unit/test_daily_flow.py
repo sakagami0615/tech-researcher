@@ -78,7 +78,7 @@ class FakeGitHub:
 
         return Writer()
 
-    def reader(self, token, limits):
+    def reader(self, token, limits, **kw):
         github = self
 
         class Reader:

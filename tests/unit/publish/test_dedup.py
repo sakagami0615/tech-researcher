@@ -262,7 +262,7 @@ def test_dry_run_without_issue_token_or_repo_is_skipped(conn, drop):
         AT,
         dry_run=True,
         environ=env,
-        make_reader=lambda *a: made.append(a),
+        make_reader=lambda *a, **kw: made.append(a),
     )
     assert got == Skipped(drop)
     assert made == []
@@ -278,12 +278,12 @@ def test_real_run_without_issue_token_or_repo_fails(conn, drop):
 def test_from_env_builds_reader_with_issue_token_and_lowercased_repo(conn):
     seen = []
 
-    def make(token, limits):
-        seen.append(token)
+    def make(token, limits, deadline=None, clock=None):
+        seen.append((token, deadline))
         return FakeReader(listed=[listed(30)])
 
     got = check_duplicate_from_env(
-        conn, None, RETRY, "daily", DAY, AT, environ=ENV, make_reader=make
+        conn, None, RETRY, "daily", DAY, AT, environ=ENV, make_reader=make, deadline=9.0
     )
     assert got == Existing(IssueRef("o/r", 30), "labels")
-    assert seen == [ENV["GITHUB_ISSUE_TOKEN"]]
+    assert seen == [(ENV["GITHUB_ISSUE_TOKEN"], 9.0)]  # ⑤ の時間の上限を読み取りにも渡す

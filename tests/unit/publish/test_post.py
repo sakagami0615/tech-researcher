@@ -114,7 +114,7 @@ class FakeGitHub:
         self.writers.append(writer)
         return writer
 
-    def make_reader(self, token, limits):
+    def make_reader(self, token, limits, **kw):
         return FakeReader(self)
 
 

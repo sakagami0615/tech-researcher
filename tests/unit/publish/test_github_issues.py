@@ -39,8 +39,9 @@ class FakeFetch:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def __call__(self, url, limits, *, headers, follow_redirects):
+    def __call__(self, url, limits, *, headers, follow_redirects, **kw):
         assert follow_redirects is False
+        self.kw = kw
         self.calls.append((url, dict(headers)))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -386,3 +387,16 @@ def test_get_issue_too_deeply_nested_json_is_an_invalid_response(limits):
     with pytest.raises(IssueReadError) as e:
         r.get_issue("o/r", 7)
     assert e.value.category == "invalid_response"
+
+
+def test_reads_pass_the_time_limit_to_fetch(limits):
+    fake = FakeFetch({"number": 3})
+    r = IssueReader(TOKEN, limits, fetch_url=fake, deadline=50.0, clock=lambda: 1.0)
+    r.get_issue("o/r", 3)
+    assert fake.kw["deadline"] == 50.0 and fake.kw["clock"]() == 1.0
+
+
+def test_reads_without_a_time_limit_pass_nothing(limits):
+    fake = FakeFetch({"number": 3})
+    IssueReader(TOKEN, limits, fetch_url=fake).get_issue("o/r", 3)
+    assert fake.kw == {}

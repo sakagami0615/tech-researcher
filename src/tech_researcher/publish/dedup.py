@@ -15,6 +15,7 @@ GitHub を読めないとき（4.3 の「それ以外」）は IssueReadError �
 
 import os
 import sqlite3
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -65,7 +66,9 @@ def check_duplicate_from_env(
     *,
     dry_run: bool = False,
     environ: Mapping[str, str] = os.environ,
-    make_reader: Callable[[str, Limits], IssueReader] = IssueReader,
+    make_reader: Callable[..., IssueReader] = IssueReader,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Existing | Create | Skipped:
     """環境変数から Issue 用トークンと投稿先を読み、check_duplicate を呼ぶ。
 
@@ -76,7 +79,7 @@ def check_duplicate_from_env(
         missing = [n for n in (TOKEN_ENV, REPO_ENV) if not (environ.get(n) or "").strip()]
         if missing:
             return Skipped(missing[0])
-    reader = make_reader(issue_token(environ), limits)
+    reader = make_reader(issue_token(environ), limits, deadline=deadline, clock=clock)
     return check_duplicate(
         conn, reader, issue_repo(environ), run_id, cadence, target, at, dry_run=dry_run
     )
