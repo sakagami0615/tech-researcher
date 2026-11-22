@@ -61,6 +61,16 @@ def text_violation(text: str) -> str | None:
     return None
 
 
+def has_link(text: str) -> bool:
+    """D2：URL・`www.`・Markdown リンク・`<http` を含む（週次の検査にも使う）。"""
+    return _LINK.search(text) is not None
+
+
+def has_html(text: str) -> bool:
+    """D3：画像・HTML・HTML コメントを含む（週次の検査にも使う）。"""
+    return _HTML.search(text) is not None
+
+
 def _check(
     entries: Sequence[DailyEntry], violation: Callable[[DailyEntry], str | None]
 ) -> tuple[list[DailyEntry], list[Excluded]]:

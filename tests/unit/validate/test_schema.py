@@ -4,10 +4,12 @@ import pytest
 
 from tech_researcher.agent.daily import CATEGORIES, DEPTHS
 from tech_researcher.agent.investigate import CONFIDENCE_LABELS
+from tech_researcher.agent.weekly_output import THEME_STATUSES
 from tech_researcher.render.failure import TARGETS
 from tech_researcher.validate.schema import (
     DAILY_OUTPUT_SCHEMA,
     INVESTIGATE_OUTPUT_SCHEMA,
+    WEEKLY_OUTPUT_SCHEMA,
     check_schema,
     schema_text,
 )
@@ -158,6 +160,80 @@ def test_investigate_schema_enums_match_code_constants():
 def test_investigation_not_matching_schema_is_rejected(output):
     with pytest.raises(ValueError):
         check_schema(output, INVESTIGATE_OUTPUT_SCHEMA)
+
+
+# --- 週次 ② の出力（data-model.md 4.3） ---
+
+THEME = {
+    "theme_id": None,
+    "name": "テーマ",
+    "status": "rising",
+    "change": "変化",
+    "comparison": "比較",
+    "item_ids": ["i1"],
+    "past_ids": [],
+}
+ROW = {"item_id": "i1", "product_name": None, "feature": "特徴", "use_case": "用途"}
+WEEKLY = {
+    "themes": [THEME],
+    "tech_changes": [{"headline": "見出し", "description": "説明", "item_ids": ["i1"]}],
+    "comparisons": [{"domain": "領域", "rows": [ROW], "summary": "まとめ"}],
+    "watch": [{"name": "注目", "reason": "理由", "item_ids": ["i1"]}],
+}
+WEEKLY_NAMES = set(THEME) | set(ROW) | {"themes", "tech_changes", "comparisons", "watch"}
+WEEKLY_NAMES |= {"headline", "description", "domain", "rows", "summary", "reason"}
+
+
+def comparisons_with(row):
+    return {**WEEKLY, "comparisons": [{"domain": "d", "rows": [row], "summary": ""}]}
+
+
+def test_weekly_valid_output_passes():
+    check_schema(WEEKLY, WEEKLY_OUTPUT_SCHEMA)
+    empty = {"themes": [], "tech_changes": [], "comparisons": [], "watch": []}
+    check_schema(empty, WEEKLY_OUTPUT_SCHEMA)  # Should のセクションは空でよい
+    theme = {**THEME, "theme_id": "T0007", "item_ids": [], "past_ids": ["i9"]}
+    check_schema({**WEEKLY, "themes": [theme]}, WEEKLY_OUTPUT_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        None,
+        [],
+        {k: v for k, v in WEEKLY.items() if k != "watch"},  # 必須
+        {**WEEKLY, "extra": 1},
+        {**WEEKLY, "themes": [{**THEME, "url": "https://example.com"}]},
+        {**WEEKLY, "themes": [{k: v for k, v in THEME.items() if k != "theme_id"}]},
+        {**WEEKLY, "themes": [{**THEME, "status": "falling"}]},  # enum
+        {**WEEKLY, "themes": [{**THEME, "theme_id": 7}]},
+        {**WEEKLY, "themes": [{**THEME, "name": None}]},
+        {**WEEKLY, "themes": [{**THEME, "past_ids": None}]},
+        comparisons_with({**ROW, "item_id": None}),
+        comparisons_with({**ROW, "product_name": 1}),
+        comparisons_with({**ROW, "url": "x"}),
+        {**WEEKLY, "watch": [{"name": "n", "reason": "r"}]},
+    ],
+)
+def test_weekly_output_not_matching_schema_is_rejected(output):
+    with pytest.raises(ValueError):
+        check_schema(output, WEEKLY_OUTPUT_SCHEMA)
+
+
+def test_weekly_schema_uses_only_allowed_keywords_and_no_url():
+    schema = json.loads(schema_text(WEEKLY_OUTPUT_SCHEMA))
+    assert _keys(schema) - ALLOWED_KEYWORDS - WEEKLY_NAMES == set()
+    assert "$schema" not in schema
+    assert not [k for k in _keys(schema) if "url" in k]
+    # 文字数・要素数・ID の存在はスキーマに入れない
+    long_theme = {**THEME, "name": "あ" * 10000, "item_ids": [], "theme_id": "T9999"}
+    check_schema({**WEEKLY, "themes": [long_theme] * 50}, WEEKLY_OUTPUT_SCHEMA)
+
+
+def test_weekly_schema_enum_matches_code_constants():
+    schema = json.loads(schema_text(WEEKLY_OUTPUT_SCHEMA))
+    status = schema["properties"]["themes"]["items"]["properties"]["status"]
+    assert tuple(status["enum"]) == THEME_STATUSES
 
 
 def _keys(node):

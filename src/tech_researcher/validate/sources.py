@@ -19,12 +19,12 @@ def check_daily_sources(
     不正）、正規化した形が許可集合にあることを見る。違反した項目は除外する。
     """
     links = {c.link_id: c.url for i, it in items.items() for c in candidate_links(it, i)}
-    allowed = {u for it in items.values() for u in _normalized(_item_urls(it))}
-    allowed |= set(_normalized(links.values()))
+    allowed = {u for it in items.values() for u in normalized_urls(item_urls(it))}
+    allowed |= set(normalized_urls(links.values()))
     kept: list[DailyEntry] = []
     excluded: list[Excluded] = []
     for entry in entries:
-        urls = [u for i in entry.item_ids for u in _item_urls(items[i])]
+        urls = [u for i in entry.item_ids for u in item_urls(items[i])]
         own = {c.link_id for i in entry.item_ids for c in candidate_links(items[i], i)}
         if entry.primary_link_id is not None:
             # 一次情報のリンクは自項目の候補リンクに限る（別の記事のリンクは出典にしない）
@@ -36,10 +36,10 @@ def check_daily_sources(
     return kept, excluded
 
 
-def _item_urls(item: Item) -> list[str]:
+def item_urls(item: Item) -> list[str]:
     """項目の URL と、まとめた元の記事の URL。"""
     return [item.url, *(r.url for r in item.sources)]
 
 
-def _normalized(urls: Iterable[str]) -> list[str]:
+def normalized_urls(urls: Iterable[str]) -> list[str]:
     return [n for u in urls if (n := normalize_url(u))]
