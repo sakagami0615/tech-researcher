@@ -13,7 +13,7 @@ RSS などはフィードに載る期間が短く（D-12）、週次の時点で
 import sqlite3
 from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 
 from tech_researcher.collect.period_filter import window_events
 from tech_researcher.collect.records import Attention, Event, GitHubRepo, Item
@@ -106,6 +106,11 @@ def _inclusion_date(rows: Sequence[ItemRow], event: Event) -> date:
     compared = event.type == "new_repo" or (
         event.type == "attention_spike" and event.basis in ("feed_entry", "star_growth")
     )
+    if event.type == "attention_spike" and event.basis == "star_growth":
+        # 日次の行にない（週の合計で判定した）急上昇は、最後の測定の対象日（測定は翌日 6:00）
+        fallback = event.at.astimezone(JST).date() - timedelta(days=1)
+    else:
+        fallback = event.at.astimezone(JST).date()
     for row in rows:  # 取り直した分は持たない。新しい対象日の日次の行から
         if row.cadence != "daily" or not any(
             _event_key(e) == _event_key(event) for e in row.item.events
@@ -116,7 +121,7 @@ def _inclusion_date(rows: Sequence[ItemRow], event: Event) -> date:
         )
         if compared or date_only:
             return row.target
-    return event.at.astimezone(JST).date()
+    return fallback
 
 
 def _sec(moment):

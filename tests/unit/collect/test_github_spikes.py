@@ -2,7 +2,11 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from tech_researcher.collect.github_spikes import is_new_repo, judge_star_spikes
+from tech_researcher.collect.github_spikes import (
+    is_new_repo,
+    judge_star_spikes,
+    judge_weekly_star_spikes,
+)
 from tech_researcher.collect.github_stars import StarResult
 from tech_researcher.config import load_config
 from tech_researcher.db.star_snapshots import StarSnapshot
@@ -140,3 +144,43 @@ def test_young_repo_below_the_star_floor_is_a_spike_when_it_grows_fast():
     result = judge([snap("n/young", 150, NEW)], [snap("n/young", 20, NEW)])
     (record,) = result.records
     assert [(e.type, e.basis) for e in record.events] == [("attention_spike", "star_growth")]
+
+
+def weekly(gains, latest, featured=()):
+    return judge_weekly_star_spikes(SETTINGS, gains, {s.repo: s for s in latest}, featured)
+
+
+def test_weekly_spike_uses_the_period_total_and_the_same_threshold():
+    # 毎日は A（100）未満でも、週の合計が A 以上なら急上昇。届かないものは除く
+    result = weekly(
+        {"a/steady": 350, "a/short": 99}, [snap("a/steady", 3000), snap("a/short", 900)]
+    )
+    (record,) = result
+    assert record.github.full_name == "a/steady"
+    (event,) = record.events
+    assert (event.type, event.basis, event.at) == ("attention_spike", "star_growth", MEASURED)
+    # 期間の合計は日次の増分ではないので、star_delta_24h は入れない
+    assert [(a.metric, a.value) for a in record.attention] == [("stars_total", 3000)]
+    assert record.github.star_delta_24h is None
+    assert record.links == ("https://github.com/a/steady",)
+
+
+def test_weekly_spike_keeps_the_top_n_by_gain():
+    gains = {"a/one": 300, "a/two": 500, "a/three": 400}
+    latest = [snap(r, 5000) for r in gains]
+    assert [r.github.full_name for r in weekly(gains, latest)] == ["a/three", "a/two"]  # 上位2件
+
+
+def test_weekly_spike_skips_featured_new_and_unmeasured_repos():
+    gains = {"a/shown": 900, "n/new": 900, "a/none": 900, "a/ok": 200}
+    latest = [snap("a/shown", 5000), snap("n/new", 900, NEW), snap("a/ok", 4000)]
+    result = weekly(gains, latest, featured={"https://github.com/a/shown"})
+    # 載せたものと新規（作成から日が浅く累計が C 以上）は急上昇にしない。測定がないものも除く
+    assert [r.github.full_name for r in result] == ["a/ok"]
+    # 載せたものは上位の数に入らない
+    more = weekly(
+        {"a/shown": 900, "a/x": 300, "a/y": 200, "a/z": 150},
+        [snap(r, 5000) for r in ("a/shown", "a/x", "a/y", "a/z")],
+        {"https://github.com/a/shown"},
+    )
+    assert [r.github.full_name for r in more] == ["a/x", "a/y"]

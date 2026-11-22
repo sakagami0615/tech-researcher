@@ -189,6 +189,22 @@ def _date(record: Record) -> str | None:
     return None
 
 
+def source_link(url: str, name: str | None, date_text: str | None = None) -> str:
+    """出典1件のリンク（`[情報源名（ドメイン）](URL) 日付`）。URL は正規化済みのものを渡す。
+
+    過去の観測のように、収集レコードを持たず URL と情報源名だけが分かる出典に使う。
+    """
+    return _format(_Source(url, name, date_text))
+
+
+def unavailable_section(unavailable: Sequence[tuple[str, str]]) -> str | None:
+    """末尾の「取得できなかった情報源」（1件以上あるときだけ。日次・週次で共通）。"""
+    if not unavailable:
+        return None
+    lines = "\n".join(f"- {plain_text(name)}：{plain_text(reason)}" for name, reason in unavailable)
+    return f"## 取得できなかった情報源\n\n{lines}"
+
+
 def _format(source: _Source) -> str:
     domain = urlsplit(source.url).hostname
     text = domain if source.name is None else f"{plain_text(source.name)}（{domain}）"

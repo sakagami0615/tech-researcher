@@ -44,7 +44,11 @@ from tech_researcher.collect.github_api import GitHubClient, GitHubError, collec
 from tech_researcher.collect.github_candidates import collect_candidates
 from tech_researcher.collect.github_releases import SOURCE_ID as RELEASES_SOURCE_ID
 from tech_researcher.collect.github_releases import collect_releases, fetch_readmes, with_readme
-from tech_researcher.collect.github_spikes import judge_star_spikes, repo_url
+from tech_researcher.collect.github_spikes import (
+    judge_star_spikes,
+    judge_weekly_star_spikes,
+    repo_url,
+)
 from tech_researcher.collect.github_stars import measure_stars
 from tech_researcher.collect.holds import hold_reasons, strip_featured
 from tech_researcher.collect.last30days import collect_last30days
@@ -68,6 +72,7 @@ from tech_researcher.db.items import lookup_item_refs
 from tech_researcher.db.readonly import tentative_ids
 from tech_researcher.db.runs import fetch_incomplete, record_source_fetch
 from tech_researcher.db.star_snapshots import load_star_snapshot
+from tech_researcher.db.weekly import latest_star_snapshots, period_star_gains
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Period, Target
 from tech_researcher.render.common import fetch_reason
@@ -80,7 +85,7 @@ from tech_researcher.stages.collect_store import (
     source_fetch,
     unavailable_sources,
 )
-from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows_dated
+from tech_researcher.stages.weekly_items import daily_days, load_daily_rows, weekly_rows_dated
 
 OUT_OF_TIME = "収集全体の時間の上限に達した"
 COLLECTED = "collected.json"
@@ -294,6 +299,8 @@ def run_collect(
     records = mark_thresholds(judged.records, config.attention_thresholds)
     if github is not None:
         records += github.records
+    if target.cadence == "weekly":
+        records += _weekly_star_spikes(config, target, db)
     observed = [i for i in aggregate(records) if in_period(i, target)]
     holds = hold_reasons(observed, target, featured, shown)
     # すでに載せたリポジトリが別の出来事（リリースなど）で渡るときは、急上昇・新規の出来事と
@@ -302,7 +309,9 @@ def run_collect(
     counts = in_period_counts(observed)
     fetches = [source_fetch(r, at, counts[r.source_id]) for r, at in fetched]
     if github is not None:
-        fetches.append(github.fetch.to_fetch(github.at, counts[GITHUB_REPOS_SOURCE_ID]))
+        # 週次は取得しない（取得件数 0）ので、合計で判定した急上昇は数えない
+        kept = 0 if target.cadence == "weekly" else counts[GITHUB_REPOS_SOURCE_ID]
+        fetches.append(github.fetch.to_fetch(github.at, kept))
     rows = None
     stored = observed  # items に書く項目（日次は AI に渡さない項目も含む）
     if target.cadence == "weekly":
@@ -374,6 +383,26 @@ def _history(db: sqlite3.Connection | None, target: Target) -> tuple[set[str], s
     if db is None or target.cadence != "daily":
         return set(), set()
     return featured_urls(db, target.key), shown_urls(db, target.key - timedelta(days=1))
+
+
+def _weekly_star_spikes(
+    config: Config, target: Target, db: sqlite3.Connection | None
+) -> tuple[Record, ...]:
+    """週次の急上昇：日次の増分を合計した値で、日次と同じ判定を行う（D-13）。
+
+    毎日は基準に届かなくても、調査期間の合計が届いたリポジトリを、急上昇の出来事にする。
+    日次で載せたもの（featured）は除く。DB がなければ（開発機のドライラン）行わない。
+    """
+    settings = config.github_repos
+    if db is None or settings is None or not settings.enabled:
+        return ()
+    first, end = daily_days(target)
+    return judge_weekly_star_spikes(
+        settings,
+        period_star_gains(db, first, end),
+        latest_star_snapshots(db, first, end),
+        featured_urls(db),
+    )
 
 
 def _write_unjudged(run_dir: Path, feeds: tuple[str, ...], star: bool) -> None:

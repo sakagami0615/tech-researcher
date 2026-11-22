@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from tech_researcher.db.items import item_ref
+from tech_researcher.db.star_snapshots import StarSnapshot, load_star_snapshot
 
 
 def compare_week_starts(target: date, weeks: int) -> list[date]:
@@ -74,3 +75,15 @@ def period_star_gains(conn: sqlite3.Connection, first: date, end: date) -> dict[
         (first.isoformat(), end.isoformat()),
     )
     return dict(rows)
+
+
+def latest_star_snapshots(
+    conn: sqlite3.Connection, first: date, end: date
+) -> dict[str, StarSnapshot]:
+    """リポジトリ → 対象日が first 以上 end 未満の中で、最後の日の測定（週次の急上昇の判定用）。"""
+    latest: dict[str, StarSnapshot] = {}
+    day = first
+    while day < end:
+        latest.update(load_star_snapshot(conn, day))  # 新しい日が前の日を上書きする
+        day += timedelta(days=1)
+    return latest
