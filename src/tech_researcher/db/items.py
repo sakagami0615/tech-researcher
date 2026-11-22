@@ -120,7 +120,7 @@ def load_item_rows(conn: sqlite3.Connection, cadence: str, first: date, end: dat
 
     対象の順、同じ対象の中では主キーの順。読むだけなので、読み取り専用の接続でも使える。
     保存していないもの（一次情報の本文、出典ごとのタイトル・抜粋）は戻らない。出典は重複判定結果の
-    1件ごとに1つのレコードで、代表のタイトル・抜粋・公開日時は先頭のレコードが持つ。
+    1件ごとに1つのレコードで、タイトル・抜粋は先頭のレコードに戻し、公開日時・精度は出典ごとに戻す（古い行は先頭だけに代表の値）。
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM items"
