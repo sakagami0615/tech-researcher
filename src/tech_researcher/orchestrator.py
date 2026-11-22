@@ -602,6 +602,12 @@ def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
     if posted["result"] in (post.CREATED, post.EXISTING):
         return job.summary("report", issue_url=posted["issue_url"], **fields)
     # 秘匿情報の検出（⑤ で公開停止の定型を作った）か、作れなかった
+    if posted["error_category"] == "run_close_failed":  # Issue はある。runs をもう一度閉じてみる
+        failures.close_run(
+            job,
+            failures.Outcome(failures.RUN_ERROR, "post", "run_close_failed", retries=retries),
+            MINUTE,
+        )
     return job.summary(
         "error",
         failed_stage="post",

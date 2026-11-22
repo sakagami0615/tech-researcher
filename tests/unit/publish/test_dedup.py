@@ -95,6 +95,8 @@ def test_301_updates_db_to_transfer_target_keeping_run(conn):
     row = find_report_issue(conn, "daily", DAY)
     assert (row.run_id, row.repo, row.number) == (RUN, "new/repo", 7)
     assert reader.lists == 0
+    # 設定の投稿先ではないリポジトリへの転送では、投稿先を記録しない（試験用の DB を結び付けない）
+    assert conn.execute("SELECT count(*) FROM meta").fetchone() == (0,)
 
 
 @pytest.mark.parametrize("status", [404, 410])

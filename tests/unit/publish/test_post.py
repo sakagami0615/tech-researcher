@@ -323,7 +323,8 @@ def test_retries_are_limited_and_exhausted_failure_is_recorded(env, github):
     assert (result["result"], result["error_category"]) == ("failed", "timeout")
     assert len(github.attempts) == 3  # 初回 + 再試行2回（http_retry_waits_s の数）
     assert env.sleeps == [5, 20]
-    assert env.issue_rows() == [(RUN, "report", "failed", None, None, None)]
+    # 送った後のタイムアウトは、作られたか分からない（最後の重複判定でも見つからない）
+    assert env.issue_rows() == [(RUN, "report", "uncertain", None, None, None)]
     assert env.run_row() == ("failed", "post", "timeout", None)
 
 
@@ -765,3 +766,122 @@ def test_operator_can_release_by_deleting_the_uncertain_record(env, github):
     env.post("report")
     env.conn.execute("DELETE FROM issues WHERE state = 'uncertain'")  # 確かめて、作られていなかった
     assert env.post("report", run=RETRY)["result"] == "created"
+
+
+# --- PR #99 の3回目の確認 ---
+
+
+def test_config_change_after_a_failed_record_needs_review_and_writes_no_destination(env, github):
+    """meta が空のまま、別のリポジトリの Issue を新しい投稿先に結び付けない。"""
+    env.post("report")
+    env.conn.execute("DELETE FROM meta")
+    env.environ["GITHUB_ISSUE_REPO"] = "other/prod"
+    result = env.post("report", run=RETRY)
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "needs_review",
+        100,
+    )
+    assert env.conn.execute("SELECT value FROM meta").fetchall() == []
+    assert env.run_row(RETRY)[:3] == ("failed", "post", "needs_review")
+
+
+def test_found_in_another_repo_is_a_success_when_meta_already_matches(env, github):
+    env.post("report")
+    github.make_reader = lambda token, limits, **kw: _MovedReader(github)
+    assert env.post("report", run=RETRY)["result"] == "existing"
+    assert env.conn.execute("SELECT value FROM meta").fetchall() == [(REPO,)]
+
+
+class _MovedReader(FakeReader):
+    def get_issue(self, repo, number):
+        return IssueLookup(IssueRef("other/dest", 9), transferred=True)
+
+
+def test_read_failure_of_the_last_look_still_records_uncertain(env, github):
+    class Odd(FakeWriter):
+        def create_issue(self, repo, title, body, labels):
+            github.read_error = IssueReadError("x", "http_5xx", 503)  # 最後の確認で読めない
+            raise IssueWriteError("x", "invalid_response", 201)
+
+    github.make_writer = lambda token, limits, clock=None: Odd(github)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "invalid_response")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_rerun_with_the_same_run_id_does_not_slip_past_the_uncertain_record(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    env.post("report")
+    result = env.post("report")  # 同じ実行 ID でやり直す
+
+    assert (result["result"], result["error_category"]) == ("failed", "needs_review")
+    assert github.created == []
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]  # 上書きしない
+
+
+@pytest.mark.parametrize("category", ["timeout", "network", "http_5xx"])
+def test_report_ending_with_an_ambiguous_failure_is_uncertain(env, github, category):
+    github.failures = [_error(category, False) for _ in range(3)]
+    env.post("report")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+@pytest.mark.parametrize("category", ["http_4xx", "budget"])
+def test_report_ending_with_a_certain_failure_is_failed(env, github, category):
+    github.failures = [_error(category, category == "budget")]
+    env.post("report")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "failed")]
+
+
+def test_last_look_finds_an_issue_created_by_the_final_attempt(env, github):
+    class Lost(FakeWriter):
+        def create_issue(self, repo, title, body, labels):
+            if len(github.attempts) < 2:
+                github.attempts.append(1)
+                raise _error("timeout", False)
+            github.attempts.append(1)
+            github.created.append(
+                {"repo": repo, "title": title, "body": body, "labels": labels, "number": 70}
+            )
+            raise _error("timeout", False)
+
+    github.make_writer = lambda token, limits, clock=None: Lost(github)
+    result = env.post("report")
+    assert (result["result"], result["number"]) == ("existing", 70)
+
+
+def test_run_close_failure_is_a_failed_post_that_keeps_the_number(env, github, monkeypatch):
+    def broken(*a, **k):
+        raise OSError("disk")
+
+    monkeypatch.setattr("tech_researcher.publish.post.finish_run", broken)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "run_close_failed",
+        100,
+    )
+    assert env.run_row()[0] == "running"
+
+
+def test_uncertain_record_is_cleared_when_the_issue_is_found(env, github):
+    github.failures = [IssueWriteError("x", "invalid_response", 201)]
+    env.post("report")
+    github.created.append(
+        {
+            "repo": REPO,
+            "title": "t",
+            "body": report_for(RUN).body,
+            "labels": LABELS["report"],
+            "number": 8,
+        }
+    )
+    assert env.post("report", run=RETRY)["result"] == "existing"
+    # 見つけた Issue の行（labels の補い）が、uncertain の行を置き換える
+    assert [row[:5] for row in env.issue_rows() if row[0] == RUN] == [
+        (RUN, "report", "created", REPO, 8)
+    ]

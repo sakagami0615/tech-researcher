@@ -138,7 +138,10 @@ def check_duplicate(
                 if not dry_run:
                     with _recording(found.ref):
                         _record(conn, run_id, run_id, cadence, target, at, found.ref, "transfer")
-                        record_issue_repo(conn, repo)
+                        if (
+                            found.ref.repo.lower() == repo
+                        ):  # 別のリポジトリへの転送は、設定の投稿先ではない
+                            record_issue_repo(conn, repo)
                 return Existing(found.ref, "transferred")
         stale = True  # 410・404。2 で確かめ直す
     return _search(conn, reader, repo, run_id, cadence, target, at, dry_run, stale)

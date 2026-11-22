@@ -69,6 +69,13 @@ class IssueWriteError(Exception):
         self.unsent = unsent
 
     @property
+    def maybe_created(self) -> bool:
+        """Issue が作られたかもしれない失敗（応答が読めない、送った後の通信の失敗・5xx など）"""
+        if self.category == INVALID_RESPONSE:
+            return True
+        return self.category in (TIMEOUT, NETWORK, HTTP_5XX) and not self.unsent
+
+    @property
     def retryable(self) -> bool:
         if self.category in _TRANSIENT:
             return True
@@ -122,7 +129,7 @@ class IssueWriter:
         if not title or len(title) > TITLE_MAX:
             raise ValueError("タイトルの長さが使えない")
         if self.calls >= self._limits.github_write_calls:
-            raise IssueWriteError("この実行の書き込みの上限に達した", BUDGET)
+            raise IssueWriteError("この実行の書き込みの上限に達した", BUDGET, unsent=True)
         path = "/".join(quote(part, safe="") for part in repo.split("/"))
         url = f"{API_ROOT}/repos/{path}/issues"
         data = json.dumps({"title": title, "body": body, "labels": list(labels)}).encode()
