@@ -806,6 +806,47 @@ def test_report_blocked_with_a_failed_notice_reports_the_write_error(host, capfd
     assert summary["issue_post_failed"] == "http_4xx"
 
 
+@pytest.mark.parametrize(
+    ("post", "category"),
+    [
+        (
+            {
+                "result": "created",
+                "kind": "report",
+                "repo": "o/r",
+                "number": 7,
+                "run_close_failed": True,
+            },
+            "run_close_failed",
+        ),
+        (
+            {
+                "result": "blocked",
+                "kind": "run_error_secret",
+                "repo": "o/r",
+                "number": 9,
+                "error_category": "secret_detected",
+                "run_close_failed": True,
+            },
+            "secret_detected",  # 元の分類のまま
+        ),
+    ],
+)
+def test_run_close_failure_keeps_the_category_and_closes_again(host, capfd, post, category):
+    host.behave("ok", lock="daily", post=post)
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "post",
+        category,
+    )
+    assert summary["issue_url"] is not None  # 公開済み
+    finishes = [c["argv"] for c in host.calls() if "finish" in c["argv"]]
+    assert len(finishes) == 1 and category in finishes[0]  # 元の分類で閉じ直す
+
+
 def test_dry_run_never_posts(host, capfd):
     host.behave("ok", lock="daily-dry-run")
     assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0

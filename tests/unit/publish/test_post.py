@@ -91,6 +91,17 @@ class FakeReader:
         found = any(c["number"] == number and c["repo"] == repo for c in self.github.created)
         return IssueLookup(IssueRef(repo, number) if found else None, status=None if found else 404)
 
+    def viewer_login(self):
+        return "bot"
+
+    def list_recent_issues(self, repo, since, creator=None):
+        """ラベルによらず、作った Issue を返す（ラベルが外れた Issue も見つかる）。"""
+        self.github.recent_args.append((since, creator))
+        if self.github.recent_error:
+            raise self.github.recent_error
+        for c in self.github.created:
+            yield ListedIssue(c["number"], parse_marker(c["body"]))
+
     def list_report_issues(self, repo, cadence):
         if self.github.read_error:
             raise self.github.read_error
@@ -109,6 +120,9 @@ class FakeGitHub:
         self.writers = []
         self.token = None
         self.reader_args = []
+        self.recent_args = []
+        self.recent_error = None
+        self.unlabeled = False  # 作った Issue のラベルを外して、ラベルの探索から見えなくする
 
     def make_writer(self, token, limits, clock=None):
         self.token = token
@@ -576,24 +590,97 @@ def test_failure_issue_is_retried_when_it_was_certainly_not_sent(env, github, ca
     assert len(github.attempts) == 2 and env.sleeps == [5]
 
 
-@pytest.mark.parametrize("category", ["timeout", "network", "http_5xx", "invalid_response"])
-def test_report_is_not_posted_again_after_a_maybe_created_failure(env, github, category):
-    """ラベルが外れた Issue は重複判定で見つからない。POST を繰り返すと2件になるので出さない。"""
+@pytest.mark.parametrize("category", ["timeout", "network", "http_5xx"])
+def test_maybe_created_failure_is_retried_when_the_unlabeled_lookup_finds_nothing(
+    env, github, category
+):
     github.failures = [_error(category, False)]
     result = env.post("report")
 
-    assert (result["result"], result["error_category"]) == ("failed", category)
+    assert (result["result"], result["number"]) == ("created", 100)
+    assert len(github.attempts) == 2 and env.sleeps == [5]
+    [(since, creator)] = github.recent_args  # ラベルなし・この実行の開始以降・トークンの持ち主
+    assert (since, creator) == ("2026-10-24T06:00:00Z", "bot")
+
+
+def test_maybe_created_failure_finds_an_issue_whose_labels_were_removed(env, github):
+    """ラベルが外れた Issue は、ラベルなしの確認で見つけ、再投稿しない。"""
+
+    class Lost(FakeWriter):
+        def create_issue(self, repo, title, body, labels):
+            github.attempts.append(1)
+            github.created.append(
+                {"repo": repo, "title": title, "body": body, "labels": (), "number": 70}
+            )
+            raise _error("timeout", False)
+
+    github.make_writer = lambda token, limits, clock=None: Lost(github)
+    result = env.post("report")
+
+    assert (result["result"], result["number"]) == ("existing", 70)
     assert len(github.attempts) == 1 and env.sleeps == []
-    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+    assert env.issue_rows() == [(RUN, "report", "created", REPO, 70, "pending")]
 
 
-def test_unsent_failure_then_maybe_created_failure_stops_posting(env, github):
-    github.failures = [_error("dns", True), _error("timeout", False), _error("dns", True)]
+def test_maybe_created_failures_to_the_end_are_uncertain(env, github):
+    github.failures = [_error("timeout", False) for _ in range(5)]
     result = env.post("report")
 
     assert (result["result"], result["error_category"]) == ("failed", "timeout")
-    assert len(github.attempts) == 2  # 3回目は出さない
+    assert len(github.attempts) == 3 and env.sleeps == [5, 20]  # 再試行は2回まで
     assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_invalid_response_is_not_retried_and_is_uncertain(env, github):
+    github.failures = [_error("invalid_response", False)]
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "invalid_response")
+    assert len(github.attempts) == 1
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_unreadable_unlabeled_lookup_gives_up_as_uncertain_without_posting_again(env, github):
+    github.failures = [_error("timeout", False)]
+    github.recent_error = IssueReadError("x", "http_5xx", 503)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "timeout")
+    assert len(github.attempts) == 1
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_unsent_then_maybe_created_then_unsent_ends_uncertain(env, github):
+    github.failures = [_error("dns", True), _error("timeout", False), _error("dns", True)]
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "dns")
+    assert len(github.attempts) == 3
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_final_lookup_sqlite_error_stays_uncertain_with_db_error(env, github, monkeypatch):
+    github.failures = [_error("invalid_response", False)]
+
+    def broken(*a, **k):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr("tech_researcher.publish.post.check_recent_from_env", broken)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "db_error")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_stale_created_row_of_the_same_run_becomes_uncertain(env, github):
+    """同じ実行に古い番号（404）の作成済みの行がある。uncertain に直す。"""
+    issues_db.record_issue(
+        env.conn, RUN, "report", "daily", DAY, "created", AT, repo=REPO, number=11
+    )
+    github.failures = [_error("invalid_response", False)]
+    env.post("report")
+
+    assert env.issue_rows() == [(RUN, "report", "uncertain", None, None, None)]
 
 
 @pytest.mark.parametrize("later", ["budget", "http_4xx"])
@@ -879,11 +966,13 @@ def test_run_close_failure_is_a_failed_post_that_keeps_the_number(env, github, m
     monkeypatch.setattr("tech_researcher.publish.post.finish_run", broken)
     result = env.post("report")
 
-    assert (result["result"], result["error_category"], result["number"]) == (
-        "failed",
-        "run_close_failed",
+    # 結果と分類は変えず、閉じられなかったことを別に返す
+    assert (result["result"], result["number"], result["run_close_failed"]) == (
+        "created",
         100,
+        True,
     )
+    assert "error_category" not in result
     assert env.run_row()[0] == "running"
 
 
@@ -914,10 +1003,42 @@ def test_close_failure_after_the_stop_notice_is_run_close_failed(env, github, mo
     result = env.post("report", report_for(text=f"キーは {SECRET}"))
 
     assert (result["result"], result["error_category"], result["number"]) == (
-        "failed",
-        "run_close_failed",
+        "blocked",
+        "secret_detected",  # 分類は検出のまま
         100,
     )
+    assert result["run_close_failed"] is True
+
+
+def test_close_failure_when_the_notice_also_has_a_secret_keeps_the_category(
+    env, github, monkeypatch
+):
+    def broken(*a, **k):
+        raise OSError("disk")
+
+    monkeypatch.setattr("tech_researcher.publish.post.finish_run", broken)
+    env.scanner = SecretScanner(["公開を停止しました"])
+    result = env.post("report", report_for(text=f"キーは {SECRET}"))
+
+    assert (result["result"], result["error_category"]) == ("blocked", "secret_detected")
+    assert result["run_close_failed"] is True
+
+
+def test_found_in_another_repo_follows_the_dedup_decision_not_the_issue_repo(env, github):
+    """meta を書くかは dedup の判定（元の記録の repo）に従う。転送先の repo では決めない。"""
+    issues_db.record_issue(
+        env.conn, RUN, "report", "daily", DAY, "created", AT, repo="old/repo", number=11
+    )
+
+    class Reader(FakeReader):
+        def get_issue(self, repo, number):
+            return IssueLookup(IssueRef(REPO, 7), transferred=True)  # 設定の投稿先へ転送された
+
+    github.make_reader = lambda token, limits, **kw: Reader(github)
+    result = env.post("report", run=RETRY)
+
+    assert (result["result"], result["error_category"]) == ("failed", "needs_review")
+    assert env.conn.execute("SELECT count(*) FROM meta").fetchone() == (0,)
 
 
 def test_failing_to_clear_the_uncertain_record_is_not_a_success(env, github, monkeypatch):

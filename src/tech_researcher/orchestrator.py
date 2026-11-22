@@ -600,15 +600,25 @@ def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
             job, failures.Outcome(failures.RUN_ERROR, "post", category, retries=retries), MINUTE
         )
         return job.summary("error", failed_stage="post", error_category=category, **fields)
+    if posted["run_close_failed"]:  # runs を閉じられなかった。元の分類で閉じ直す
+        published = posted["result"] in (post.CREATED, post.EXISTING)
+        category = "run_close_failed" if published else posted["error_category"]
+        failures.close_run(
+            job,
+            failures.Outcome(failures.RUN_ERROR, "post", category, retries=retries),
+            MINUTE,
+        )
+        if published:  # Issue は公開済み。runs の終わりを書けなかったことを実行エラーにする
+            return job.summary(
+                "error",
+                failed_stage="post",
+                error_category="run_close_failed",
+                issue_url=posted["issue_url"],
+                **fields,
+            )
     if posted["result"] in (post.CREATED, post.EXISTING):
         return job.summary("report", issue_url=posted["issue_url"], **fields)
     # 秘匿情報の検出（⑤ で公開停止の定型を作った）か、作れなかった
-    if posted["error_category"] == "run_close_failed":  # Issue はある。runs をもう一度閉じてみる
-        failures.close_run(
-            job,
-            failures.Outcome(failures.RUN_ERROR, "post", "run_close_failed", retries=retries),
-            MINUTE,
-        )
     return job.summary(
         "error",
         failed_stage="post",
@@ -911,6 +921,7 @@ def _post_summary(stdout: str) -> dict | None:
         "error_category": category,
         "issue_url": url,
         "write_error": write_error,
+        "run_close_failed": data.get("run_close_failed") is True,
     }
 
 

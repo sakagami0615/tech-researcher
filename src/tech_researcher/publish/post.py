@@ -47,6 +47,7 @@ from tech_researcher.publish.dedup import (
     RecordError,
     Skipped,
     check_duplicate_from_env,
+    check_recent_from_env,
 )
 from tech_researcher.publish.github_issues import (
     IssueReader,
@@ -216,17 +217,30 @@ class Poster:
             stop = secret_stop_report(self.target, "post")
             if self._secret_kinds(stop) is None:
                 posted = self._post(RUN_ERROR_SECRET, stop, close=False)
-                if not self._close("failed", "secret_detected"):
-                    return {**posted, "result": FAILED, "error_category": "run_close_failed"}
+                closed = (
+                    {} if self._close("failed", "secret_detected") else {"run_close_failed": True}
+                )
                 if posted["result"] in (CREATED, EXISTING):
-                    return {**posted, "result": BLOCKED, "error_category": "secret_detected"}
+                    return {
+                        **posted,
+                        "result": BLOCKED,
+                        "error_category": "secret_detected",
+                        **closed,
+                    }
                 # 定型の投稿に失敗した。要約の分類は検出のまま、書き込みの分類は別に残す
                 write_error = posted.get("error_category")
-                return {**posted, "error_category": "secret_detected", "write_error": write_error}
+                return {
+                    **posted,
+                    "error_category": "secret_detected",
+                    "write_error": write_error,
+                    **closed,
+                }
             self._record_blocked(RUN_ERROR_SECRET)
         # 定型でも検出した。作らず、記録だけにする
-        self._close("failed", "secret_detected")
-        return _result(BLOCKED, RUN_ERROR_SECRET, error_category="secret_detected")
+        closed = self._close("failed", "secret_detected")
+        return _result(
+            BLOCKED, RUN_ERROR_SECRET, error_category="secret_detected", run_close_failed=not closed
+        )
 
     def _secret_kinds(self, report: Report) -> str | None:
         """検出した分類（秘匿値そのものは含まない）。なければ None。"""
@@ -239,7 +253,7 @@ class Poster:
             row = find_issue(self.conn, self.run_id, kind)
             if row is not None and row.state == "created":  # 同じ実行の再試行。作らない
                 ref = IssueRef(str(row.repo), int(row.number or 0))
-                return self._existing(kind, ref, close, "db")
+                return self._existing(kind, ref, close, "db", ref.repo.lower() == self.repo)
         try:
             found = self._create(kind, report)
         except IssueReadError as e:
@@ -260,9 +274,10 @@ class Poster:
             return self._write_failed(kind, _category(e, "write_failed"), close, state)
         except (sqlite3.Error, OSError) as e:
             self.log.write("post", "failure", error_category="db_error", exc=e)
-            return self._write_failed(kind, "db_error", close)
+            state = "uncertain" if kind == REPORT and self._maybe_created else "failed"
+            return self._write_failed(kind, "db_error", close, state)
         if isinstance(found, Existing):
-            return self._existing(kind, found.ref, close, found.via)
+            return self._existing(kind, found.ref, close, found.via, found.write_meta)
         created, replaces = found
         try:
             record_issue(
@@ -292,15 +307,22 @@ class Poster:
                 error_category="labels_missing",
                 count=len(created.missing_labels),
             )
-        if close and not self._close("succeeded", None):  # Issue はある。番号は結果に載せる
-            return _result(FAILED, kind, ref=created.ref, error_category="run_close_failed")
+        closed = not close or self._close("succeeded", None)
         self.log.write("post", "end", count=1)
-        return _result(CREATED, kind, ref=created.ref, labels_missing=bool(created.missing_labels))
+        return _result(
+            CREATED,
+            kind,
+            ref=created.ref,
+            labels_missing=bool(created.missing_labels),
+            run_close_failed=not closed,
+        )
 
-    def _existing(self, kind: str, ref: IssueRef, close: bool, via: str) -> dict:
+    def _existing(
+        self, kind: str, ref: IssueRef, close: bool, via: str, write_meta: bool = True
+    ) -> dict:
         """すでにある Issue。投稿先の記録（meta）が済んでいることも確かめてから、成功にする。"""
         try:
-            self._record_repo(ref, via)
+            self._record_repo(ref, via, write_meta)
         except (
             NeedsReview
         ):  # 別のリポジトリの Issue で、投稿先が記録されていない（試験用の DB のおそれ）
@@ -318,26 +340,24 @@ class Poster:
             if close:
                 self._close("failed", "db_error")
             return _result(FAILED, kind, ref=ref, error_category="db_error")
-        if close and not self._close("succeeded", None):
-            return _result(FAILED, kind, ref=ref, error_category="run_close_failed")
+        closed = not close or self._close("succeeded", None)
         self.log.write("post", "end", detail=f"existing via {via}")
-        return _result(EXISTING, kind, ref=ref)
+        return _result(EXISTING, kind, ref=ref, run_close_failed=not closed)
 
-    def _record_repo(self, ref: IssueRef, via: str) -> None:
+    def _record_repo(self, ref: IssueRef, via: str, write_meta: bool = True) -> None:
         """設定の投稿先を meta に記録し、記録されたことを読み直して確かめる。
 
-        設定の投稿先と同じ repo の Issue（作った・見つけた）のときだけ書く。作った Issue の repo が
-        違えば失敗。見つけた Issue が別のリポジトリ（転送など）にあるときは書かず、meta がすでに
-        設定の投稿先なら成功、空なら NeedsReview。"""
-        same = ref.repo.lower() == self.repo
-        if via == "created" and not same:
+        書くかどうかは dedup の判定（write_meta。元の記録の repo が設定の投稿先か）に従う。作った
+        Issue の repo が違えば失敗。書かない場合は、meta がすでに設定の投稿先なら成功、空なら
+        NeedsReview。"""
+        if via == "created" and ref.repo.lower() != self.repo:
             raise ValueError("作った Issue の repo が設定の投稿先と違う")
-        if same:
+        if write_meta:  # dedup が下した判定（元の記録の repo が設定の投稿先）に従う
             record_issue_repo(self.conn, self.repo)
         row = self.conn.execute("SELECT value FROM meta WHERE key = 'issue_repo'").fetchone()
         if row is not None and row[0] == self.repo:
             return
-        if not same:
+        if not write_meta:
             # 別のリポジトリの Issue（転送など）では、投稿先を書かない。meta が空なら、この DB が
             # 設定の投稿先のものか分からないので、運用者が確かめる
             raise NeedsReview
@@ -362,36 +382,61 @@ class Poster:
                 )
                 return created, replaces
             except IssueWriteError as e:
+                looked = False
                 if kind == REPORT and e.maybe_created:
-                    # ラベルが外れた Issue は重複判定で見つからず、POST を繰り返すと2件になる。
-                    # 同じ実行の中では出さず、最後に重複判定を1回だけ行って終える
+                    # 作られたかもしれない。ラベルが外れた Issue も見つけるため、ラベルなしで探す
+                    # 見つかれば existing。見つからなければ、再試行してよい
                     self._maybe_created = True
-                    return self._give_up(kind, e)
+                    found = self._look_recent(e)
+                    if found is not None:
+                        return found
+                    looked = True
                 if not e.retryable or attempt == len(waits):
-                    return self._give_up(kind, e)
+                    return self._give_up(kind, e, looked)
                 if kind != REPORT and not e.unsent:
                     raise  # 識別子がなく、再試行で2件作りうる（応答が返らない失敗）
                 wait = waits[attempt]
                 if e.retry_after is not None:
                     wait = min(e.retry_after, limits.retry_after_max_s)
                 if self.deadline is not None and self.clock() + wait >= self.deadline:
-                    return self._give_up(kind, e)  # 待った後に要求する時間が残らない
+                    return self._give_up(kind, e, looked)  # 待った後に要求する時間が残らない
                 self.log.write("post", "retry", error_category=e.category, attempt=attempt + 2)
                 self.sleep(wait)
         raise AssertionError("ここには来ない")
 
-    def _give_up(self, kind: str, error: IssueWriteError) -> Existing:
-        """作れなかった。Issue が作られたかもしれないレポート（旗が立っている）は、最後に重複判定を
-        1回だけ行い、見つかれば existing にする。見つからない・確かめられないときは、元の失敗を
-        投げる（最後の失敗の種類によらず uncertain になる）。"""
-        if kind == REPORT and self._maybe_created:
-            try:
-                again = self._decide()
-            except IssueReadError:
-                raise error from None
-            if isinstance(again, Existing):
-                return again
+    def _give_up(self, kind: str, error: IssueWriteError, looked: bool) -> Existing:
+        """作れなかった。作られたかもしれない失敗があったレポート（旗が立っている）は、最後にラベル
+        なしの確認を行い（直前に行っていなければ）、見つかれば existing にする。確かめられなければ、
+        元の失敗を投げる（最後の失敗の種類によらず uncertain になる）。"""
+        if kind == REPORT and self._maybe_created and not looked:
+            found = self._look_recent(error)
+            if found is not None:
+                return found
         raise error
+
+    def _look_recent(self, error: IssueWriteError) -> Existing | None:
+        """この実行の開始以降の Issue を、ラベルなしで探す（4.3）。読めなければ元の失敗を投げる。"""
+        row = self.conn.execute(
+            "SELECT started_at FROM runs WHERE run_id = ?", (self.run_id,)
+        ).fetchone()
+        if row is None:
+            raise error
+        try:
+            return check_recent_from_env(
+                self.conn,
+                self.config.limits,
+                self.run_id,
+                self.target.cadence,
+                self.target.key,
+                self.now,
+                row[0],
+                environ=self.environ,
+                make_reader=self.make_reader,
+                deadline=self.deadline,
+                clock=self.clock,
+            )
+        except IssueReadError:
+            raise error from None
 
     def _decide(self) -> Existing | Create:
         decision = check_duplicate_from_env(
@@ -432,6 +477,15 @@ class Poster:
             current = find_issue(self.conn, self.run_id, kind)
             if current is not None and current.state == "uncertain" and state == "failed":
                 return  # 作られたか分からない記録を、確かめないまま上書きしない
+            if state == "uncertain" and current is not None and current.state == "created":
+                # 同じ実行に、古い番号（404・410）の作成済みの行がある。もう存在しない番号なので、
+                # 作られたか分からない記録に直す（record_issue は作成済みの行を戻さない）
+                self.conn.execute(
+                    "UPDATE issues SET state = 'uncertain', repo = NULL, number = NULL,"
+                    " projects_state = NULL WHERE run_id = ? AND kind = ?",
+                    (self.run_id, kind),
+                )
+                return
             record_issue(
                 self.conn,
                 self.run_id,
@@ -516,6 +570,7 @@ def _result(
     ref: IssueRef | None = None,
     error_category: str | None = None,
     labels_missing: bool = False,
+    run_close_failed: bool = False,
 ) -> dict:
     out: dict = {"result": result, "kind": kind}
     if ref is not None:
@@ -524,4 +579,8 @@ def _result(
         out["error_category"] = error_category
     if labels_missing:
         out["labels_missing"] = True
+    if (
+        run_close_failed
+    ):  # runs を閉じられなかった（結果と分類は変えない。統括スクリプトが閉じ直す）
+        out["run_close_failed"] = True
     return out

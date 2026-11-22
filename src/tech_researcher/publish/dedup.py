@@ -57,6 +57,8 @@ class Existing:
 
     ref: IssueRef
     via: str
+    # 投稿先（meta）を書いてよいか。元の記録の repo が設定の投稿先のときだけ True
+    write_meta: bool = True
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,39 @@ def check_duplicate_from_env(
     )
 
 
+def check_recent_from_env(
+    conn: sqlite3.Connection,
+    limits: Limits,
+    run_id: str,
+    cadence: str,
+    target: date,
+    at: datetime,
+    since: str,
+    *,
+    environ: Mapping[str, str] = os.environ,
+    make_reader: Callable[..., IssueReader] = IssueReader,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> Existing | None:
+    """作成の応答が届かなかった後の確認（ラベルに頼らない）。since 以降に更新された Issue を、
+    ラベルなしで（トークンの持ち主の Issue に絞って）読み、1行目の識別子が同じ対象のものを探す。
+    見つかれば、ラベルの探索と同じように DB に補う。読めなければ IssueReadError。"""
+    reader = make_reader(issue_token(environ), limits, deadline=deadline, clock=clock)
+    repo = issue_repo(environ)
+    creator = reader.viewer_login()
+    for listed in reader.list_recent_issues(repo, since, creator):
+        marker = listed.marker
+        if marker is None or (marker.cadence, marker.target) != (cadence, target):
+            continue
+        ref = IssueRef(repo, listed.number)
+        with _recording(ref):
+            owner = marker.run_id if _is_run_of(conn, marker.run_id, cadence, target) else run_id
+            _record(conn, run_id, owner, cadence, target, at, ref, "recreate")
+            record_issue_repo(conn, repo)
+        return Existing(ref, "recent")
+    return None
+
+
 def check_duplicate(
     conn: sqlite3.Connection | None,
     reader: IssueReader,
@@ -130,10 +165,11 @@ def check_duplicate(
         if row.repo is not None and row.number is not None:
             found = reader.get_issue(row.repo, row.number)
             if found.ref is not None and not found.transferred:
-                if not dry_run and row.repo.lower() == repo:
+                write_meta = row.repo.lower() == repo
+                if not dry_run and write_meta:
                     with _recording(found.ref):
                         record_issue_repo(conn, repo)
-                return Existing(found.ref, "db")
+                return Existing(found.ref, "db", write_meta)
             if found.ref is not None:
                 if not dry_run:
                     with _recording(found.ref):
@@ -141,7 +177,7 @@ def check_duplicate(
                         # 元の記録が設定の投稿先のときだけ書く（別のリポジトリのものは書かない）
                         if row.repo.lower() == repo:
                             record_issue_repo(conn, repo)
-                return Existing(found.ref, "transferred")
+                return Existing(found.ref, "transferred", row.repo.lower() == repo)
         stale = True  # 410・404。2 で確かめ直す
     return _search(conn, reader, repo, run_id, cadence, target, at, dry_run, stale)
 

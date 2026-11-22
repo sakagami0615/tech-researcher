@@ -234,6 +234,58 @@ class IssueReader:
                 return
         raise IssueReadError(f"ラベル付きの Issue が {MAX_PAGES} ページを超えた", "too_many")
 
+    def viewer_login(self) -> str | None:
+        """トークンの持ち主のログイン名。読めなければ None（作成者で絞らずに探す）。"""
+        url = f"{API_ROOT}/user"
+        try:
+            data = _json(url, self._get(url))
+        except FetchError, IssueReadError:
+            return None
+        login = data.get("login") if isinstance(data, dict) else None
+        return login if isinstance(login, str) and re.fullmatch(_NAME, login) else None
+
+    def list_recent_issues(
+        self, repo: str, since: str, creator: str | None = None
+    ) -> Iterator[ListedIssue]:
+        """since（UTC の ISO 8601）以降に更新された Issue を、ラベルによらず全ページ読む。
+
+        ラベルが外れた Issue も見つけるため（作成の応答が届かなかった後の確認）。作成者
+        （creator）があれば、その人の Issue だけ。プルリクエストは除く。本文の1行目だけを識別子
+        として読む。検索 API は使わない。
+        """
+        for page in range(1, MAX_PAGES + 1):
+            params = {
+                "state": "all",
+                "since": since,
+                "sort": "created",
+                "direction": "asc",
+                "per_page": PER_PAGE,
+                "page": page,
+            }
+            if creator:
+                params["creator"] = creator
+            url = f"{API_ROOT}/repos/{repo}/issues?{urlencode(params)}"
+            try:
+                response = self._get(url)
+            except FetchError as e:
+                category = "redirect" if e.status in _REDIRECTS else classify(e)
+                raise _error(url, category, e.status) from e
+            items = _json(url, response)
+            if not isinstance(items, list):
+                raise _error(url, "invalid_response", None)
+            for item in items:
+                if not isinstance(item, dict) or not _is_number(item.get("number")):
+                    raise _error(url, "invalid_response", None)
+                if "pull_request" in item:
+                    continue
+                body = item.get("body")
+                yield ListedIssue(
+                    item["number"], parse_marker(body if isinstance(body, str) else None)
+                )
+            if len(items) < PER_PAGE:
+                return
+        raise IssueReadError(f"Issue が {MAX_PAGES} ページを超えた", "too_many")
+
     def _get(self, url: str) -> Response:
         return self._fetch(
             url,

@@ -400,3 +400,37 @@ def test_reads_without_a_time_limit_pass_nothing(limits):
     fake = FakeFetch({"number": 3})
     IssueReader(TOKEN, limits, fetch_url=fake).get_issue("o/r", 3)
     assert fake.kw == {}
+
+
+def test_list_recent_issues_reads_without_labels_and_filters_by_creator(limits):
+    fake = FakeFetch(
+        [
+            item(1, MARK + "\n本文", labels=[]),
+            {"number": 2, "body": MARK, "labels": [], "pull_request": {}},
+            {"number": 3, "body": "識別子なし", "labels": []},
+        ]
+    )
+    r = IssueReader(TOKEN, limits, fetch_url=fake)
+    found = list(r.list_recent_issues("o/r", "2026-10-24T06:00:00Z", "bot"))
+
+    assert [(f.number, f.marker is not None) for f in found] == [(1, True), (3, False)]
+    query = parse_qs(urlsplit(fake.calls[0][0]).query)
+    assert "labels" not in query  # ラベルに頼らない
+    assert query["since"] == ["2026-10-24T06:00:00Z"] and query["creator"] == ["bot"]
+    assert query["state"] == ["all"]
+
+
+def test_list_recent_issues_without_creator_and_with_bad_shape(limits):
+    r, fake = reader(limits, {"not": "a list"})
+    with pytest.raises(IssueReadError):
+        list(r.list_recent_issues("o/r", "2026-10-24T06:00:00Z"))
+    assert "creator" not in parse_qs(urlsplit(fake.calls[0][0]).query)
+
+
+def test_viewer_login_is_read_or_none(limits):
+    r, _ = reader(limits, {"login": "bot"})
+    assert r.viewer_login() == "bot"
+    r, _ = reader(limits, http_error(403))
+    assert r.viewer_login() is None
+    r, _ = reader(limits, {"login": "bad login!"})
+    assert r.viewer_login() is None
