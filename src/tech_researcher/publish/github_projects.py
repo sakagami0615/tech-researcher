@@ -40,7 +40,7 @@ TOKEN_ENV = "GITHUB_PROJECTS_TOKEN"
 OWNER_ENV = "GITHUB_PROJECTS_OWNER"
 NUMBER_ENV = "GITHUB_PROJECTS_NUMBER"
 CONFIG = "config"  # 設定の誤り（分類の語）
-_OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]{0,38}")  # GitHub のユーザー名
+_OWNER = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}")  # GitHub のユーザー名
 _NUMBER = re.compile(r"[0-9]{1,9}")
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 

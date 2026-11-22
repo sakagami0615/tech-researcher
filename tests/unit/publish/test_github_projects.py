@@ -288,3 +288,19 @@ def test_past_deadline_sends_nothing(limits):
     with pytest.raises(ProjectsError) as raised:
         r.add_issue(ISSUE)
     assert (raised.value.category, requests, budget.used) == ("timeout", [], 0)
+
+
+def test_retries_stop_at_the_budget(limits):
+    open_url, requests = _scripted(_http_error(503), _http_error(503), _http_error(503))
+    budget = WriteBudget(2)
+    fetch_url = functools.partial(fetch, open_url=open_url, sleep=lambda _: None)
+    r = ProjectsRegistrar(CONFIG, limits, budget, fetch_url=fetch_url)
+    with pytest.raises(ProjectsError):
+        r.add_issue(ISSUE)
+    assert (len(requests), budget.used) == (2, 2)
+
+
+@pytest.mark.parametrize("owner", ["a-", "a--b", "-a"])
+def test_owner_shape_matches_github_usernames(owner):
+    with pytest.raises(ProjectsError):
+        projects_config({**ENV, OWNER_ENV: owner})
