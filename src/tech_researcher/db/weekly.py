@@ -41,6 +41,7 @@ class PastObservation:
     source_id: str
     kind: str
     title: str
+    url: str  # items の canonical_url。D1 の許可集合に使う（出典の URL は ID からコードが付ける）
 
 
 def past_observations(conn: sqlite3.Connection, weeks: list[date]) -> list[PastObservation]:
@@ -49,14 +50,14 @@ def past_observations(conn: sqlite3.Connection, weeks: list[date]) -> list[PastO
         return []
     marks = ", ".join("?" * len(weeks))
     rows = conn.execute(
-        "SELECT item_id, target, json_extract(sources_json, '$[0].source_id'), kind, title"
-        f" FROM items WHERE cadence = 'weekly' AND target IN ({marks})"
+        "SELECT item_id, target, json_extract(sources_json, '$[0].source_id'), kind, title,"
+        f" canonical_url FROM items WHERE cadence = 'weekly' AND target IN ({marks})"
         " ORDER BY target DESC, item_id",
         [d.isoformat() for d in weeks],
     )
     return [
-        PastObservation(item_ref(item_id), date.fromisoformat(week), source_id, kind, title)
-        for item_id, week, source_id, kind, title in rows
+        PastObservation(item_ref(item_id), date.fromisoformat(week), source_id, kind, title, url)
+        for item_id, week, source_id, kind, title, url in rows
     ]
 
 

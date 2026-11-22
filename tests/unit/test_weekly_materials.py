@@ -257,6 +257,7 @@ def test_compare_weeks_drop_weeks_without_weekly_items(conn):
         (date(2026, 10, 5), "rss:a", "article", "三週前の Y"),
     ]
     assert all(o.item_id.startswith("i") for o in observations)
+    assert [o.url for o in observations] == [X, Y]  # D1 の許可集合に使う canonical_url
     assert past_observations(conn, []) == []
 
 
