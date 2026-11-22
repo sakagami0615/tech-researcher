@@ -146,8 +146,9 @@ def test_saves_report_entries_in_ai_order_with_theme_numbers(week, conn):
     assert json.loads(counts) == {
         "collected": 3,
         "ai_output": 6,
-        "excluded": 2,
-        "excluded_by_reason": {"invalid_id": 1, "too_long": 1},
+        "excluded": 1,
+        "excluded_by_reason": {"invalid_id": 1},
+        "excluded_rows": 1,
         "published": 5,
     }
     assert json.loads(ai_output) == full_output(week)

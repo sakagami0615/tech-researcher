@@ -679,9 +679,13 @@ def _fail(
 ) -> Summary:
     """日次の ① 〜 ③ の実行エラー：④ の調査・本文・本番の runs の終わりを行い、要約にする。
 
-    週次の失敗の分岐は週次の統合（#47・#48）で足す（いまは要約だけ）。
+    週次は本番の runs を閉じるだけ（④ と失敗の Issue は週次の失敗分岐の Issue で足す）。
     """
     assert category is not None
+    if job.cadence == "weekly":  # 失敗の Issue は週次の失敗分岐の Issue で足す。runs だけ閉じる
+        if not job.files.dry_run:
+            outcome = failures.Outcome(failures.RUN_ERROR, stage, category, models, retries)
+            failures.close_run(job, outcome, MINUTE)
     if job.cadence == "daily":
         posting = failures.handle(
             job, failures.Outcome(failures.RUN_ERROR, stage, category, models, retries), MINUTE

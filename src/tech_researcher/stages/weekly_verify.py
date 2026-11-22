@@ -216,11 +216,14 @@ class _Store:
         output を渡すと AI の出力（マスクして）を、verified を渡すと項目を保存する。掲載した件数は、
         本文を渡した（合格の）ときだけ数える。秘匿情報を検出した実行は、どちらも渡さない。
         """
+        # 比較の行の除外は、項目（領域）の数と単位が違うので別に数える（AI の出力 − 除外 = 掲載）
+        items = [x for x in excluded if x.section != "comparison_row"]
         counts = {
             "collected": self.collected,
             "ai_output": ai_count,
-            "excluded": len(excluded),
-            "excluded_by_reason": dict(Counter(x.category for x in excluded)),
+            "excluded": len(items),
+            "excluded_by_reason": dict(Counter(x.category for x in items)),
+            "excluded_rows": len(excluded) - len(items),
             "published": verified.checked.published if body is not None and verified else 0,
         }
         facts = {
