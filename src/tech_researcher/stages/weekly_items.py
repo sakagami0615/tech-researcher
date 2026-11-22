@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import date
 
 from tech_researcher.collect.period_filter import window_events
-from tech_researcher.collect.records import Attention, Event, Item
+from tech_researcher.collect.records import Attention, Event, GitHubRepo, Item
 from tech_researcher.db.items import ItemRow, load_item_rows
 from tech_researcher.periods import JST, Target
 from tech_researcher.stages.collect_store import INCLUSION_ORDER, item_kind, item_row
@@ -60,7 +60,7 @@ def _merge(target: Target, rows: list[ItemRow]) -> ItemRow:
         attention=_latest_attention(a for i in items for a in i.attention),
         links=_unique((link for i in items for link in i.links), lambda x: x),
         meta_terms=_unique((t for i in items for t in i.meta_terms), lambda x: x),
-        github=next((i.github for i in items if i.github is not None), None),
+        github=_merge_repo([r.item.github for r in rows]),
     )
     candidates = [*(r.inclusion for r in ordered), *window_events(item, target)]
     chosen = min(candidates, key=lambda e: (INCLUSION_ORDER[e.type], e.at))
@@ -95,6 +95,15 @@ def _unique[T](values: Iterable[T], key) -> tuple[T, ...]:
     for v in values:
         found.setdefault(key(v), v)
     return tuple(found.values())
+
+
+def _merge_repo(values: Sequence[GitHubRepo | None]) -> GitHubRepo | None:
+    """rows の順（取り直した分、新しい日次の順）で最初の値を使い、言及元は全部の和集合にする。"""
+    found = [g for g in values if g is not None]
+    if not found:
+        return None
+    mentions = _unique((u for g in found for u in g.mentioned_by), lambda u: u)
+    return replace(found[0], mentioned_by=mentions)
 
 
 def _latest_attention(values: Iterable[Attention]) -> tuple[Attention, ...]:

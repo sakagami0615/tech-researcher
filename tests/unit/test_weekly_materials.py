@@ -362,3 +362,16 @@ def test_weekly_input_uses_the_same_representative_and_inclusion_as_items():
         "excerpt": "公開日時のある記事の抜粋",
     }
     assert (entry["event"]["type"], entry["date"]) == ("published", "2026-10-21")
+
+
+def test_merged_repo_uses_the_newest_day_and_all_mentions(conn):
+    def repo_item(day, stars, mention):
+        repo = GitHubRepo("o/repo", noon(day), stars, None, (mention,))
+        return item_of(replace(rss("https://github.com/o/repo", day, "repo"), github=repo))
+
+    # 公開日時の精度は同じ。新しい日次の値（Star の累計）を使い、言及元は両方残す
+    store_daily(conn, date(2026, 10, 20), repo_item(date(2026, 10, 20), 100, X))
+    store_daily(conn, date(2026, 10, 24), repo_item(date(2026, 10, 24), 900, Y))
+    (row,) = weekly_rows(WEEK, [], load_daily_rows(conn, WEEK))
+    assert row.item.github.stars_total == 900
+    assert row.item.github.mentioned_by == (Y, X)
