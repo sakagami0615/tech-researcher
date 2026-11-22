@@ -22,6 +22,7 @@ from tech_researcher.publish.github_issues import (
     ListedIssue,
     parse_marker,
 )
+from tech_researcher.publish.github_projects import ProjectsError
 from tech_researcher.publish.github_write import CreatedIssue, IssueWriteError
 from tech_researcher.publish.post import (
     BadIssue,
@@ -111,6 +112,20 @@ class FakeReader:
                 yield ListedIssue(c["number"], parse_marker(c["body"]))
 
 
+class FakeRegistrar:
+    """Projects への登録の要求を覚える。"""
+
+    def __init__(self, failure=None):
+        self.added = []
+        self.deadline = None
+        self.failure = failure
+
+    def add_issue(self, ref):
+        self.added.append(ref)
+        if self.failure:
+            raise self.failure
+
+
 class FakeGitHub:
     def __init__(self):
         self.created = []
@@ -123,10 +138,13 @@ class FakeGitHub:
         self.reader_args = []
         self.recent_args = []
         self.recent_error = None
+        self.project_failure = None  # 登録の要求で投げる失敗
+        self.writer_budget = self.registrar_budget = None
         self.unlabeled = False  # 作った Issue のラベルを外して、ラベルの探索から見えなくする
 
-    def make_writer(self, token, limits, clock=None):
+    def make_writer(self, token, limits, clock=None, budget=None):
         self.token = token
+        self.writer_budget = budget
         writer = FakeWriter(self)
         self.writers.append(writer)
         return writer
@@ -134,6 +152,11 @@ class FakeGitHub:
     def make_reader(self, token, limits, **kw):
         self.reader_args.append(kw)
         return FakeReader(self)
+
+    def make_registrar(self, config, limits, budget, clock=None):
+        self.registrar = FakeRegistrar(self.project_failure)
+        self.registrar_budget = budget
+        return self.registrar
 
 
 @pytest.fixture
@@ -161,7 +184,7 @@ class Env:
         )
         self.scanner = SecretScanner([ISSUE_TOKEN])
         self.sleeps = []
-        self.environ = dict(ENVIRON)
+        self.environ = dict(ENVIRON)  # Projects の指定なし（登録は test_projects_sync）
         self.clock = lambda: 0.0
 
     def write(self, report, run=RUN):
@@ -182,6 +205,7 @@ class Env:
             "now": AT,
             "make_writer": self.github.make_writer,
             "make_reader": self.github.make_reader,
+            "make_registrar": self.github.make_registrar,
             "sleep": self.sleeps.append,
             "clock": self.clock,
             **kw,
@@ -190,7 +214,9 @@ class Env:
 
     def post(self, kind, report=None, run=RUN, stopped=None, **kw):
         self.write(report or (report_for(run) if kind == "report" else other_for(kind)), run)
-        return self.poster(run, **kw).run(kind, stopped)
+        result = self.poster(run, **kw).run(kind, stopped)
+        self.projects = result.pop("projects", None)  # 登録は test_projects_sync で確かめる
+        return result
 
     def issue_rows(self):
         return self.conn.execute(
@@ -223,7 +249,7 @@ def test_report_is_created_with_labels_recorded_and_run_closed(env, github):
     assert env.conn.execute("SELECT value FROM meta WHERE key = 'issue_repo'").fetchone() == (REPO,)
     assert env.run_row() == ("succeeded", None, None, 1)
     stages = [(r["stage"], r["event"]) for r in env.log_lines()]
-    assert stages == [("post", "start"), ("post", "end")]
+    assert stages == [("post", "start"), ("post", "end"), ("post", "warning")]  # 登録の指定なし
 
 
 @pytest.mark.parametrize("kind", ["rejected", "run_error"])
@@ -323,7 +349,7 @@ def test_lost_response_is_found_by_the_dedup_before_retrying(env, github):
             )
             raise IssueWriteError("x", "timeout")
 
-    github.make_writer = lambda token, limits, clock=None: Lost(github)
+    github.make_writer = lambda token, limits, clock=None, budget=None: Lost(github)
     result = env.post("report")
 
     assert (result["result"], result["number"]) == ("existing", 50)
@@ -615,7 +641,7 @@ def test_maybe_created_failure_finds_an_issue_whose_labels_were_removed(env, git
             )
             raise _error("timeout", False)
 
-    github.make_writer = lambda token, limits, clock=None: Lost(github)
+    github.make_writer = lambda token, limits, clock=None, budget=None: Lost(github)
     result = env.post("report")
 
     assert (result["result"], result["number"]) == ("existing", 70)
@@ -718,7 +744,7 @@ def test_invalid_response_for_a_report_runs_the_dedup_once(env, github):
             )
             raise IssueWriteError("x", "invalid_response", 201)
 
-    github.make_writer = lambda token, limits, clock=None: Odd(github)
+    github.make_writer = lambda token, limits, clock=None, budget=None: Odd(github)
     result = env.post("report")
 
     assert (result["result"], result["number"]) == ("existing", 60)
@@ -933,7 +959,7 @@ def test_read_failure_of_the_last_look_still_records_uncertain(env, github):
             github.read_error = IssueReadError("x", "http_5xx", 503)  # 最後の確認で読めない
             raise IssueWriteError("x", "invalid_response", 201)
 
-    github.make_writer = lambda token, limits, clock=None: Odd(github)
+    github.make_writer = lambda token, limits, clock=None, budget=None: Odd(github)
     result = env.post("report")
 
     assert (result["result"], result["error_category"]) == ("failed", "invalid_response")
@@ -973,7 +999,7 @@ def test_last_look_finds_an_issue_created_by_the_final_attempt(env, github):
             )
             raise _error("timeout", False)
 
-    github.make_writer = lambda token, limits, clock=None: Lost(github)
+    github.make_writer = lambda token, limits, clock=None, budget=None: Lost(github)
     result = env.post("report")
     assert (result["result"], result["number"]) == ("existing", 70)
 
@@ -1081,7 +1107,7 @@ def _label_stripped_lost_writer(github):
             )
             raise _error("timeout", False)
 
-    return lambda token, limits, clock=None: Lost(github)
+    return lambda token, limits, clock=None, budget=None: Lost(github)
 
 
 def test_found_by_the_unlabeled_lookup_but_not_recorded_stays_uncertain(env, github, monkeypatch):
@@ -1158,3 +1184,72 @@ def test_record_failure_without_a_maybe_created_failure_stays_issue_record_faile
 
     assert result["error_category"] == "issue_record_failed"
     assert env.issue_rows() == []  # uncertain にしない（作成を試みていない）
+
+
+# --- Projects への登録（4.4。詳細は test_projects_sync） ---
+
+
+def projects_env(env):
+    env.environ.update(
+        {
+            "GITHUB_PROJECTS_TOKEN": "fake-projects-credential-1234",
+            "GITHUB_PROJECTS_OWNER": "tester",
+            "GITHUB_PROJECTS_NUMBER": "3",
+        }
+    )
+
+
+def test_created_issue_is_registered_in_projects_with_the_shared_budget(env, github):
+    projects_env(env)
+
+    result = env.post("report")
+
+    assert result["result"] == "created"
+    assert env.projects["registered"] == 1
+    assert github.registrar.added == [IssueRef(REPO, 100)]
+    assert env.issue_rows() == [(RUN, "report", "created", REPO, 100, "done")]
+    assert github.writer_budget is not None
+    assert github.writer_budget is github.registrar_budget  # 同じ予算を共有する
+    assert github.registrar.deadline is None
+
+
+def test_existing_issue_is_registered_too(env, github):
+    projects_env(env)
+    env.post("report")
+    env.conn.execute("UPDATE issues SET projects_state = 'pending'")
+
+    result = env.post("report", run=RETRY)
+
+    assert result["result"] == "existing"
+    assert env.projects["registered"] == 1
+    assert env.issue_rows() == [(RUN, "report", "created", REPO, 100, "done")]
+
+
+def test_projects_failure_keeps_the_job_successful_and_creates_no_error_issue(env, github):
+    projects_env(env)
+    github.project_failure = ProjectsError("HTTP 422", "http_4xx", 422)
+
+    result = env.post("report")
+
+    assert result["result"] == "created"
+    assert "error_category" not in result
+    assert env.projects["failed"] == 1
+    assert env.run_row()[0] == "succeeded"
+    assert env.issue_rows() == [(RUN, "report", "created", REPO, 100, "pending")]
+    assert len(github.created) == 1  # 実行エラー Issue は作らない
+
+
+def test_pending_issues_of_earlier_runs_are_registered_even_when_this_post_fails(env, github):
+    projects_env(env)
+    env.post("report")
+    env.conn.execute("UPDATE issues SET projects_state = 'pending'")
+    github.failures = [IssueWriteError("x", "http_4xx", 422)]
+
+    result = env.post("run_error", run=RETRY)
+
+    assert result["result"] == "failed"
+    assert env.projects["registered"] == 1
+    assert env.issue_rows() == [
+        (RUN, "report", "created", REPO, 100, "done"),
+        (RETRY, "run_error", "failed", None, None, None),
+    ]
