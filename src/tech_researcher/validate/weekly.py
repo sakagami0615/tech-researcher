@@ -39,8 +39,9 @@ from tech_researcher.validate.quote import (
 from tech_researcher.validate.sources import item_urls, normalized_urls
 from tech_researcher.validate.text import LIMIT_FACTOR, has_html, has_link
 
-MIN_PRODUCT_NAME = 2  # 製品名の最短の長さ（1文字の名前はどのタイトルにも含まれうる）
-_ALNUM = frozenset("0123456789abcdefghijklmnopqrstuvwxyz")
+MIN_PRODUCT_NAME = 2  # 日本語の製品名の最短の長さ（1文字はどのタイトルにも含まれうる）
+# 日本語（ひらがな・カタカナ・漢字）。語の境界にしない（「楽天AIが公開」の AI を通す）
+_JAPANESE = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
 
 Entry = ThemeEntry | TechChangeEntry | ComparisonEntry | ComparisonRow | WatchEntry
 
@@ -350,19 +351,49 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
     name = _fold(entry.product_name or "")
     if not name:
         return "GitHub 外の行に製品名がない"
-    if len(name) < MIN_PRODUCT_NAME:
+    if len(name) < MIN_PRODUCT_NAME and not _is_word_char(name):
         return f"製品名が {MIN_PRODUCT_NAME} 文字より短い"
     if _contains_word(_fold(ctx.titles.get(entry.item_id, "")), name):
         return None
     return "製品名が収集タイトルにない"
 
 
+def _is_word_char(text: str) -> bool:
+    """日本語以外の英数字（Unicode）だけでできている（語の境界を見る文字）。"""
+    return text.isalnum() and not _JAPANESE.search(text)
+
+
 def _contains_word(title: str, name: str) -> bool:
-    """name が title に語として含まれる。英数字で始まる・終わる名前は、前後が英数字でないこと
-    （Intel は Intelligence に、DB は FooDB に一致させない）。日本語は部分一致のまま。"""
-    before = "(?<![0-9a-z])" if name[0] in _ALNUM else ""
-    after = "(?![0-9a-z])" if name[-1] in _ALNUM else ""
-    return re.search(before + re.escape(name) + after, title) is not None
+    """name が title に語として含まれる（Intel は Intelligence に、DB は FooDB に一致させない）。
+
+    - 前：名前が日本語以外の英数字で始まるなら、直前がそのような英数字でないこと
+    - 後：名前が英字で終わるなら後ろに英字が続かないこと（TypeScript5.7 の数字は許す）、
+      数字で終わるなら後ろに英数字が続かないこと（GPT-4 は GPT-4o に一致させない）
+    - 日本語の文字と記号は境界にしない。記号で終わる名前の後ろは見ない（C# は C#compiler に一致）
+    """
+    start = title.find(name)
+    while start >= 0:
+        end = start + len(name)
+        if _boundary_before(title, start, name) and _boundary_after(title, end, name):
+            return True
+        start = title.find(name, start + 1)
+    return False
+
+
+def _boundary_before(title: str, start: int, name: str) -> bool:
+    if not _is_word_char(name[0]) or start == 0:
+        return True
+    return not _is_word_char(title[start - 1])
+
+
+def _boundary_after(title: str, end: int, name: str) -> bool:
+    last = name[-1]
+    if not _is_word_char(last) or end >= len(title):
+        return True
+    following = title[end]
+    if last.isalpha():
+        return not (_is_word_char(following) and following.isalpha())
+    return not _is_word_char(following)
 
 
 def _fold(text: str) -> str:

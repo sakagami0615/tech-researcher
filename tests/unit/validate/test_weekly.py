@@ -531,11 +531,25 @@ def test_product_name_must_match_the_title_with_symbols(name):
         ("Welcome to Foo DB 3", "DB", True),
         ("FooDB (beta)", "FooDB", True),  # 前後が記号
         ("Use C# today", "C#", True),
-        ("AB", "A", False),  # 1文字は照合しない
-        ("A B", "A", False),
+        ("AB", "A", False),  # 英数字の名前は1文字でも照合する（境界で誤一致を防ぐ）
+        ("A B", "A", True),
+        ("X（旧Twitter）", "X", True),
+        ("Xbox 発売", "X", False),
+        ("新製品の発表", "新", False),  # 日本語1文字の名前は短すぎる
+        ("βIntel launches", "Intel", False),  # 英数字は Unicode で見る
+        ("Αintel", "intel", False),
+        ("楽天AIが公開", "AI", True),  # 日本語は境界にしない
+        ("楽天AIが公開", "楽天AI", True),
+        ("TypeScript5.7 released", "TypeScript", True),  # 後ろの数字は許す
+        ("Next.js15 released", "Next.js", True),
+        ("Next.js15 released", "Next.js15", True),
+        ("GPT-4o released", "GPT-4", False),  # 数字で終わる名前の後ろに英字は続かない
+        ("GPT-4 released", "GPT-4", True),
+        ("Python3 guide", "Python", True),
+        ("C#compiler news", "C#", True),  # 記号で終わる名前の後ろは見ない
         ("新製品「サンプルDB」登場", "サンプルDB", True),  # 日本語は部分一致のまま
         ("新製品サンプルDBを公開", "サンプル", True),
-        ("x2 pro", "x", False),
+        ("x2 pro", "x", True),
     ],
 )
 def test_product_name_matches_as_a_word(title, name, ok):
