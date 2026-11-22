@@ -112,11 +112,15 @@ def write_weekly_input(
 class WeeklyVerified:
     """③ の結果。checked は検査の結果（掲載する項目と除外した項目）、report は作った本文。
 
-    checked.output のテーマには、新しいテーマの番号を振ってある。
+    checked.output のテーマには、新しいテーマの番号を振ってある。parsed は AI が返した出力
+    （checked.excluded の項目は、この中の項目そのもの。保存で AI の出力の順に並べるために使う）、
+    observed は今週の観測の件数。
     """
 
     checked: WeeklyChecked
     report: Report
+    parsed: WeeklyOutput
+    observed: int
 
 
 def verify_weekly(
@@ -130,14 +134,15 @@ def verify_weekly(
     """② の出力（agent-output.json の中身）を検査し、通った項目から本文を作る。
 
     出力全体がスキーマに合わなければ ValueError（D6(a)。不合格にするのは呼ぶ側）。
-    新しいテーマの番号は、DB の最後の番号の次から振る（DB がなければ T0001 から）。
+    新しいテーマの番号は、DB の最後の番号（この実行がすでに保存した分を除く）の次から振る
+    （DB がなければ T0001 から）。
     """
     data, items, materials = _weekly_input(config, target, run_dir, db)
     parsed = parse_weekly_output(output)
     checked = check_weekly(
         parsed, data, items, {p.item_id: p.url for p in materials.past}, config.quote
     )
-    first_new = next_theme_id(db) if db is not None else "T0001"
+    first_new = next_theme_id(db, run_id) if db is not None else "T0001"
     numbered = WeeklyOutput(
         tuple(assign_theme_ids(checked.output.themes, first_new)),
         checked.output.tech_changes,
@@ -155,4 +160,4 @@ def verify_weekly(
         observed=len(items),
         unavailable=unavailable_notes(run_dir, config),
     )
-    return WeeklyVerified(checked, report)
+    return WeeklyVerified(checked, report, parsed, len(items))

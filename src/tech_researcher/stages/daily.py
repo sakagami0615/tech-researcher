@@ -69,7 +69,7 @@ RESULTS = frozenset({REPORT, REJECTED, SECRET_DETECTED})
 def write_daily_input(config: Config, target: Target, run_dir: Path) -> None:
     """run_dir/collected.json から、run_dir/agent-input.json を書く。"""
     data = _input(config, target, _numbered(run_dir))
-    _write(run_dir / AGENT_INPUT, json.dumps(data, ensure_ascii=False))
+    write_atomic(run_dir / AGENT_INPUT, json.dumps(data, ensure_ascii=False))
 
 
 def run_verify(
@@ -96,7 +96,7 @@ def run_verify(
     # エスケープを消すので、無害化の前の AI の出力の全文も検査する。除外した項目の中でも全体を止める
     # 全文は json.dumps で1段エスケープされるので、すでにエスケープ済みの値は照合の段数を超える。
     # キーと文字列の値を1つずつも検査する
-    texts = [json.dumps(output, ensure_ascii=False), *_strings(output)]
+    texts = [json.dumps(output, ensure_ascii=False), *json_strings(output)]
     raw_kinds = sorted({f.kind for text in texts for f in scanner.find(text)})
     if raw_kinds:
         # 原文に秘匿情報があるので、AI の出力も本文も保存しない
@@ -111,11 +111,13 @@ def run_verify(
             ["secret_detected"],
             ai_count=_output_count(output),
         )
-        _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
+        write_atomic(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": raw_kinds}))
         log.write(
             "verify", "secret_detected", error_category=SECRET_DETECTED, detail=",".join(raw_kinds)
         )
-        return _finish(run_dir, log, SECRET_DETECTED, None, entries=0, excluded=[], facts=facts)
+        return finish_verify(
+            run_dir, log, SECRET_DETECTED, None, entries=0, excluded=[], facts=facts
+        )
     try:
         entries = parse_daily_output(output)
     except ValueError as e:
@@ -134,7 +136,7 @@ def run_verify(
             scanner=scanner,
             ai_count=_output_count(output),
         )
-        return _finish(
+        return finish_verify(
             run_dir, log, REJECTED, "invalid_output", entries=0, excluded=[], facts=facts
         )
     kept, excluded, verification, outcomes = _check_entries(entries, data, items, config.quote)
@@ -161,7 +163,7 @@ def run_verify(
             output=output,
             scanner=scanner,
         )
-        return _finish(
+        return finish_verify(
             run_dir, log, REJECTED, "all_excluded", entries=0, excluded=reasons, facts=facts
         )
     unjudged = unjudged_notes(run_dir, config)
@@ -193,8 +195,8 @@ def run_verify(
             ["secret_detected"],
             keep_entries=False,
         )
-        _write(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": kinds}))
-        return _finish(
+        write_atomic(run_dir / SECRET_SCAN, json.dumps({"detected": True, "kinds": kinds}))
+        return finish_verify(
             run_dir, log, SECRET_DETECTED, None, entries=len(kept), excluded=reasons, facts=facts
         )
     if body_too_long(report.body):  # 投稿できない長さ。掲載を絞って作り直さない（再生成しない）
@@ -213,7 +215,7 @@ def run_verify(
             output=output,
             scanner=scanner,
         )
-        return _finish(
+        return finish_verify(
             run_dir, log, REJECTED, "body_too_long", entries=0, excluded=reasons, facts=facts
         )
     facts = _save(
@@ -231,9 +233,11 @@ def run_verify(
         body=report.body,
         kept=kept,
     )
-    _write(run_dir / SECRET_SCAN, json.dumps({"detected": False, "kinds": []}))
-    _write(run_dir / ISSUE, issue_text(report))
-    return _finish(run_dir, log, REPORT, None, entries=len(kept), excluded=reasons, facts=facts)
+    write_atomic(run_dir / SECRET_SCAN, json.dumps({"detected": False, "kinds": []}))
+    write_atomic(run_dir / ISSUE, issue_text(report))
+    return finish_verify(
+        run_dir, log, REPORT, None, entries=len(kept), excluded=reasons, facts=facts
+    )
 
 
 def _check_entries(
@@ -288,17 +292,17 @@ def _output_count(output: object) -> int:
     return len(items) if isinstance(items, list) else 0
 
 
-def _strings(value: object) -> Iterator[str]:
+def json_strings(value: object) -> Iterator[str]:
     """JSON の値の、すべてのキーと文字列の値。"""
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
         for key, item in value.items():
             yield str(key)
-            yield from _strings(item)
+            yield from json_strings(item)
     elif isinstance(value, list):
         for item in value:
-            yield from _strings(item)
+            yield from json_strings(item)
 
 
 def _numbered(run_dir: Path) -> dict[str, Item]:
@@ -370,12 +374,14 @@ def _save(
                 section="daily_item",
                 status="published" if found is None else "excluded",
                 item_ids=tuple(entry.item_ids),
-                payload=_mask(_payload(entry, found), scanner),
+                payload=mask_json(_payload(entry, found), scanner),
                 exclusion_reasons=() if found is None else (found[0],),
                 display_no=numbers.get(index),
             )
         )
-    ai_output = None if output is None else json.dumps(_mask(output, scanner), ensure_ascii=False)
+    ai_output = (
+        None if output is None else json.dumps(mask_json(output, scanner), ensure_ascii=False)
+    )
     save_report(
         db,
         run_id,
@@ -412,20 +418,20 @@ def _payload(entry: DailyEntry, excluded: tuple[str, str] | None) -> dict:
     return payload
 
 
-def _mask(value, scanner: SecretScanner | None):
+def mask_json(value, scanner: SecretScanner | None):
     """JSON の値の、すべての文字列（と辞書のキー）をマスクする。"""
     if scanner is None:
         return value
     if isinstance(value, str):
         return scanner.mask(value)
     if isinstance(value, dict):
-        return {scanner.mask(str(k)): _mask(v, scanner) for k, v in value.items()}
+        return {scanner.mask(str(k)): mask_json(v, scanner) for k, v in value.items()}
     if isinstance(value, list):
-        return [_mask(v, scanner) for v in value]
+        return [mask_json(v, scanner) for v in value]
     return value
 
 
-def _finish(
+def finish_verify(
     run_dir: Path,
     log: RunLog,
     result: str,
@@ -442,7 +448,7 @@ def _finish(
         "excluded": excluded,
         **facts,
     }
-    _write(run_dir / VALIDATION, json.dumps(validation, ensure_ascii=False))
+    write_atomic(run_dir / VALIDATION, json.dumps(validation, ensure_ascii=False))
     log.write("verify", "end", count=entries)
     return {"result": result, "entries": entries, "excluded": len(excluded)}
 
@@ -452,7 +458,7 @@ def issue_text(report: Report) -> str:
     return f"{report.title}\n{', '.join(report.labels)}\n\n---\n\n{report.body}"
 
 
-def _write(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str) -> None:
     """途中で止まっても壊れたファイルを残さないよう、一時ファイルに書いてから置き換える。"""
     partial = path.with_name(f"{path.name}.partial")
     partial.write_text(text, encoding="utf-8")

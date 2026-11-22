@@ -25,8 +25,10 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 failures.py が ④ の調査・本文（issue.md）・本番の runs の終わりへつなぎ、本文を ⑤ で投稿する。
 レポートが合格したときも ⑤ で投稿する。⑤ は worker の `post` で、Issue 用トークンは worker だけが
 持つ（publish/post.py）。投稿した Issue の URL は要約の issue_url に出す。投稿できなかったときは
-実行エラー（failed_stage は post）。ドライランは ⑤ を飛ばす。週次は ① の後に終わる（ドライランは
-① だけ、本番は not_implemented）。週次の ② 〜 ⑤ への分岐は、週次の Issue で足す。
+実行エラー（failed_stage は post）。ドライランは ⑤ を飛ばす。
+週次も同じ流れで、② は週次の分析スキル、③ は検査・テーマ番号の確定・保存（weekly_verify.py）、
+⑤ は日次と同じ投稿（重複防止・Projects 登録）。週次の失敗の分岐（④・不合格 Issue・実行エラー）は
+週次の失敗分岐の Issue で足す（いまは ③ の不合格・公開停止で、本番の runs を閉じるだけ）。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -70,7 +72,7 @@ from tech_researcher.runfiles import RunFiles, data_dir, new_run_id, run_files
 from tech_researcher.stages.collect import collect_failure
 from tech_researcher.stages.daily import AGENT_INPUT, AGENT_OUTPUT, REJECTED, SECRET_DETECTED
 from tech_researcher.stages.daily import RESULTS as VERIFY_RESULTS
-from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA
+from tech_researcher.validate.schema import DAILY_OUTPUT_SCHEMA, WEEKLY_OUTPUT_SCHEMA
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -81,6 +83,7 @@ RUN_ID_LABEL = "tech-researcher.run-id"
 SUMMARY = "summary.json"  # ドライランの出力のフォルダに残す要約（structure.md 7.2）
 # ② 日次の出力のスキーマ。`--json-schema` に渡し、③ も同じものを検査に使う（structure.md 2.2）
 DAILY_SCHEMA = resources.files("tech_researcher") / "schemas" / DAILY_OUTPUT_SCHEMA
+WEEKLY_SCHEMA = resources.files("tech_researcher") / "schemas" / WEEKLY_OUTPUT_SCHEMA
 
 # compose に渡す環境変数（許可リスト）。PATH・HOME は docker の CLI とプラグインを探すため、
 # DOCKER_HOST は Docker のデーモンの指定（rootless など）のため。DOCKER_CONFIG は統括スクリプトが
@@ -558,14 +561,6 @@ def _run_stages(job: Job) -> Summary:
     if category is not None:  # 1つも取得できなかった日（US-E6-03・US-E6-04）
         job.log.write("collect", "failure", error_category=category)
         return _fail(job, "collect", category, fields)
-    if job.cadence == "weekly":
-        # 週次の ② 〜 ⑤ はまだない。本番はレポートを作れないので実行エラーにする
-        if job.files.dry_run:
-            return job.summary("dry_run", **fields)
-        job.log.write("analyze", "failure", error_category="not_implemented")
-        return job.summary(
-            "error", failed_stage="analyze", error_category="not_implemented", **fields
-        )
     category, models, retries = _analyze(job)
     if category is not None:
         return _fail(job, "analyze", category, fields, models, retries)
@@ -574,11 +569,18 @@ def _run_stages(job: Job) -> Summary:
     if verified is None:
         return _fail(job, "verify", category, fields)
     if verified["result"] == REJECTED:  # 不合格（US-E7-02）。不合格の後に再生成はしない
-        reason = _validation_reason(job)
-        posting = failures.handle(job, failures.Outcome(failures.REJECTED, category=reason), MINUTE)
+        outcome = failures.Outcome(failures.REJECTED, category=_validation_reason(job))
+        if job.cadence == "weekly":
+            return _weekly_stop(job, outcome, job.summary("rejected", **fields))
+        posting = failures.handle(job, outcome, MINUTE)
         return job.summary("rejected", **fields, **_publish_failure(job, posting))
     if verified["result"] == SECRET_DETECTED:  # 本文を公開しない（US-E7-05）
         outcome = failures.Outcome(failures.SECRET_STOP, "verify", SECRET_DETECTED)
+        if job.cadence == "weekly":
+            stopped = job.summary(
+                "error", failed_stage="verify", error_category=SECRET_DETECTED, **fields
+            )
+            return _weekly_stop(job, outcome, stopped)
         posting = failures.handle(job, outcome, MINUTE)
         return job.summary(
             "error",
@@ -590,6 +592,17 @@ def _run_stages(job: Job) -> Summary:
     if job.files.dry_run:  # ドライランは ⑤ だけを飛ばす（D-04）
         return job.summary("dry_run", **fields)
     return _publish_report(job, fields, retries)
+
+
+def _weekly_stop(job: Job, outcome: failures.Outcome, summary: Summary) -> Summary:
+    """週次の ③ の不合格・公開停止。本番の runs だけを閉じ、Issue は作らない。
+
+    週次の失敗の分岐（④ の調査・不合格 Issue・実行エラー Issue。D-07）は、週次の失敗分岐の Issue
+    （#53）で足す。
+    """
+    if not job.files.dry_run:
+        failures.close_run(job, outcome, MINUTE)
+    return summary
 
 
 def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
@@ -683,6 +696,14 @@ def _validation_reason(job: Job) -> str | None:
     return reason if isinstance(reason, str) and CATEGORY.fullmatch(reason) else None
 
 
+def _agent_call(cadence: str) -> tuple[str, object, dict]:
+    """② の呼び出し：（スキル、出力のスキーマ、観測が0件のとき AI を呼ばずにコードが作る出力）。"""
+    if cadence == "daily":
+        return invoke.DAILY_SKILL, DAILY_SCHEMA, {"items": []}
+    empty = {"themes": [], "tech_changes": [], "comparisons": [], "watch": []}
+    return invoke.WEEKLY_SKILL, WEEKLY_SCHEMA, empty
+
+
 def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
     """② を呼び、構造化出力を agent-output.json に保存する。失敗の分類・使われたモデル・行った
     再試行の回数を返す。
@@ -704,6 +725,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
     AI を呼んだら、成否によらず1回分の使用量・所要時間・モデル・入力量をログ（usage）に残す。
     """
     job.log.write("analyze", "start")
+    skill, schema, empty = _agent_call(job.cadence)
     path = job.files.dir / AGENT_INPUT
     limit = job.limits.agent_input_bytes
     try:
@@ -732,8 +754,8 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
                     body,
                     max(total - (_now() - began), 0.0),  # 再試行は合計の上限の残りの中で行う
                     runner=job.compose,
-                    skill=invoke.DAILY_SKILL,
-                    schema=DAILY_SCHEMA,
+                    skill=skill,
+                    schema=schema,
                     max_turns=job.config.limits.agent_max_turns,
                     max_input_bytes=limit,
                 )
@@ -773,7 +795,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
             # 結果の JSON の形が変わったなど。モデルの変化を見逃すので知らせる（structure.md 3.3）
             job.log.write("analyze", "warning", error_category="model_unknown")
     else:
-        output = {"items": []}
+        output = empty
     try:
         _write_output(job, output)  # 形が崩れていれば ③ が D6(a) で全体を不合格にする（D-07）
     except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値

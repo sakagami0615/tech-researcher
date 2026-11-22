@@ -242,6 +242,13 @@ def test_comparison_without_remaining_rows_is_excluded():
     assert result.verification["empty_comparison"] == "failed"
 
 
+def test_excluded_empty_comparison_is_the_one_the_ai_returned():
+    original = comparison(row("i4"), row("i99"))  # 行が全部除外される領域
+    result = check(comparisons=[comparison(row("i4")), original])
+    empty = [x for x in result.excluded if x.category == "empty_comparison"]
+    assert [x.entry for x in empty] == [original]  # 絞った後の領域ではなく、元のもの
+
+
 def test_row_excluded_by_another_check_does_not_take_the_id():
     bad = row("i4", feature="あ" * 200)  # 文字数で除外
     result = check(comparisons=[comparison(bad), comparison(row("i4"))])
