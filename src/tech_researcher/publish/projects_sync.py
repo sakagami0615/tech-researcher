@@ -184,13 +184,13 @@ class ProjectsSync:
         if gone is True:
             return self._finish(row, outcome, missing=True)
         if gone is False:
-            # 設定の誤りと言えるのは、設定の投稿先にある Issue のときだけ。転送先・別の投稿先の
-            # Issue は、この1件の問題として扱い、止めずに試行の上限で諦める
-            if moved or ref.repo.lower() != self._configured_repo():
+            # 設定の誤りと言えるのは、Issue が今ある repo（ref。転送後を含む）が設定の投稿先の
+            # ときだけ。別の投稿先の Issue は、この1件の問題として扱い、止めずに試行の上限で諦める
+            if ref.repo.lower() != self._configured_repo():
                 return self._give_up_transfer(row, outcome)
             return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
         if isinstance(gone, IssueRef):  # 転送されている。記録を転送先に更新して、登録し直す
-            if not moved:
+            if not moved and gone != ref:  # 同じ場所なら、更新も回数の戻しもしない
                 try:
                     move_issue(self.conn, row.id, gone.repo, gone.number)
                 except (sqlite3.Error, LookupError) as e:
@@ -213,7 +213,13 @@ class ProjectsSync:
         """転送先に更新できない・転送先でも登録できない。この1件だけ pending のまま続け、上限を
         超えたら pending から外す（毎回の予算を使い続けないため）。"""
         self._fail(row, TRANSFERRED, outcome)
-        if row.projects_attempts + 1 >= MAX_TRANSFER_ATTEMPTS:
+        try:
+            attempts = self.conn.execute(
+                "SELECT projects_attempts FROM issues WHERE id = ?", (row.id,)
+            ).fetchone()[0]  # 転送先に更新したときに 0 に戻った後の、失敗の記録まで含めた回数
+        except sqlite3.Error:
+            attempts = row.projects_attempts + 1
+        if attempts >= MAX_TRANSFER_ATTEMPTS:
             try:
                 mark_projects_abandoned(self.conn, row.id, self.run_id)
                 outcome.abandoned += 1

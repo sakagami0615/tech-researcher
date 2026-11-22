@@ -357,8 +357,8 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - GitHub 側の状態（Open/Closed、Projects のステータス、コメント）は持たない（US-E5-03）。持つのは「登録の処理を済ませたか」だけ
 - 実装での対応（`src/tech_researcher/db/issues.py`）
   - `record_issue` が（`run_id`, `kind`）で upsert する。`created` は `repo`・`number` が必須で `projects_state` は `pending` で始まり、それ以外の状態は持たない。作った Issue（`created`）の行は、止めた・失敗した記録に戻さない
-  - 同じ番号の書き直しは `projects_state` と `created_at` を保つ。レポート Issue は、同じ（`cadence`, `target`）の記録が別の実行にあるときは、`replaces` で扱いを指定する。`transfer`（転送先の番号。301）は行の `run_id` と `created_at` を元のまま残して番号だけ置き換え、`recreate`（410・404 の後に別の実行で作り直した番号）は行の `run_id` を本文を投稿した実行に付け替える（「載せた」の導出が、その実行の項目を指すため）。転送（301）を登録のときに見つけたときは、`record_issue` を通さず `move_issue` で `repo`・`number` だけを転送先に更新し、登録の状態と試行回数は保つ。番号が変わると `pending` に戻り、`projects_attempts`・`projects_last_error`・`projects_last_run_id` も消す
-  - 登録の結果は `mark_projects_done`・`mark_projects_issue_missing`・`record_projects_failure`（`pending` のまま試行回数・失敗の分類・実行を記録）で書く。未登録は `pending_projects`（古い順）で引く
+  - 同じ番号の書き直しは `projects_state` と `created_at` を保つ。レポート Issue は、同じ（`cadence`, `target`）の記録が別の実行にあるときは、`replaces` で扱いを指定する。`transfer`（転送先の番号。301）は行の `run_id` と `created_at` を元のまま残して番号だけ置き換え、`recreate`（410・404 の後に別の実行で作り直した番号）は行の `run_id` を本文を投稿した実行に付け替える（「載せた」の導出が、その実行の項目を指すため）。転送（301）を登録のときに見つけたときは、`record_issue` を通さず `move_issue` で `repo`・`number` だけを転送先に更新し、登録の状態は保ち、試行回数は 0 に戻す（転送先で数え直す）。番号が変わると `pending` に戻り、`projects_attempts`・`projects_last_error`・`projects_last_run_id` も消す
+  - 登録の結果は `mark_projects_done`・`mark_projects_issue_missing`・`mark_projects_abandoned`・`record_projects_failure`（`pending` のまま試行回数・失敗の分類・実行を記録）で書く。`abandoned` は、`record_projects_failure` で試行回数を増やした後に付ける。`abandoned` にするとき自体は、回数を増やさない。未登録は `pending_projects`（古い順）で引く
 
 ### 3.5 判定に使う問い合わせ
 

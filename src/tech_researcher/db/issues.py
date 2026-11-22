@@ -209,10 +209,11 @@ def mark_projects_abandoned(conn: sqlite3.Connection, issue_id: int, run_id: str
 
 
 def move_issue(conn: sqlite3.Connection, issue_id: int, repo: str, number: int) -> None:
-    """Issue が転送されていたとき、記録の repo・number を転送先に更新する（4.3）。登録の状態と
-    試行回数は変えない。"""
+    """Issue が転送されていたとき、記録の repo・number を転送先に更新する（4.3）。登録の状態は
+    保ち、試行回数は 0 に戻す（転送先で数え直す）。"""
     cursor = conn.execute(
-        "UPDATE issues SET repo = ?, number = ? WHERE id = ? AND state = 'created'"
+        "UPDATE issues SET repo = ?, number = ?, projects_attempts = 0"
+        " WHERE id = ? AND state = 'created'"
         " AND projects_state = 'pending'",
         (repo, number, issue_id),
     )

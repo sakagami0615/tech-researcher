@@ -561,3 +561,28 @@ def test_404_for_an_issue_of_another_repository_does_not_stop_the_rest(h):
     assert moved_row(h, OLD)[2:] == ("pending", 1)
     assert h.state(9)[1] == "done"
     assert outcome.as_dict()["not_attempted"] == 0
+
+
+class ToConfiguredRepoReader:
+    """元の場所からは、設定の投稿先に転送されたと答え、設定の投稿先では Issue があると答える。"""
+
+    def get_issue(self, repo, number):
+        if repo == REPO:
+            return IssueLookup(IssueRef(repo, number))
+        return IssueLookup(IssueRef(REPO, number + 1000), transferred=True)
+
+
+def test_404_for_an_issue_moved_into_the_configured_repository_stops_the_rest(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.conn.execute("UPDATE issues SET repo = 'tester/old' WHERE number = 5")
+    h.failures[5] = http_error(404, category="not_found")
+    h.failures[1005] = http_error(404, category="not_found")
+    h.make_reader = lambda token, limits, **kw: ToConfiguredRepoReader()
+
+    outcome = h.run()
+
+    assert moved_row(h, OLD) == (REPO, 1005, "pending", 1)
+    assert h.state(9)[1:3] == ("pending", 0)  # 設定の誤りなので、後ろは試さない
+    assert outcome.as_dict()["not_attempted"] == 1
+    assert outcome.as_dict()["error_category"] == "projects_not_found"
