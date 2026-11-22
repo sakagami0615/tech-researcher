@@ -79,10 +79,10 @@ elif command == "compose" and "verify" in sys.argv:
 elif command == "compose":
     if mode == "ok":
         stage, cadence, _, run_id = sys.argv[-4:]
-        if cadence == "daily" and behavior.get("input", True):
+        if behavior.get("input", True):
             kind = "dry-run" if run_id.startswith("dry-") else "work"
             run_dir = Path(os.environ["TR_DATA_DIR"]) / kind / run_id
-            data = {{"task": "daily", "items": [{{"id": "d1"}}]}}
+            data = {{"task": cadence, "items": [{{"id": "d1"}}]}}
             (run_dir / "agent-input.json").write_text(json.dumps(data))
         if "fetches" in behavior:
             kind = "dry-run" if run_id.startswith("dry-") else "work"
@@ -1133,11 +1133,11 @@ def test_missing_agent_input_is_analyze_failure(host, capfd):
     assert (summary["failed_stage"], summary["error_category"]) == ("analyze", "bad_input")
 
 
-def test_weekly_dry_run_ends_after_collect(host, capfd):
+def test_weekly_dry_run_skips_only_post(host, capfd):
     host.behave("ok", lock="weekly-dry-run")
     assert orchestrator.main(["weekly", "--dry-run"], host.environ) == 0
     assert summary_of(capfd)["result"] == "dry_run"
-    assert [c["argv"][-4] for c in host.calls()] == ["collect"]
+    assert [c["argv"][-4] for c in host.calls()] == ["collect", "verify"]  # ① ③（⑤ は飛ばす）
 
 
 @pytest.mark.parametrize(("mode", "category"), [("fail", "exit_1"), ("bad", "bad_output")])
@@ -1369,7 +1369,7 @@ def test_locks_are_per_kind(host, capfd):
         assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
         assert summary_of(capfd)["result"] == "dry_run"
         host.behave("ok", lock="weekly")
-        assert orchestrator.main(["weekly"], host.environ) == 1  # ② 以降がまだないため
+        assert orchestrator.main(["weekly"], host.environ) == 0
         assert summary_of(capfd)["cadence"] == "weekly"
     finally:
         _release(holder)

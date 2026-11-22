@@ -1,7 +1,7 @@
 """コマンドの入口（structure.md 2.2）。worker の各段階を1つずつ起動する。
 
 統括スクリプト（#16）が `docker compose run --rm -T worker <段階> …` で呼ぶ（D-04）。段階は
-`collect`（①）・`verify`（③、日次だけ）・`finish`（本番の失敗した実行を runs で閉じる）。実行 ID と
+`collect`（①）・`verify`（③）・`finish`（本番の失敗した実行を runs で閉じる）。実行 ID と
 実行のフォルダは統括スクリプトが用意し、段階は実行 ID の日付から対象と期間を決める。
 ① は本番の DB を開き、本番の実行では runs の開始を書いてから、取得結果と収集項目を書く。
 ドライランは DB を読み取り専用で開き、何も書かない（D-22）。① で実行エラーと分かった本番の実行
@@ -12,7 +12,8 @@
 本番の実行を閉じる（成功の終わりもここで書く。publish/post.py）。③ は、本番では統括スクリプトから
 渡された ② のモデルの名前を runs の model に記録し、前回の本番から変わっていればログで知らせる
 （structure.md 3.3。ドライランは記録せず比べない）。本番の ③ は、結果（レポート案・掲載と除外の
-項目・検証結果）を reports・report_entries に保存する（ドライランは書かない）。
+項目・検証結果。週次は新しいテーマの番号つき）を reports・report_entries に保存する
+（ドライランは書かない）。
 標準出力には、コードが作る要約（件数・情報源の ID・結果の種別）だけを JSON で出す。外部由来の文と
 例外の中身は出さず、ログ（秘匿情報をマスクする）にだけ残す（structure.md 3.2・7.3）。
 相対パスは作業ディレクトリ（ホストではリポジトリ、worker では /app）から解く。
@@ -55,6 +56,7 @@ from tech_researcher.runfiles import RunFiles, data_dir
 from tech_researcher.stages.collect import collect_failure, run_collect
 from tech_researcher.stages.daily import run_verify, write_daily_input
 from tech_researcher.stages.weekly import write_weekly_input
+from tech_researcher.stages.weekly_verify import run_verify_weekly
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -114,12 +116,7 @@ def _run(
     if args.stage == "post":
         return _post_stage(args, config, target, files, log, scanner, environ)
     if args.stage == "verify":
-        if files.dry_run:
-            return run_verify(config, target, files.run_id, files.dir, log, scanner)
-        if args.model is not None:
-            _record_model(files, args.model, log)
-        with closing(open_db(files.db)) as db:  # 本番は結果を DB に保存する
-            return run_verify(config, target, files.run_id, files.dir, log, scanner, db)
+        return _verify_stage(args, config, target, files, log, scanner)
     conn = open_readonly(files.db) if files.dry_run else open_db(files.db)
 
     def daily_input() -> None:
@@ -140,6 +137,32 @@ def _run(
         assert conn is not None
         start_run(conn, files.run_id, target, files.started_at)
         return _collect(config, target, files, log, conn, daily_input)
+
+
+def _verify_stage(
+    args: argparse.Namespace,
+    config: Config,
+    target: Target,
+    files: RunFiles,
+    log: RunLog,
+    scanner: SecretScanner,
+) -> dict:
+    """③。本番は結果を DB に保存する。ドライランは書かない（週次は比較対象を読み取り専用で引く）"""
+    weekly = args.cadence == "weekly"
+    if files.dry_run:
+        if not weekly:
+            return run_verify(config, target, files.run_id, files.dir, log, scanner)
+        conn = open_readonly(files.db)  # DB がなければ None（比較対象は空）
+        with closing(conn) if conn is not None else nullcontext():
+            return run_verify_weekly(config, target, files.run_id, files.dir, log, scanner, conn)
+    if args.model is not None:
+        _record_model(files, args.model, log)
+    with closing(open_db(files.db)) as db:
+        if weekly:
+            return run_verify_weekly(
+                config, target, files.run_id, files.dir, log, scanner, db, write=True
+            )
+        return run_verify(config, target, files.run_id, files.dir, log, scanner, db)
 
 
 def _collect(
@@ -286,7 +309,7 @@ def _parser() -> argparse.ArgumentParser:
     verify = stages.add_parser(
         "verify", help="③ 検証・検査。agent-output.json から本文を作り、結果を実行のフォルダに書く"
     )
-    verify.add_argument("cadence", choices=["daily"])  # 週次は週次の Issue で足す
+    verify.add_argument("cadence", choices=sorted(_TARGETS))
     verify.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
     verify.add_argument(
         "--model", help="② で使われたモデルの名前（`,` でつなぐ）。本番では runs に記録する"

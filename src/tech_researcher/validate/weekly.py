@@ -151,6 +151,8 @@ class _State:
     def __init__(self) -> None:
         self.excluded: list[WeeklyExcluded] = []
         self.failed: set[str] = set()
+        # 行を絞った後の比較の id → AI が返した元の比較（除外には元のものを残す）
+        self.origin: dict[int, ComparisonEntry] = {}
 
     def exclude(self, section: str, category: str, entry: Entry, reason: str) -> None:
         self.failed.add(category)
@@ -218,6 +220,7 @@ def _comparisons(
             continue
         rows = _survivors(state, "comparison_row", comparison.rows, ctx)
         kept.append(replace(comparison, rows=tuple(rows)))
+        state.origin[id(kept[-1])] = comparison
     return kept
 
 
@@ -240,7 +243,8 @@ def _drop_duplicate_rows(
         if rows:
             kept.append(replace(comparison, rows=tuple(rows)))
         else:
-            state.exclude("comparison", "empty_comparison", comparison, "掲載できる行がない")
+            origin = state.origin[id(comparison)]
+            state.exclude("comparison", "empty_comparison", origin, "掲載できる行がない")
     return kept
 
 

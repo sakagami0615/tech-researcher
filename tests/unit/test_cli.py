@@ -142,7 +142,7 @@ def test_invalid_config_exits_2(env, capsys):
         [],
         ["post"],
         ["collect", "monthly", "--run-id", DRY],
-        ["verify", "weekly", "--run-id", DRY],  # 週次の ③ はまだない
+        ["verify", "monthly", "--run-id", DRY],
     ],
 )
 def test_unknown_arguments_are_rejected(env, args):
