@@ -278,9 +278,9 @@ def _comparisons(
 def _comparison(
     comparison: ComparisonEntry, items: Mapping[str, Item], names: Mapping[str, str]
 ) -> str | None:
-    rows = [r for row in comparison.rows if (r := _row(row, items, names)) is not None]
-    if not rows:
+    if not comparison.rows:
         return None
+    rows = [_row(row, items, names) for row in comparison.rows]
     return "\n".join(
         [
             f"### {sanitize_text(comparison.domain)}",
@@ -294,19 +294,15 @@ def _comparison(
     )
 
 
-def _row(row: ComparisonRow, items: Mapping[str, Item], names: Mapping[str, str]) -> str | None:
+def _row(row: ComparisonRow, items: Mapping[str, Item], names: Mapping[str, str]) -> str:
     """GitHub のリポジトリは `owner/repo`（コードが付ける）、それ以外は AI の製品名（2.4）。
-    名前を決められない行（形の合わない owner/repo、製品名なし）は載せない。"""
+    検査（check_weekly）を通った行を、そのまま書く。"""
     item = items[row.item_id]
-    try:
-        if item.github is not None:
-            name = repo_code(item.github.full_name)
-        elif row.product_name:
-            name = sanitize_text(row.product_name)
-        else:
-            return None
-    except ValueError:
-        return None
+    if item.github is not None:
+        name = repo_code(item.github.full_name)
+    else:
+        assert row.product_name  # 製品名の照合（unknown_product）を通っている
+        name = sanitize_text(row.product_name)
     sources = source_line([row.item_id], items, names)
     return f"| {name} | {sanitize_text(row.feature)} | {sanitize_text(row.use_case)} | {sources} |"
 

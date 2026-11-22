@@ -21,6 +21,7 @@ from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.db.weekly import (
     compare_week_starts,
+    latest_star_snapshots,
     past_observations,
     period_star_gains,
     weeks_with_items,
@@ -717,3 +718,14 @@ def test_weekly_collect_writes_unavailable_sources_for_the_body(tmp_path, conn):
     )
     found = json.loads((run_dir / "unavailable.json").read_text("utf-8"))
     assert [(e["source_id"], e["category"]) for e in found] == [("rss:a", "network")]
+
+
+def test_latest_star_snapshots_return_the_target_day_of_the_last_measurement(conn):
+    for day, stars in [(19, 1000), (21, 1100), (26, 9999)]:
+        snapshot(conn, "a/repo", date(2026, 10, day), stars)
+    snapshot(conn, "b/repo", date(2026, 10, 20), 50)
+    found = latest_star_snapshots(conn, date(2026, 10, 19), date(2026, 10, 26))
+    assert {r: (d, s.stars_total) for r, (d, s) in found.items()} == {
+        "a/repo": (date(2026, 10, 21), 1100),  # 期間の外の 26 日は使わない
+        "b/repo": (date(2026, 10, 20), 50),
+    }

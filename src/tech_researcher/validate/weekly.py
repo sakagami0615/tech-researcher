@@ -30,6 +30,7 @@ from tech_researcher.collect.aggregate import candidate_links
 from tech_researcher.collect.records import Item
 from tech_researcher.collect.urls import normalize_url
 from tech_researcher.config import QuoteLimits
+from tech_researcher.render.common import repo_code
 from tech_researcher.validate.quote import (
     Prepared,
     meta_terms_by_id,
@@ -322,6 +323,11 @@ def _invalid_id(entry: Entry, ctx: _Context) -> str | None:
         return "item_ids が空"
     if unknown := sorted(set(ids) - ctx.item_ids):
         return f"入力にない ID {unknown}"
+    if isinstance(entry, ComparisonRow) and (github := ctx.items[entry.item_id].github):
+        try:
+            repo_code(github.full_name)  # 本文に書く名前は owner/repo の形だけ（0.3）
+        except ValueError:
+            return "リポジトリ名が owner/repo の形でない"
     if unknown := sorted(set(past) - ctx.past_ids):
         return f"渡していない過去の観測の ID {unknown}"
     if isinstance(entry, ThemeEntry) and entry.theme_id is not None:

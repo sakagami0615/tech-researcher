@@ -79,11 +79,16 @@ def period_star_gains(conn: sqlite3.Connection, first: date, end: date) -> dict[
 
 def latest_star_snapshots(
     conn: sqlite3.Connection, first: date, end: date
-) -> dict[str, StarSnapshot]:
-    """リポジトリ → 対象日が first 以上 end 未満の中で、最後の日の測定（週次の急上昇の判定用）。"""
-    latest: dict[str, StarSnapshot] = {}
+) -> dict[str, tuple[date, StarSnapshot]]:
+    """リポジトリ → （最後の測定の対象日、その測定）。対象日が first 以上 end 未満の中で最後の日。
+
+    週次の急上昇の判定に使う。測定は対象日の翌日 6:00 のものなので、日付は測定時刻ではなく
+    対象日をそのまま返す。
+    """
+    latest: dict[str, tuple[date, StarSnapshot]] = {}
     day = first
     while day < end:
-        latest.update(load_star_snapshot(conn, day))  # 新しい日が前の日を上書きする
+        # 新しい日が前の日を上書きする
+        latest.update({r: (day, s) for r, s in load_star_snapshot(conn, day).items()})
         day += timedelta(days=1)
     return latest

@@ -14,6 +14,7 @@ from tech_researcher.agent.weekly_output import (
 )
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.records import Event, GitHubRepo, Record
+from tech_researcher.config import QuoteLimits
 from tech_researcher.db.weekly import PastObservation
 from tech_researcher.periods import weekly_target
 from tech_researcher.render.weekly import (
@@ -23,6 +24,7 @@ from tech_researcher.render.weekly import (
     render_weekly,
     theme_display_key,
 )
+from tech_researcher.validate.weekly import check_weekly
 
 TARGET = weekly_target(date(2026, 10, 26), 7)  # 10-19 0:00〜10-26 0:00（JST）
 AT = datetime(2026, 10, 21, 3, 0, tzinfo=UTC)
@@ -245,9 +247,51 @@ def test_comparison_table_names_github_by_code_and_others_by_ai_text():
     assert table.rstrip().endswith("違いのまとめ")
 
 
-def test_comparison_row_without_a_usable_name_is_left_out():
-    rows = (ComparisonRow("i1", None, "特徴", "用途"),)
-    body = render(comparisons=[ComparisonEntry("領域", rows, "まとめ")]).body
+def test_rows_dropped_by_the_check_are_the_rows_missing_from_the_body():
+    """名前を決められない行は検査で除外し、本文は残りを書く"""
+    bad = aggregate(
+        [
+            record(
+                10,
+                "github_repos",
+                "https://github.com/bad/repo",
+                GitHubRepo("bad repo/x", AT, 1),
+            )
+        ]
+    )[0]
+    items = {**ITEMS, "i10": bad}
+    data = {
+        "items": [{"id": i, "untrusted": {"title": "t", "excerpt": None}} for i in items],
+        "past_observations": [],
+        "past_themes": [],
+    }
+    rows = (
+        ComparisonRow("i10", None, "特徴", "用途"),
+        ComparisonRow("i1", None, "特徴", "用途"),
+        ComparisonRow("i9", None, "軽い", "試行"),
+    )
+    output = WeeklyOutput((), (), (ComparisonEntry("領域", rows, "まとめ"),), ())
+    checked = check_weekly(output, data, items, {}, QuoteLimits())
+    assert [(x.section, x.category) for x in checked.excluded] == [
+        ("comparison_row", "invalid_id"),
+        ("comparison_row", "unknown_product"),
+    ]
+    report = render_weekly(TARGET, RUN, checked.output, items, NAMES, WINDOW, 1)
+    table = section(report.body, "OSS・ツールの比較")
+    assert [ln for ln in table.splitlines() if ln.startswith("| `")] == [
+        ln for ln in table.splitlines() if "tiny-agent" in ln
+    ]
+    assert "bad/repo" not in table and table.count("\n| ") == 2  # 見出し行と1行（区切り行は |-）
+    # 行がすべて除外された領域は、検査で領域ごと除外され、本文は「該当なし」
+    none = check_weekly(
+        WeeklyOutput((), (), (ComparisonEntry("領域", rows[:2], "まとめ"),), ()),
+        data,
+        items,
+        {},
+        QuoteLimits(),
+    )
+    assert ("comparison", "empty_comparison") in [(x.section, x.category) for x in none.excluded]
+    body = render_weekly(TARGET, RUN, none.output, items, NAMES, WINDOW, 1).body
     assert section(body, "OSS・ツールの比較").strip().endswith("今週は該当なし")
 
 

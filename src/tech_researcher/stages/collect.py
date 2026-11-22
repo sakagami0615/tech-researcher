@@ -35,7 +35,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import cache
 from pathlib import Path
 
@@ -299,8 +299,10 @@ def run_collect(
     records = mark_thresholds(judged.records, config.attention_thresholds)
     if github is not None:
         records += github.records
+    spike_days: dict[str, date] = {}  # 週の合計で判定した急上昇の URL → 最後の測定の対象日
     if target.cadence == "weekly":
-        records += _weekly_star_spikes(config, target, db)
+        spikes, spike_days = _weekly_star_spikes(config, target, db)
+        records += spikes
     observed = [i for i in aggregate(records) if in_period(i, target)]
     holds = hold_reasons(observed, target, featured, shown)
     # すでに載せたリポジトリが別の出来事（リリースなど）で渡るときは、急上昇・新規の出来事と
@@ -317,7 +319,7 @@ def run_collect(
     if target.cadence == "weekly":
         # 週次の材料：取り直した分と、DB にある日次の収集結果を URL でまとめる（3.8）
         dated = weekly_rows_dated(
-            target, items, load_daily_rows(db, target) if db is not None else []
+            target, items, load_daily_rows(db, target) if db is not None else [], spike_days
         )
         rows = [row for row, _ in dated]
         items = stored = [r.item for r in rows]
@@ -388,22 +390,25 @@ def _history(db: sqlite3.Connection | None, target: Target) -> tuple[set[str], s
 
 def _weekly_star_spikes(
     config: Config, target: Target, db: sqlite3.Connection | None
-) -> tuple[Record, ...]:
+) -> tuple[tuple[Record, ...], dict[str, date]]:
     """週次の急上昇：日次の増分を合計した値で、日次と同じ判定を行う（D-13）。
 
     毎日は基準に届かなくても、調査期間の合計が届いたリポジトリを、急上昇の出来事にする。
     日次で載せたもの（featured）は除く。DB がなければ（開発機のドライラン）行わない。
+    戻り値は、レコードと、急上昇にしたリポジトリの URL → 最後の測定の対象日（出来事の日付）。
     """
     settings = config.github_repos
     if db is None or settings is None or not settings.enabled:
-        return ()
+        return (), {}
     first, end = daily_days(target)
-    return judge_weekly_star_spikes(
+    latest = latest_star_snapshots(db, first, end)
+    records = judge_weekly_star_spikes(
         settings,
         period_star_gains(db, first, end),
-        latest_star_snapshots(db, first, end),
+        {repo: snapshot for repo, (_, snapshot) in latest.items()},
         featured_urls(db, target.key),  # 日次と同じく、対象より前の日次レポートだけを数える
     )
+    return records, {r.url: latest[r.github.full_name][0] for r in records if r.github}
 
 
 def _write_unjudged(run_dir: Path, feeds: tuple[str, ...], star: bool) -> None:
