@@ -15,7 +15,9 @@ GitHub を読めないとき（4.3 の「それ以外」）は IssueReadError �
 
 import os
 import sqlite3
+import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -32,12 +34,31 @@ from tech_researcher.publish.github_issues import (
 )
 
 
+class RecordError(Exception):
+    """同じ対象の Issue は見つかったが、DB への記録に失敗した。ref は見つけた Issue。"""
+
+    def __init__(self, ref: IssueRef):
+        super().__init__("DB への記録に失敗した")
+        self.ref = ref
+
+
+@contextmanager
+def _recording(ref: IssueRef):
+    """DB の書き込みの失敗に、見つけた ref を載せる（呼び出し側が結果に出せるように）。"""
+    try:
+        yield
+    except (sqlite3.Error, OSError) as e:
+        raise RecordError(ref) from e
+
+
 @dataclass(frozen=True)
 class Existing:
     """作らない。via は見つけ方：db（DB の番号）・transferred（転送先）・labels（ラベルの探索）。"""
 
     ref: IssueRef
     via: str
+    # 投稿先（meta）を書いてよいか。元の記録の repo が設定の投稿先のときだけ True
+    write_meta: bool = True
 
 
 @dataclass(frozen=True)
@@ -65,7 +86,9 @@ def check_duplicate_from_env(
     *,
     dry_run: bool = False,
     environ: Mapping[str, str] = os.environ,
-    make_reader: Callable[[str, Limits], IssueReader] = IssueReader,
+    make_reader: Callable[..., IssueReader] = IssueReader,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Existing | Create | Skipped:
     """環境変数から Issue 用トークンと投稿先を読み、check_duplicate を呼ぶ。
 
@@ -76,10 +99,43 @@ def check_duplicate_from_env(
         missing = [n for n in (TOKEN_ENV, REPO_ENV) if not (environ.get(n) or "").strip()]
         if missing:
             return Skipped(missing[0])
-    reader = make_reader(issue_token(environ), limits)
+    reader = make_reader(issue_token(environ), limits, deadline=deadline, clock=clock)
     return check_duplicate(
         conn, reader, issue_repo(environ), run_id, cadence, target, at, dry_run=dry_run
     )
+
+
+def check_recent_from_env(
+    conn: sqlite3.Connection,
+    limits: Limits,
+    run_id: str,
+    cadence: str,
+    target: date,
+    at: datetime,
+    since: str,
+    *,
+    environ: Mapping[str, str] = os.environ,
+    make_reader: Callable[..., IssueReader] = IssueReader,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> Existing | None:
+    """作成の応答が届かなかった後の確認（ラベルに頼らない）。since 以降に更新された Issue を、
+    ラベルなしで（トークンの持ち主の Issue に絞って）読み、1行目の識別子が同じ対象のものを探す。
+    見つかれば、ラベルの探索と同じように DB に補う。読めなければ IssueReadError。"""
+    reader = make_reader(issue_token(environ), limits, deadline=deadline, clock=clock)
+    repo = issue_repo(environ)
+    creator = reader.viewer_login()  # 読めなければ IssueReadError（作成者で絞れないまま探さない）
+    for listed in reader.list_recent_issues(repo, since, creator):
+        marker = listed.marker
+        if marker is None or (marker.cadence, marker.target) != (cadence, target):
+            continue
+        ref = IssueRef(repo, listed.number)
+        with _recording(ref):
+            owner = marker.run_id if _is_run_of(conn, marker.run_id, cadence, target) else run_id
+            _record(conn, run_id, owner, cadence, target, at, ref, "recreate")
+            record_issue_repo(conn, repo)
+        return Existing(ref, "recent")
+    return None
 
 
 def check_duplicate(
@@ -109,14 +165,19 @@ def check_duplicate(
         if row.repo is not None and row.number is not None:
             found = reader.get_issue(row.repo, row.number)
             if found.ref is not None and not found.transferred:
-                if not dry_run and row.repo.lower() == repo:
-                    record_issue_repo(conn, repo)
-                return Existing(found.ref, "db")
+                write_meta = row.repo.lower() == repo
+                if not dry_run and write_meta:
+                    with _recording(found.ref):
+                        record_issue_repo(conn, repo)
+                return Existing(found.ref, "db", write_meta)
             if found.ref is not None:
                 if not dry_run:
-                    _record(conn, run_id, run_id, cadence, target, at, found.ref, "transfer")
-                    record_issue_repo(conn, repo)
-                return Existing(found.ref, "transferred")
+                    with _recording(found.ref):
+                        _record(conn, run_id, run_id, cadence, target, at, found.ref, "transfer")
+                        # 元の記録が設定の投稿先のときだけ書く（別のリポジトリのものは書かない）
+                        if row.repo.lower() == repo:
+                            record_issue_repo(conn, repo)
+                return Existing(found.ref, "transferred", row.repo.lower() == repo)
         stale = True  # 410・404。2 で確かめ直す
     return _search(conn, reader, repo, run_id, cadence, target, at, dry_run, stale)
 
@@ -133,16 +194,19 @@ def _search(
     stale: bool,
 ) -> Existing | Create:
     """4.3 の 2：ラベル付きの Issue から、識別子の target が一致するものを探す。"""
-    for listed in reader.list_report_issues(repo, cadence):
+    for listed in reader.list_report_issues(repo, cadence, reader.viewer_login()):
         marker = listed.marker
         if marker is None or (marker.cadence, marker.target) != (cadence, target):
             continue
         ref = IssueRef(repo, listed.number)
         if not dry_run and conn is not None:
             # 本文を投稿した実行（識別子の run）がこの対象にあれば、その実行の記録として補う
-            owner = marker.run_id if _is_run_of(conn, marker.run_id, cadence, target) else run_id
-            _record(conn, run_id, owner, cadence, target, at, ref, "recreate")
-            record_issue_repo(conn, repo)
+            with _recording(ref):
+                owner = (
+                    marker.run_id if _is_run_of(conn, marker.run_id, cadence, target) else run_id
+                )
+                _record(conn, run_id, owner, cadence, target, at, ref, "recreate")
+                record_issue_repo(conn, repo)
         return Existing(ref, "labels")
     return Create("recreate" if stale else None)
 

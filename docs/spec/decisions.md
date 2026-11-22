@@ -132,7 +132,7 @@
 |---|---|---|
 | Claude Code | `claude setup-token` で発行したトークンを `CLAUDE_CODE_OAUTH_TOKEN` に設定する（サブスクリプションで動く） | agent のみ |
 | GitHub（収集用） | 読み取り専用のトークン。① で last30days-skill の収集スクリプトに `GITHUB_TOKEN` として渡すほか、自作の収集（急上昇の検出・GitHub Releases・一次情報の API 取得）でも使う | worker のみ |
-| GitHub（Issue 用） | fine-grained トークン。このリポジトリに限定し、Issues の読み書きだけを許可する | worker のみ |
+| GitHub（Issue 用） | fine-grained トークン（PAT）。このリポジトリに限定し、Issues の読み書きだけを許可する。作成者を確かめるため `GET /user` を読めるものに限る（GitHub App のトークンは使えない） | worker のみ |
 | GitHub（Projects 用） | classic トークン。`project` スコープだけを付ける（fine-grained トークンは個人アカウントの Projects に対応していないため） | worker のみ |
 
 - 各コンテナには、そのコンテナにだけ指定する `env_file`（リポジトリの外に置く、権限 600）から環境変数として渡す。agent コンテナから worker の env_file は読めないようにする（US-E6-01・coding.md の「環境変数から読む」に従う）

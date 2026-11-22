@@ -191,7 +191,7 @@ def test_no_github_state_is_stored(conn):
         "projects_last_error",
         "projects_last_run_id",
     }
-    assert issues.STATES == {"created", "blocked_secret", "failed"}
+    assert issues.STATES == {"created", "blocked_secret", "failed", "uncertain"}
 
 
 def test_same_run_new_number_requeues_and_keeps_one_row(conn):

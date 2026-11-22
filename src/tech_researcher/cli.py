@@ -7,8 +7,9 @@
 ドライランは DB を読み取り専用で開き、何も書かない（D-22）。① で実行エラーと分かった本番の実行
 （すべての情報源の取得に失敗した日と、① の例外）は、runs を failed と終了時刻で閉じる。D-13 の観測の
 実行（実行 ID の先頭が obs-。日次の ① だけ）は、それ以外なら observed で閉じる。通常の日次・週次の
-② 以降の失敗の終わりは `finish` で書く（統括スクリプトが失敗の分岐から呼ぶ。成功の終わりは ⑤ を
-実装する Issue で書く）。③ は、本番では統括スクリプトから
+② 以降の失敗の終わりは `finish` で書く（統括スクリプトが失敗の分岐から呼ぶ）。
+⑤ は `post` で、実行のフォルダの issue.md を Issue として作り、DB に記録し、まだ閉じていない
+本番の実行を閉じる（成功の終わりもここで書く。publish/post.py）。③ は、本番では統括スクリプトから
 渡された ② のモデルの名前を runs の model に記録し、前回の本番から変わっていればログで知らせる
 （structure.md 3.3。ドライランは記録せず比べない）。本番の ③ は、結果（レポート案・掲載と除外の
 項目・検証結果）を reports・report_entries に保存する（ドライランは書かない）。
@@ -27,6 +28,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, nullcontext, suppress
 from datetime import UTC, datetime
@@ -35,6 +37,7 @@ from pathlib import Path
 from tech_researcher.agent.investigate import INVESTIGATION
 from tech_researcher.agent.invoke import split_models
 from tech_researcher.config import Config, ConfigError, load_config
+from tech_researcher.db.issues import KINDS
 from tech_researcher.db.readonly import open_readonly
 from tech_researcher.db.runs import (
     CATEGORY,
@@ -47,6 +50,7 @@ from tech_researcher.db.runs import (
 from tech_researcher.db.schema import open_db
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target, daily_target, weekly_target
+from tech_researcher.publish.post import Poster
 from tech_researcher.runfiles import RunFiles, data_dir
 from tech_researcher.stages.collect import collect_failure, run_collect
 from tech_researcher.stages.daily import run_verify, write_daily_input
@@ -55,6 +59,8 @@ from tech_researcher.validate.secret_scan import SecretScanner, known_secret_val
 
 CONFIG = Path("config/tech-researcher.toml")
 _TARGETS = {"daily": daily_target, "weekly": weekly_target}
+STOPPABLE = ("report", "rejected", "run_error")  # ⑤ の前に公開を止めた種別（post の --stopped）
+POST_WRAPUP_S = 15  # ⑤ の上限の少し前に、新しい書き込みをやめる（記録と runs を閉じる時間）
 
 
 class _UsageError(Exception):
@@ -71,7 +77,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     scanner = SecretScanner(known_secret_values(environ))
     log = RunLog(files.log, files.run_id, args.cadence, target.key, scanner)
     try:
-        summary = _run(args, config, target, files, log, scanner)
+        summary = _run(args, config, target, files, log, scanner, environ)
     except Exception as e:
         try:
             log.write(args.stage, "failure", error_category=type(e).__name__, exc=e)
@@ -101,9 +107,12 @@ def _run(
     files: RunFiles,
     log: RunLog,
     scanner: SecretScanner,
+    environ: Mapping[str, str],
 ) -> dict:
     if args.stage == "finish":
         return _finish_stage(args, files, log)
+    if args.stage == "post":
+        return _post_stage(args, config, target, files, log, scanner, environ)
     if args.stage == "verify":
         if files.dry_run:
             return run_verify(config, target, files.run_id, files.dir, log, scanner)
@@ -216,6 +225,34 @@ def _finish_stage(args: argparse.Namespace, files: RunFiles, log: RunLog) -> dic
     return {"status": args.status}
 
 
+def _post_stage(
+    args: argparse.Namespace,
+    config: Config,
+    target: Target,
+    files: RunFiles,
+    log: RunLog,
+    scanner: SecretScanner,
+    environ: Mapping[str, str],
+) -> dict:
+    """本番の ⑤。結果は要約の result（created・existing・blocked・failed）で返す。"""
+    minutes = getattr(config.limits, args.cadence).post
+    deadline = time.monotonic() + minutes * 60 - POST_WRAPUP_S
+    with closing(open_db(files.db)) as conn:
+        poster = Poster(
+            config,
+            target,
+            files.run_id,
+            files.dir,
+            log,
+            scanner,
+            conn,
+            environ=environ,
+            retry_count=args.retry_count,
+            deadline=deadline,
+        )
+        return poster.run(args.kind, args.stopped)
+
+
 def _record_model(files: RunFiles, model: str, log: RunLog) -> None:
     """本番の ② で使われたモデルを runs に記録し、前回の本番から変わっていればログで知らせる。
 
@@ -264,6 +301,16 @@ def _parser() -> argparse.ArgumentParser:
     finish.add_argument("--error-category", type=_category, help="コードが決めた分類の名前")
     finish.add_argument("--retry-count", type=_count)
     finish.add_argument("--model", help="② で使われたモデルの名前（`,` でつなぐ）")
+    post = stages.add_parser(
+        "post", help="⑤ 投稿。issue.md を Issue として作り、DB に記録し、実行を閉じる（本番だけ）"
+    )
+    post.add_argument("cadence", choices=sorted(_TARGETS))
+    post.add_argument("--run-id", required=True, help="統括スクリプトが作った実行 ID")
+    post.add_argument("--kind", required=True, choices=sorted(KINDS), help="issue.md の種別")
+    post.add_argument(
+        "--stopped", choices=STOPPABLE, help="すでに秘匿情報で公開を止めた種別（blocked_secret）"
+    )
+    post.add_argument("--retry-count", type=_count, help="② の再試行の回数（runs に記録する）")
     return parser
 
 
@@ -285,8 +332,8 @@ def _prepare(
     files = RunFiles(data_dir(environ, Path.cwd()), args.run_id)
     if getattr(args, "model", None) is not None:
         split_models(args.model)  # 形が違えば起動の誤り（ログと DB に外部の文を入れない）
-    if args.stage == "finish" and (files.dry_run or files.observation):
-        raise _UsageError("finish は通常の本番の実行だけ（ドライランは DB に書かない）")
+    if args.stage in ("finish", "post") and (files.dry_run or files.observation):
+        raise _UsageError(f"{args.stage} は通常の本番の実行だけ（ドライランは DB に書かない）")
     if files.observation and (args.stage, args.cadence) != ("collect", "daily"):
         raise _UsageError("観測（obs-）の実行は日次の ① だけ")
     if not files.dir.is_dir():
