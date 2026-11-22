@@ -545,6 +545,15 @@ def test_product_name_must_match_the_title_with_symbols(name):
         ("Next.js15 released", "Next.js15", True),
         ("GPT-4o released", "GPT-4", False),  # 数字で終わる名前の後ろに英字は続かない
         ("GPT-4 released", "GPT-4", True),
+        ("TypeScript5D", "TypeScript", False),  # 版の表記の後ろに英字
+        ("TypeScript5.7beta", "TypeScript", False),
+        ("TypeScript5.7", "TypeScript", True),
+        ("Next.js15で公開", "Next.js", True),
+        ("Intel8086 chip", "Intel", True),
+        ("人々AIが話題", "AI", True),  # 々・〆・〇、互換漢字、拡張漢字も日本語
+        ("〇AI〆", "AI", True),
+        ("豈AI", "AI", True),
+        ("\U00020bb7AI", "AI", True),
         ("Python3 guide", "Python", True),
         ("C#compiler news", "C#", True),  # 記号で終わる名前の後ろは見ない
         ("新製品「サンプルDB」登場", "サンプルDB", True),  # 日本語は部分一致のまま

@@ -41,7 +41,9 @@ from tech_researcher.validate.text import LIMIT_FACTOR, has_html, has_link
 
 MIN_PRODUCT_NAME = 2  # 日本語の製品名の最短の長さ（1文字はどのタイトルにも含まれうる）
 # 日本語（ひらがな・カタカナ・漢字）。語の境界にしない（「楽天AIが公開」の AI を通す）
-_JAPANESE = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+_JAPANESE = re.compile(
+    "[\u3005-\u3007\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003ffff]"
+)
 
 Entry = ThemeEntry | TechChangeEntry | ComparisonEntry | ComparisonRow | WatchEntry
 
@@ -367,7 +369,8 @@ def _contains_word(title: str, name: str) -> bool:
     """name が title に語として含まれる（Intel は Intelligence に、DB は FooDB に一致させない）。
 
     - 前：名前が日本語以外の英数字で始まるなら、直前がそのような英数字でないこと
-    - 後：名前が英字で終わるなら後ろに英字が続かないこと（TypeScript5.7 の数字は許す）、
+    - 後：名前が英字で終わるなら後ろに英字が続かないこと
+      （TypeScript5.7 の版の表記は許すが、その後ろに英字が続くときは弾く）、
       数字で終わるなら後ろに英数字が続かないこと（GPT-4 は GPT-4o に一致させない）
     - 日本語の文字と記号は境界にしない。記号で終わる名前の後ろは見ない（C# は C#compiler に一致）
     """
@@ -392,6 +395,10 @@ def _boundary_after(title: str, end: int, name: str) -> bool:
         return True
     following = title[end]
     if last.isalpha():
+        if following.isdigit():  # 版の表記（5.7 など）を飛ばす。その後ろに英字が続かないこと
+            while end < len(title) and (title[end].isdigit() or title[end] == "."):
+                end += 1
+            following = title[end] if end < len(title) else ""
         return not (_is_word_char(following) and following.isalpha())
     return not _is_word_char(following)
 
