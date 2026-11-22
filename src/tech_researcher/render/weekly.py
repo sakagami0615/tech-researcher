@@ -247,13 +247,14 @@ def _past_sources(past_ids: Sequence[str], names: Mapping[str, str], window: Pas
     """過去の観測の出典。新しい週から最大5件。日付は持たない（週だけが分かる）。"""
     found = {o.item_id: o for o in window.observations}
     chosen = sorted((found[i] for i in past_ids), key=lambda o: o.week, reverse=True)
-    links = []
+    links: dict[str, str] = {}  # 同じ URL が複数の週にあっても、1つにする
     for o in chosen:
-        if (url := normalize_url(o.url)) is not None:
-            links.append(source_link(url, names.get(o.source_id, o.source_id)))
+        url = normalize_url(o.url)
+        if url is not None and url not in links:
+            links[url] = source_link(url, names.get(o.source_id, o.source_id))
         if len(links) == MAX_SOURCES:
             break
-    return " ／ ".join(links)
+    return " ／ ".join(links.values())
 
 
 def _changes(

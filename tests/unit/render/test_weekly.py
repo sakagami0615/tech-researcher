@@ -285,3 +285,11 @@ def test_fading_theme_with_this_week_items_uses_the_plain_source_label():
     fading = section(render([t]).body, "注目が落ち着いたテーマ")
     assert "- **主な出典**：[公式ブログ（example.com）](https://example.com/3)" in fading
     assert "最後に観測" not in fading
+
+
+def test_past_sources_drop_the_same_url_seen_in_several_weeks():
+    same = [past(96, date(2026, 10, 12), "https://old.example.com/90")]
+    window = PastWindow(WEEKS, 4, [*PAST, *same])
+    t = theme("沈静", "fading", item_ids=(), past_ids=("i90", "i96", "i92"))
+    line = next(ln for ln in render([t], window=window).body.splitlines() if "最後に観測" in ln)
+    assert line.count("old.example.com/90)") == 1 and line.count("](") == 2
