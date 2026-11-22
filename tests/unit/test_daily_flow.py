@@ -87,7 +87,10 @@ class FakeGitHub:
                 ref = IssueRef(repo, number) if found else None
                 return IssueLookup(ref, status=None if found else 404)
 
-            def list_report_issues(self, repo, cadence):
+            def viewer_login(self):
+                return "bot"
+
+            def list_report_issues(self, repo, cadence, creator=None):
                 for c in github.created:
                     if "type:report" in c["labels"] and f"cadence:{cadence}" in c["labels"]:
                         yield ListedIssue(c["number"], parse_marker(c["body"]))

@@ -124,7 +124,7 @@ def check_recent_from_env(
     見つかれば、ラベルの探索と同じように DB に補う。読めなければ IssueReadError。"""
     reader = make_reader(issue_token(environ), limits, deadline=deadline, clock=clock)
     repo = issue_repo(environ)
-    creator = reader.viewer_login()
+    creator = reader.viewer_login()  # 読めなければ IssueReadError（作成者で絞れないまま探さない）
     for listed in reader.list_recent_issues(repo, since, creator):
         marker = listed.marker
         if marker is None or (marker.cadence, marker.target) != (cadence, target):
@@ -194,7 +194,7 @@ def _search(
     stale: bool,
 ) -> Existing | Create:
     """4.3 の 2：ラベル付きの Issue から、識別子の target が一致するものを探す。"""
-    for listed in reader.list_report_issues(repo, cadence):
+    for listed in reader.list_report_issues(repo, cadence, reader.viewer_login()):
         marker = listed.marker
         if marker is None or (marker.cadence, marker.target) != (cadence, target):
             continue

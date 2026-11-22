@@ -46,7 +46,11 @@ class FakeReader:
             raise out
         return out
 
-    def list_report_issues(self, repo, cadence):
+    def viewer_login(self):
+        return "bot"
+
+    def list_report_issues(self, repo, cadence, creator=None):
+        self.creators = getattr(self, "creators", []) + [creator]
         self.lists += 1
         if self.list_error:
             raise self.list_error
@@ -149,6 +153,40 @@ def test_labels_ignore_other_cadence_and_unmarked_issues(conn):
     )
     assert check(conn, reader) == Create(None)
     assert find_report_issue(conn, "daily", DAY) is None
+
+
+def test_label_search_uses_only_the_token_owners_issues(conn):
+    reader = FakeReader(listed=[listed(30)])
+    check(conn, reader)
+    assert reader.creators == ["bot"]
+
+
+def test_unreadable_owner_stops_the_label_search(conn):
+    class Reader(FakeReader):
+        def viewer_login(self):
+            raise IssueReadError("x", "forbidden", 403)
+
+    with pytest.raises(IssueReadError):
+        check(conn, Reader(listed=[listed(30)]))
+
+
+def test_recent_lookup_is_unconfirmed_when_the_owner_is_unreadable(conn):
+    class Reader(FakeReader):
+        def viewer_login(self):
+            raise IssueReadError("x", "forbidden", 403)
+
+    with pytest.raises(IssueReadError):
+        check_recent_from_env(
+            conn,
+            None,
+            RETRY,
+            "daily",
+            DAY,
+            AT,
+            "2026-10-24T06:00:00Z",
+            environ=ENV,
+            make_reader=lambda token, limits, **kw: Reader(),
+        )
 
 
 def test_no_record_and_nothing_found_creates(conn):
@@ -331,7 +369,7 @@ def test_recent_lookup_finds_a_label_stripped_issue_and_records_it(conn):
 def test_recent_lookup_returns_none_when_nothing_matches(conn):
     class Reader(FakeReader):
         def viewer_login(self):
-            return None
+            return "bot"
 
         def list_recent_issues(self, repo, since, creator=None):
             yield ListedIssue(5, Marker("daily", date(2026, 10, 22), RUN))

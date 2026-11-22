@@ -102,7 +102,7 @@ class FakeReader:
         for c in self.github.created:
             yield ListedIssue(c["number"], parse_marker(c["body"]))
 
-    def list_report_issues(self, repo, cadence):
+    def list_report_issues(self, repo, cadence, creator=None):
         if self.github.read_error:
             raise self.github.read_error
         for c in self.github.created:
@@ -618,7 +618,7 @@ def test_maybe_created_failure_finds_an_issue_whose_labels_were_removed(env, git
     result = env.post("report")
 
     assert (result["result"], result["number"]) == ("existing", 70)
-    assert len(github.attempts) == 1 and env.sleeps == []
+    assert len(github.attempts) == 1 and env.sleeps == [5]  # 待った後に探す（一覧に出るのを待つ）
     assert env.issue_rows() == [(RUN, "report", "created", REPO, 70, "pending")]
 
 
@@ -627,8 +627,26 @@ def test_maybe_created_failures_to_the_end_are_uncertain(env, github):
     result = env.post("report")
 
     assert (result["result"], result["error_category"]) == ("failed", "timeout")
-    assert len(github.attempts) == 3 and env.sleeps == [5, 20]  # 再試行は2回まで
+    # 再試行は2回まで。最後に短く待ってから確認する
+    assert len(github.attempts) == 3 and env.sleeps == [5, 20, 5]
     assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_lookup_happens_after_the_wait_and_before_the_next_post(env, github):
+    order = []
+    env.sleeps = type("L", (list,), {"append": lambda self, w: order.append(("sleep", w))})()
+    github.failures = [_error("timeout", False)]
+    original = github.make_reader
+
+    def make_reader(token, limits, **kw):
+        order.append(("lookup",))
+        return original(token, limits, **kw)
+
+    github.make_reader = make_reader
+    env.post("report")
+
+    # 重複判定の読み取り（POST の前）の後、待ち → ラベルなしの確認 → 再試行の POST の順
+    assert order[:3] == [("lookup",), ("sleep", 5), ("lookup",)]
 
 
 def test_invalid_response_is_not_retried_and_is_uncertain(env, github):

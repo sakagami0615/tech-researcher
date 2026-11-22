@@ -402,12 +402,17 @@ def test_reads_without_a_time_limit_pass_nothing(limits):
     assert fake.kw == {}
 
 
-def test_list_recent_issues_reads_without_labels_and_filters_by_creator(limits):
+def test_list_recent_issues_reads_without_labels_and_keeps_only_the_creator(limits):
+    def mine(number, body, **extra):
+        return {"number": number, "body": body, "labels": [], "user": {"login": "Bot"}, **extra}
+
     fake = FakeFetch(
         [
-            item(1, MARK + "\n本文", labels=[]),
-            {"number": 2, "body": MARK, "labels": [], "pull_request": {}},
-            {"number": 3, "body": "識別子なし", "labels": []},
+            mine(1, MARK + "\n本文"),
+            mine(2, MARK, pull_request={}),
+            mine(3, "識別子なし"),
+            {"number": 4, "body": MARK, "labels": [], "user": {"login": "intruder"}},  # 部外者
+            {"number": 5, "body": MARK, "labels": []},  # 作成者が読めない
         ]
     )
     r = IssueReader(TOKEN, limits, fetch_url=fake)
@@ -420,17 +425,31 @@ def test_list_recent_issues_reads_without_labels_and_filters_by_creator(limits):
     assert query["state"] == ["all"]
 
 
-def test_list_recent_issues_without_creator_and_with_bad_shape(limits):
-    r, fake = reader(limits, {"not": "a list"})
+def test_list_recent_issues_rejects_a_bad_shape(limits):
+    r, _ = reader(limits, {"not": "a list"})
     with pytest.raises(IssueReadError):
-        list(r.list_recent_issues("o/r", "2026-10-24T06:00:00Z"))
-    assert "creator" not in parse_qs(urlsplit(fake.calls[0][0]).query)
+        list(r.list_recent_issues("o/r", "2026-10-24T06:00:00Z", "bot"))
 
 
-def test_viewer_login_is_read_or_none(limits):
-    r, _ = reader(limits, {"login": "bot"})
-    assert r.viewer_login() == "bot"
-    r, _ = reader(limits, http_error(403))
-    assert r.viewer_login() is None
-    r, _ = reader(limits, {"login": "bad login!"})
-    assert r.viewer_login() is None
+def test_label_search_can_keep_only_the_creator(limits):
+    r, _ = reader(
+        limits,
+        [
+            item(1, MARK, user={"login": "bot"}),
+            item(2, MARK, user={"login": "intruder"}),
+            item(3, MARK),
+        ],
+    )
+    assert [i.number for i in r.list_report_issues("o/r", "daily", "bot")] == [1]
+    r, _ = reader(limits, [item(1, MARK, user={"login": "x"})])
+    assert [i.number for i in r.list_report_issues("o/r", "daily")] == [1]  # 絞らない呼び方
+
+
+def test_viewer_login_is_read_once_and_unreadable_is_an_error(limits):
+    r, fake = reader(limits, {"login": "bot"})
+    assert r.viewer_login() == "bot" and r.viewer_login() == "bot"
+    assert len(fake.calls) == 1
+    for outcome in (http_error(403), {"login": "bad login!"}, {"no": "login"}):
+        r, _ = reader(limits, outcome)
+        with pytest.raises(IssueReadError):
+            r.viewer_login()

@@ -382,33 +382,37 @@ class Poster:
                 )
                 return created, replaces
             except IssueWriteError as e:
-                looked = False
-                if kind == REPORT and e.maybe_created:
-                    # 作られたかもしれない。ラベルが外れた Issue も見つけるため、ラベルなしで探す
-                    # 見つかれば existing。見つからなければ、再試行してよい
-                    self._maybe_created = True
-                    found = self._look_recent(e)
-                    if found is not None:
-                        return found
-                    looked = True
+                maybe = kind == REPORT and e.maybe_created
+                if maybe:
+                    self._maybe_created = True  # 作られたかもしれない
                 if not e.retryable or attempt == len(waits):
-                    return self._give_up(kind, e, looked)
+                    return self._give_up(kind, e)
                 if kind != REPORT and not e.unsent:
                     raise  # 識別子がなく、再試行で2件作りうる（応答が返らない失敗）
                 wait = waits[attempt]
                 if e.retry_after is not None:
                     wait = min(e.retry_after, limits.retry_after_max_s)
                 if self.deadline is not None and self.clock() + wait >= self.deadline:
-                    return self._give_up(kind, e, looked)  # 待った後に要求する時間が残らない
+                    return self._give_up(kind, e)  # 待った後に要求する時間が残らない
                 self.log.write("post", "retry", error_category=e.category, attempt=attempt + 2)
                 self.sleep(wait)
+                if maybe:
+                    # 作った直後は一覧にまだ出ないことがあるので、待った後、再試行の POST の直前に、
+                    # ラベルが外れた Issue も見つけられるよう、ラベルなしで探す。見つかれば existing
+                    found = self._look_recent(e)
+                    if found is not None:
+                        return found
         raise AssertionError("ここには来ない")
 
-    def _give_up(self, kind: str, error: IssueWriteError, looked: bool) -> Existing:
-        """作れなかった。作られたかもしれない失敗があったレポート（旗が立っている）は、最後にラベル
-        なしの確認を行い（直前に行っていなければ）、見つかれば existing にする。確かめられなければ、
-        元の失敗を投げる（最後の失敗の種類によらず uncertain になる）。"""
-        if kind == REPORT and self._maybe_created and not looked:
+    def _give_up(self, kind: str, error: IssueWriteError) -> Existing:
+        """作れなかった。作られたかもしれない失敗があったレポート（旗が立っている）は、短く待ってから、
+        最後にラベルなしの確認を行い、見つかれば existing にする。確かめられなければ、元の失敗を
+        投げる（最後の失敗の種類によらず uncertain になる）。"""
+        if kind == REPORT and self._maybe_created:
+            waits = self.config.limits.http_retry_waits_s
+            settle = waits[0] if waits else 0  # 作った直後は一覧にまだ出ないことがある
+            if settle and (self.deadline is None or self.clock() + settle < self.deadline):
+                self.sleep(settle)
             found = self._look_recent(error)
             if found is not None:
                 return found

@@ -150,6 +150,7 @@ class IssueReader:
         # 要求を出してよい時間の上限（clock の値。⑤ の段階の上限。structure.md 6.4）
         self._deadline = deadline
         self._clock = clock
+        self._login: str | None = None  # viewer_login の結果（1回の実行で1回だけ読む）
 
     def __repr__(self) -> str:  # トークンを repr に出さない
         return "IssueReader()"
@@ -194,10 +195,13 @@ class IssueReader:
             raise _error(url, "invalid_response", None)
         return IssueLookup(IssueRef(new_repo, data["number"]), transferred=True)
 
-    def list_report_issues(self, repo: str, cadence: str) -> Iterator[ListedIssue]:
+    def list_report_issues(
+        self, repo: str, cadence: str, creator: str | None = None
+    ) -> Iterator[ListedIssue]:
         """`type:report` と `cadence:{cadence}` のラベルの Issue を、Open・Closed とも全ページ読む。
 
-        番号の古い順。プルリクエストは除く。本文の1行目だけを識別子として読む。
+        番号の古い順。プルリクエストは除く。本文の1行目だけを識別子として読む。creator があれば、
+        その人（トークンの持ち主）が作った Issue だけを使う（部外者の偽の識別子を使わない）。
         """
         for page in range(1, MAX_PAGES + 1):
             params = {
@@ -227,6 +231,8 @@ class IssueReader:
                     raise _error(url, "invalid_response", None)
                 if not {"type:report", f"cadence:{cadence}".casefold()} <= names:
                     continue  # ラベルが付いていない（外された）ものは候補にしない
+                if creator is not None and not _is_author(item, creator):
+                    continue
                 body = item.get("body")
                 marker = parse_marker(body if isinstance(body, str) else None)
                 yield ListedIssue(item["number"], marker)
@@ -234,24 +240,32 @@ class IssueReader:
                 return
         raise IssueReadError(f"ラベル付きの Issue が {MAX_PAGES} ページを超えた", "too_many")
 
-    def viewer_login(self) -> str | None:
-        """トークンの持ち主のログイン名。読めなければ None（作成者で絞らずに探す）。"""
+    def viewer_login(self) -> str:
+        """トークンの持ち主のログイン名（`GET /user`）。読めなければ IssueReadError。
+
+        作成者が分からないまま探すと、部外者が偽の識別子を入れた Issue を使わせられるので、
+        「確認できなかった」として扱う。
+        """
+        if self._login is not None:
+            return self._login
         url = f"{API_ROOT}/user"
         try:
             data = _json(url, self._get(url))
-        except FetchError, IssueReadError:
-            return None
+        except FetchError as e:
+            raise _error(url, classify(e), e.status) from e
         login = data.get("login") if isinstance(data, dict) else None
-        return login if isinstance(login, str) and re.fullmatch(_NAME, login) else None
+        if not (isinstance(login, str) and re.fullmatch(_NAME, login)):
+            raise _error(url, "invalid_response", None)
+        self._login = login
+        return login
 
-    def list_recent_issues(
-        self, repo: str, since: str, creator: str | None = None
-    ) -> Iterator[ListedIssue]:
+    def list_recent_issues(self, repo: str, since: str, creator: str) -> Iterator[ListedIssue]:
         """since（UTC の ISO 8601）以降に更新された Issue を、ラベルによらず全ページ読む。
 
         ラベルが外れた Issue も見つけるため（作成の応答が届かなかった後の確認）。作成者
-        （creator）があれば、その人の Issue だけ。プルリクエストは除く。本文の1行目だけを識別子
-        として読む。検索 API は使わない。
+        （creator。トークンの持ち主）の Issue だけを使う（一覧の絞り込みに加えて、各 Issue の
+        `user.login` も確かめる）。プルリクエストは除く。本文の1行目だけを識別子として読む。
+        検索 API は使わない。
         """
         for page in range(1, MAX_PAGES + 1):
             params = {
@@ -262,8 +276,7 @@ class IssueReader:
                 "per_page": PER_PAGE,
                 "page": page,
             }
-            if creator:
-                params["creator"] = creator
+            params["creator"] = creator
             url = f"{API_ROOT}/repos/{repo}/issues?{urlencode(params)}"
             try:
                 response = self._get(url)
@@ -276,7 +289,7 @@ class IssueReader:
             for item in items:
                 if not isinstance(item, dict) or not _is_number(item.get("number")):
                     raise _error(url, "invalid_response", None)
-                if "pull_request" in item:
+                if "pull_request" in item or not _is_author(item, creator):
                     continue
                 body = item.get("body")
                 yield ListedIssue(
@@ -294,6 +307,13 @@ class IssueReader:
             follow_redirects=False,
             **time_limit(self._deadline, self._clock),
         )
+
+
+def _is_author(item: dict, login: str) -> bool:
+    """Issue の作成者（`user.login`）が login か。大文字・小文字は区別しない。"""
+    user = item.get("user")
+    author = user.get("login") if isinstance(user, dict) else None
+    return isinstance(author, str) and author.casefold() == login.casefold()
 
 
 def _same_repo(url: str, repo: str, repository_url) -> bool:
