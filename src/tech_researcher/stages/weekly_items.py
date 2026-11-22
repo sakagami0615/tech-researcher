@@ -11,7 +11,7 @@ RSS などはフィードに載る期間が短く（D-12）、週次の時点で
 """
 
 import sqlite3
-from collections.abc import Hashable, Iterable, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 
@@ -41,7 +41,10 @@ def weekly_rows(target: Target, fresh: Sequence[Item], daily: Iterable[ItemRow])
 
 
 def weekly_rows_dated(
-    target: Target, fresh: Sequence[Item], daily: Iterable[ItemRow]
+    target: Target,
+    fresh: Sequence[Item],
+    daily: Iterable[ItemRow],
+    spike_days: Mapping[str, date] = {},
 ) -> list[tuple[ItemRow, date]]:
     """weekly_rows と、各行の掲載の根拠の出来事の日付（② の入力の date。JST）。
 
@@ -49,14 +52,17 @@ def weekly_rows_dated(
     同じ URL の中では、取り直した項目、日次の行（新しい対象日から）の順に重ねる。
     日付は、出来事の時刻の JST の日付。前日の記録と比べて決まる出来事（feed_entry・star_growth・
     new_repo。時刻は翌日 6:00 の測定のものになる）は、その出来事を持つ日次の行の対象日。
+    週の合計で判定した急上昇（日次の行にない）は、spike_days（URL → 最後の測定の対象日）の日付。
     """
     groups: dict[str, list[ItemRow]] = {i.url: [item_row(i, target)] for i in fresh}
     for row in sorted(daily, key=lambda r: r.target, reverse=True):
         groups.setdefault(row.item.url, []).append(row)
-    return [_merge(target, rows) for rows in groups.values()]
+    return [_merge(target, rows, spike_days) for rows in groups.values()]
 
 
-def _merge(target: Target, rows: list[ItemRow]) -> tuple[ItemRow, date]:
+def _merge(
+    target: Target, rows: list[ItemRow], spike_days: Mapping[str, date]
+) -> tuple[ItemRow, date]:
     base = min(rows, key=lambda r: _PRECISION_ORDER.index(r.published_precision))
     ordered = [base, *(r for r in rows if r is not base)]
     items = [r.item for r in ordered]
@@ -97,15 +103,17 @@ def _merge(target: Target, rows: list[ItemRow]) -> tuple[ItemRow, date]:
         hold_reason=None,
         dated_sources=True,
     )
-    return row, _inclusion_date(rows, inclusion)
+    return row, _inclusion_date(rows, inclusion, spike_days.get(item.url))
 
 
-def _inclusion_date(rows: Sequence[ItemRow], event: Event) -> date:
+def _inclusion_date(rows: Sequence[ItemRow], event: Event, spike_day: date | None) -> date:
     """前日の記録と比べて決まる出来事と、日付だけの公開（時刻が 0:00 UTC になり、調査期間より前の
     日付になりうる）は、その出来事を持つ日次の行の対象日。それ以外は出来事の時刻の JST の日付。"""
     compared = event.type == "new_repo" or (
         event.type == "attention_spike" and event.basis in ("feed_entry", "star_growth")
     )
+    # 週の合計で判定した急上昇は、日次の行にないので、最後の測定の対象日を使う
+    use_spike_day = spike_day is not None and event.basis == "star_growth"
     for row in rows:  # 取り直した分は持たない。新しい対象日の日次の行から
         if row.cadence != "daily" or not any(
             _event_key(e) == _event_key(event) for e in row.item.events
@@ -116,6 +124,8 @@ def _inclusion_date(rows: Sequence[ItemRow], event: Event) -> date:
         )
         if compared or date_only:
             return row.target
+    if use_spike_day:
+        return spike_day
     return event.at.astimezone(JST).date()
 
 

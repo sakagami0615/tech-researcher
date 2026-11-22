@@ -133,12 +133,14 @@ def source_line(
     names: Mapping[str, str],
     primary_item_id: str | None = None,
     primary_link_id: str | None = None,
+    limit: int | None = None,
 ) -> str:
     """出典の並び（1.3）。一次情報を先頭に印を付けて置き、残りは item_ids の順に並べる。
 
     - 一次情報は primary_link_id（候補リンク）を、なければ primary_item_id の項目の URL を使う
     - その URL の収集レコードがあれば、そのレコードを先頭に移す。なければドメインだけで書く
     - names は source_id から表示名への対応。同じ URL の出典は1つにする
+    - limit を渡すと、出典の数をその件数までにする（先頭から）
     """
     sources: dict[str, _Source] = {}
     for item_id in item_ids:
@@ -154,7 +156,7 @@ def source_line(
     if primary is not None:
         first = sources.pop(primary, None) or _Source(primary, None, None)
         marked = [f"一次情報 {_format(first)}"]
-    parts = marked + [_format(s) for s in sources.values()]
+    parts = (marked + [_format(s) for s in sources.values()])[:limit]
     if not parts:
         raise ValueError(f"{list(item_ids)} の出典がない")
     return SEPARATOR.join(parts)
@@ -187,6 +189,22 @@ def _date(record: Record) -> str | None:
     if record.posted_at is not None:
         return f"投稿 {record.posted_at.astimezone(JST).date().isoformat()}"
     return None
+
+
+def source_link(url: str, name: str | None, date_text: str | None = None) -> str:
+    """出典1件のリンク（`[情報源名（ドメイン）](URL) 日付`）。URL は正規化済みのものを渡す。
+
+    過去の観測のように、収集レコードを持たず URL と情報源名だけが分かる出典に使う。
+    """
+    return _format(_Source(url, name, date_text))
+
+
+def unavailable_section(unavailable: Sequence[tuple[str, str]]) -> str | None:
+    """末尾の「取得できなかった情報源」（1件以上あるときだけ。日次・週次で共通）。"""
+    if not unavailable:
+        return None
+    lines = "\n".join(f"- {plain_text(name)}：{plain_text(reason)}" for name, reason in unavailable)
+    return f"## 取得できなかった情報源\n\n{lines}"
 
 
 def _format(source: _Source) -> str:

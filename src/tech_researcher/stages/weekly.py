@@ -1,22 +1,26 @@
-"""週次の ② の入力の用意（D-04・D-17。worker で動く）。
+"""週次の ② の入力の用意と、② の出力の ③ 検証・本文の作成（D-04・D-07・D-17。worker で動く）。
 
 ① の後に、collected.json（取り直した分と日次の収集結果をまとめた今週の観測）と、DB の比較対象
 （比較の窓の過去の観測・過去のテーマ・Star の増分）から、② の入力（agent-input.json）を作る。
 DB がない（開発機のドライラン）ときは、比較対象は空にする。DB は読むだけなので、ドライランの
 読み取り専用の接続でも使える。
+③ は、② に渡したコピーではなく、worker の collected.json から同じ入力を作り直して照合し（D-04）、
+検査を通った項目から本文を作る（verify_weekly）。保存・投稿と失敗の分岐は、ここでは行わない。
 """
 
 import json
 import sqlite3
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 
 from tech_researcher.agent.daily import InputItem
 from tech_researcher.agent.weekly import WeeklyInclusion, WeeklyMaterials, build_weekly_input
-from tech_researcher.collect.records import Event
+from tech_researcher.agent.weekly_output import WeeklyOutput, assign_theme_ids, parse_weekly_output
+from tech_researcher.collect.records import Event, Item
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config
-from tech_researcher.db.history import past_themes
+from tech_researcher.db.history import next_theme_id, past_themes
 from tech_researcher.db.weekly import (
     compare_week_starts,
     past_observations,
@@ -25,9 +29,18 @@ from tech_researcher.db.weekly import (
 )
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
-from tech_researcher.stages.collect import COLLECTED, INCLUSIONS, load_collected, load_item_ids
+from tech_researcher.render.common import Report
+from tech_researcher.render.weekly import PastWindow, render_weekly
+from tech_researcher.stages.collect import (
+    COLLECTED,
+    INCLUSIONS,
+    load_collected,
+    load_item_ids,
+    unavailable_notes,
+)
 from tech_researcher.stages.daily import AGENT_INPUT
 from tech_researcher.stages.weekly_items import daily_days
+from tech_researcher.validate.weekly import WeeklyChecked, check_weekly
 
 
 def weekly_materials(config: Config, target: Target, db: sqlite3.Connection | None):
@@ -55,6 +68,20 @@ def load_inclusions(run_dir: Path) -> list[WeeklyInclusion]:
     ]
 
 
+def _weekly_input(
+    config: Config, target: Target, run_dir: Path, db: sqlite3.Connection | None
+) -> tuple[dict, dict[str, Item], WeeklyMaterials]:
+    """② の入力と、項目 ID → 項目、比較対象。write_weekly_input と ③ が同じものを作る。"""
+    items = load_collected(run_dir / COLLECTED)
+    ids = load_item_ids(run_dir)
+    inputs = [InputItem(i, item) for i, item in zip(ids, items, strict=True)]
+    materials = weekly_materials(config, target, db)
+    data = build_weekly_input(
+        target, inputs, load_inclusions(run_dir), source_names(config), materials
+    )
+    return data, dict(zip(ids, items, strict=True)), materials
+
+
 def write_weekly_input(
     config: Config,
     target: Target,
@@ -66,15 +93,7 @@ def write_weekly_input(
 
     log を渡すと、入力の観測の件数（今週・過去）とバイト数を残す（量を測るため）。
     """
-    items = load_collected(run_dir / COLLECTED)
-    inputs = [InputItem(i, item) for i, item in zip(load_item_ids(run_dir), items, strict=True)]
-    data = build_weekly_input(
-        target,
-        inputs,
-        load_inclusions(run_dir),
-        source_names(config),
-        weekly_materials(config, target, db),
-    )
+    data, _, _ = _weekly_input(config, target, run_dir, db)
     body = json.dumps(data, ensure_ascii=False)
     path = run_dir / AGENT_INPUT
     partial = path.with_name(f"{path.name}.partial")
@@ -87,3 +106,53 @@ def write_weekly_input(
             count=len(data["items"]),
             detail=f"past_observations={len(data['past_observations'])} bytes={len(body.encode())}",
         )
+
+
+@dataclass(frozen=True)
+class WeeklyVerified:
+    """③ の結果。checked は検査の結果（掲載する項目と除外した項目）、report は作った本文。
+
+    checked.output のテーマには、新しいテーマの番号を振ってある。
+    """
+
+    checked: WeeklyChecked
+    report: Report
+
+
+def verify_weekly(
+    config: Config,
+    target: Target,
+    run_id: str,
+    run_dir: Path,
+    output: object,
+    db: sqlite3.Connection | None = None,
+) -> WeeklyVerified:
+    """② の出力（agent-output.json の中身）を検査し、通った項目から本文を作る。
+
+    出力全体がスキーマに合わなければ ValueError（D6(a)。不合格にするのは呼ぶ側）。
+    新しいテーマの番号は、DB の最後の番号の次から振る（DB がなければ T0001 から）。
+    """
+    data, items, materials = _weekly_input(config, target, run_dir, db)
+    parsed = parse_weekly_output(output)
+    checked = check_weekly(
+        parsed, data, items, {p.item_id: p.url for p in materials.past}, config.quote
+    )
+    first_new = next_theme_id(db) if db is not None else "T0001"
+    numbered = WeeklyOutput(
+        tuple(assign_theme_ids(checked.output.themes, first_new)),
+        checked.output.tech_changes,
+        checked.output.comparisons,
+        checked.output.watch,
+    )
+    checked = replace(checked, output=numbered)
+    report = render_weekly(
+        target,
+        run_id,
+        numbered,
+        items,
+        source_names(config),
+        PastWindow(materials.compare_weeks, config.weekly_compare_weeks, materials.past),
+        observed=len(items),
+        unavailable=unavailable_notes(run_dir, config),
+    )
+    return WeeklyVerified(checked, report)

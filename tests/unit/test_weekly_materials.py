@@ -21,6 +21,7 @@ from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.db.weekly import (
     compare_week_starts,
+    latest_star_snapshots,
     past_observations,
     period_star_gains,
     weeks_with_items,
@@ -29,7 +30,7 @@ from tech_researcher.logging import RunLog
 from tech_researcher.periods import daily_target, weekly_target
 from tech_researcher.stages.collect import COLLECTED, ITEM_IDS, Collectors, run_collect
 from tech_researcher.stages.collect_store import item_row
-from tech_researcher.stages.weekly import write_weekly_input
+from tech_researcher.stages.weekly import verify_weekly, write_weekly_input
 from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows, weekly_rows_dated
 from tech_researcher.validate.secret_scan import SecretScanner
 
@@ -566,3 +567,165 @@ def test_date_only_published_uses_the_daily_target_as_date(conn):
     store_daily(conn, day, item_of(record))
     ((row, row_day),) = weekly_rows_dated(WEEK, [], load_daily_rows(conn, WEEK))
     assert (row.inclusion.type, row_day) == ("published", day)
+
+
+def snapshot(conn, repo, day, stars, created="2025-01-01T00:00:00Z"):
+    conn.execute(
+        "INSERT INTO star_snapshots (repo, target, measured_at, stars_total, created_at,"
+        " routes_json) VALUES (?, ?, ?, ?, ?, '[\"search\"]')",
+        (repo, day.isoformat(), f"{day.isoformat()}T21:00:00Z", stars, created),
+    )
+
+
+def collect_weekly_with_github(tmp_path, conn, name="gh"):
+    from tech_researcher.config import load_config
+
+    github = load_config(Path(__file__).parents[2] / "config" / "tech-researcher.toml").github_repos
+    config = replace(CONFIG, github_repos=replace(github, threshold_increase=100, report_top_n=5))
+    run_dir = tmp_path / name
+    run_dir.mkdir()
+    start_run(conn, f"20261026-070000-{name}", WEEK, STARTED)
+    log = RunLog(
+        run_dir / "log.jsonl", f"20261026-070000-{name}", "weekly", WEEK.key, SecretScanner()
+    )
+    run_collect(
+        config,
+        WEEK,
+        run_dir,
+        log,
+        collectors=Collectors(feed=lambda f, limits, **_: SourceResult("rss:a", (), 1)),
+        db=conn,
+        write_db=True,
+    )
+    return config, run_dir
+
+
+def test_weekly_collect_promotes_a_repo_whose_weekly_total_passes_the_threshold(tmp_path, conn):
+    """毎日は 100 未満でも週の合計が 100 以上のリポジトリを、急上昇の出来事にする（D-13）。"""
+    for day, stars in [(19, 1000), (20, 1060), (21, 1120), (22, 1180), (23, 1240), (24, 1300)]:
+        snapshot(conn, "a/steady", date(2026, 10, day), stars)
+        snapshot(conn, "a/flat", date(2026, 10, day), 500 + day)  # 週の合計 5
+    conn.commit()
+    config, run_dir = collect_weekly_with_github(tmp_path, conn)
+
+    collected = json.loads((run_dir / COLLECTED).read_text("utf-8"))
+    assert [i["url"] for i in collected] == ["https://github.com/a/steady"]
+    assert [(e["type"], e["basis"]) for e in collected[0]["events"]] == [
+        ("attention_spike", "star_growth")
+    ]
+    # 日付は最後の測定の対象日（10-24）。② の入力に、期間の増分（合計）が入る
+    inclusions = json.loads((run_dir / "inclusions.json").read_text("utf-8"))
+    assert [(i["type"], i["basis"], i["day"]) for i in inclusions] == [
+        ("attention_spike", "star_growth", "2026-10-24")
+    ]
+    write_weekly_input(config, WEEK, run_dir, conn)
+    data = json.loads((run_dir / "agent-input.json").read_text("utf-8"))
+    (item,) = data["items"]
+    assert item["github"]["star_delta_period"] == 300
+    assert item["github"]["stars_total"] == 1300
+    assert item["event"] == {"type": "attention_spike"}
+
+
+def test_weekly_spike_skips_repos_already_featured_in_a_daily_report(tmp_path, conn):
+    for day, stars in [(19, 1000), (20, 1300)]:
+        snapshot(conn, "a/shown", date(2026, 10, day), stars)
+    row_item = item_of(
+        replace(
+            rss("https://github.com/a/shown", date(2026, 10, 20), "shown"),
+            events=(Event("attention_spike", noon(date(2026, 10, 21)), "star_growth"),),
+        )
+    )
+    item_id = store_daily(conn, date(2026, 10, 20), row_item)
+    entry = EntryRow("daily_item", "published", (item_id,), display_no=1)
+    report = ReportRow("daily", date(2026, 10, 20), "passed", {}, {}, [entry], body_markdown="b")
+    start_run(conn, "20261021-060000-d9", daily_target(date(2026, 10, 21), 1), STARTED)
+    save_report(conn, "20261021-060000-d9", report)
+    record_issue(
+        conn, "20261021-060000-d9", "report", "daily", date(2026, 10, 20), "created", STARTED,
+        repo="o/r", number=3,
+    )  # fmt: skip
+    conn.commit()
+    _, run_dir = collect_weekly_with_github(tmp_path, conn)
+    inclusions = json.loads((run_dir / "inclusions.json").read_text("utf-8"))
+    # 日次の行の出来事が週次の観測に残るだけで、合計での新しい出来事は足さない
+    assert [i["at"] for i in inclusions] == [noon(date(2026, 10, 21)).isoformat()]
+
+
+def test_verify_weekly_checks_the_output_and_renders_the_body(tmp_path, conn):
+    day20 = date(2026, 10, 20)
+    store_daily(conn, day20, item_of(rss(X, day20, "日次の X")))
+    prev = store_weekly(conn, date(2026, 10, 19), Y, "先週の Y")
+    _, run_dir = collect(tmp_path, "one", conn, "20261026-070000-abcd", [])
+    ids = json.loads((run_dir / ITEM_IDS).read_text("utf-8"))
+    output = {
+        "themes": [
+            {
+                "theme_id": None,
+                "name": "新しいテーマ",
+                "status": "rising",
+                "change": "変化",
+                "comparison": "先週より増えた",
+                "item_ids": ids,
+                "past_ids": [prev],
+            },
+            {  # 渡していない過去の番号は除外される
+                "theme_id": "T0099",
+                "name": "不正なテーマ",
+                "status": "steady",
+                "change": "変化",
+                "comparison": "比較",
+                "item_ids": ids,
+                "past_ids": [],
+            },
+        ],
+        "tech_changes": [],
+        "comparisons": [],
+        "watch": [],
+    }
+
+    result = verify_weekly(CONFIG, WEEK, "20261026-070000-abcd", run_dir, output, conn)
+
+    assert [(x.section, x.category) for x in result.checked.excluded] == [("theme", "invalid_id")]
+    assert [t.theme_id for t in result.checked.output.themes] == ["T0001"]  # 番号はコードが振る
+    body = result.report.body
+    assert "| 新しいテーマ | 🔺台頭 | 1 | 1 | 1.0 |" in body
+    assert "（今週 1 件／前週 1 件／過去4週平均 1.0 件）" in body
+    assert "> **今週の観測**：1 件" in body
+    assert "不正なテーマ" not in body
+
+    # 取得できなかった情報源は、週次でも unavailable.json から本文の末尾に出る
+    (run_dir / "unavailable.json").write_text(
+        json.dumps([{"source_id": "rss:a", "category": "timeout"}]), encoding="utf-8"
+    )
+    again = verify_weekly(CONFIG, WEEK, "20261026-070000-abcd", run_dir, output, conn)
+    assert again.report.body.rstrip().endswith("## 取得できなかった情報源\n\n- A：タイムアウト")
+
+    # 出力全体がスキーマに合わなければ ValueError（呼ぶ側が不合格にする）
+    with pytest.raises(ValueError):
+        verify_weekly(CONFIG, WEEK, "20261026-070000-abcd", run_dir, {"themes": []}, conn)
+
+
+def test_weekly_collect_writes_unavailable_sources_for_the_body(tmp_path, conn):
+    def failing(feed, limits, **_):
+        return SourceResult("rss:a", (), 0, error="接続の失敗", error_category="network")
+
+    run_dir = tmp_path / "fail"
+    run_dir.mkdir()
+    start_run(conn, "20261026-070000-fail", WEEK, STARTED)
+    log = RunLog(run_dir / "log.jsonl", "20261026-070000-fail", "weekly", WEEK.key, SecretScanner())
+    run_collect(
+        CONFIG, WEEK, run_dir, log, collectors=Collectors(feed=failing), db=conn, write_db=True
+    )
+    found = json.loads((run_dir / "unavailable.json").read_text("utf-8"))
+    assert [(e["source_id"], e["category"]) for e in found] == [("rss:a", "network")]
+
+
+def test_latest_star_snapshots_return_the_target_day_of_the_last_measurement(conn):
+    for day, stars in [(19, 1000), (21, 1100), (26, 9999)]:
+        snapshot(conn, "a/repo", date(2026, 10, day), stars)
+    snapshot(conn, "b/repo", date(2026, 10, 20), 50)
+    found = latest_star_snapshots(conn, date(2026, 10, 19), date(2026, 10, 26))
+    assert {r: (d, s.stars_total) for r, (d, s) in found.items()} == {
+        "a/repo": (date(2026, 10, 21), 1100),  # 期間の外の 26 日は使わない
+        "b/repo": (date(2026, 10, 20), 50),
+    }

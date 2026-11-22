@@ -11,6 +11,8 @@
   - 前日の測定がないリポジトリ（初めて見るもの）は判定しない
   - 前日の測定が1件もない日は、判定しなかったことを star_unjudged で返す（ヘッダの定型文。1.6）
 
+週次は、調査期間の日次の増分の合計で同じ判定を行う（judge_weekly_star_spikes。D-13）。
+
 すでに急上昇・新規として載せたリポジトリ（featured。D-13）は、上位の数（report_top_n・
 new_repo_top_n）に入れない。
 レコードは足す（観測として残し、除外は項目の hold_reason で行う）。
@@ -79,6 +81,45 @@ def judge_star_spikes(
         for s, kind in sorted(chosen, key=lambda c: c[0].repo)
     ]
     return SpikeResult(tuple(records), not previous)
+
+
+def judge_weekly_star_spikes(
+    settings: GitHubRepos,
+    gains: Mapping[str, int],
+    latest: Mapping[str, StarSnapshot],
+    featured: Collection[str] = (),
+) -> tuple[Record, ...]:
+    """調査期間の Star の増分の合計 gains（db.weekly.period_star_gains）で、日次と同じ判定を行う。
+
+    毎日は threshold_increase に届かなくても、週の合計が届いたリポジトリを、増分の大きい順に上位
+    report_top_n 件、急上昇（star_growth）の出来事にする。しきい値と件数は日次と同じ設定を使う。
+    - latest は期間の最後の測定（db.weekly.latest_star_snapshots）。出来事の時刻と累計に使う
+    - 載せたもの（featured）は、日次で載せたものと同じく、上位の数に入れず、レコードも作らない
+    - 作成から new_repo_days 日以内で累計が new_repo_stars 以上のものは、新規の判定の対象なので
+      急上昇にしない（日次と同じく、急上昇と新規を重ねない）。日数は最後の測定から数える
+    - 増分の合計は期間のものなので、レコードに日次の増分（star_delta_24h）は入れない
+    """
+    growth = sorted(
+        (
+            (gain, snapshot)
+            for repo, gain in gains.items()
+            if gain >= settings.threshold_increase
+            and (snapshot := latest.get(repo)) is not None
+            and repo_url(repo) not in featured
+            and not _new_at_measurement(settings, snapshot)
+        ),
+        key=lambda g: (-g[0], g[1].repo),
+    )
+    top = sorted((s for _, s in growth[: settings.report_top_n]), key=lambda s: s.repo)
+    return tuple(_record(s, "star_growth", None, ()) for s in top)
+
+
+def _new_at_measurement(settings: GitHubRepos, snapshot: StarSnapshot) -> bool:
+    age = snapshot.measured_at - snapshot.created_at
+    return (
+        timedelta(0) <= age <= timedelta(days=settings.new_repo_days)
+        and snapshot.stars_total >= settings.new_repo_stars
+    )
 
 
 def is_new_repo(settings: GitHubRepos, target: Target, snapshot: StarSnapshot) -> bool:

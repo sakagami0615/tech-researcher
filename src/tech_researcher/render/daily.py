@@ -17,6 +17,7 @@ from tech_researcher.render.common import (
     period_text,
     plain_text,
     source_line,
+    unavailable_section,
 )
 from tech_researcher.render.sanitize import sanitize_text
 
@@ -77,11 +78,8 @@ def render_daily(
             f"（収集 {collected} 件）。ジョブは正常に完了しています。"
         )
     sections.append(f"---\n{FOOTER}")
-    if unavailable:
-        lines = "\n".join(
-            f"- {plain_text(name)}：{plain_text(reason)}" for name, reason in unavailable
-        )
-        sections.append(f"## 取得できなかった情報源\n\n{lines}")
+    if section := unavailable_section(unavailable):
+        sections.append(section)
     title = f"[日次] {day_label(target.key)}の技術動向"
     return Report(title, "\n\n".join(sections) + "\n", LABELS)
 
