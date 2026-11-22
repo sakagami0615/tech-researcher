@@ -50,6 +50,7 @@ from tech_researcher.periods import Target, daily_target, weekly_target
 from tech_researcher.runfiles import RunFiles, data_dir
 from tech_researcher.stages.collect import collect_failure, run_collect
 from tech_researcher.stages.daily import run_verify, write_daily_input
+from tech_researcher.stages.weekly import write_weekly_input
 from tech_researcher.validate.secret_scan import SecretScanner, known_secret_values
 
 CONFIG = Path("config/tech-researcher.toml")
@@ -113,8 +114,12 @@ def _run(
     conn = open_readonly(files.db) if files.dry_run else open_db(files.db)
 
     def daily_input() -> None:
-        if args.cadence == "daily" and not files.observation:  # 週次の ② の入力は週次の Issue で
+        if files.observation:
+            return
+        if args.cadence == "daily":
             write_daily_input(config, target, files.dir)
+        else:
+            write_weekly_input(config, target, files.dir, conn, log)
 
     with closing(conn) if conn is not None else nullcontext():
         if files.dry_run:

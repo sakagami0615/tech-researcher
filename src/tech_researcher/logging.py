@@ -19,7 +19,8 @@ CADENCES = frozenset({"daily", "weekly"})
 # job は実行全体の開始・終了に使う。ほかは D-04 の ① 〜 ⑤（data-model.md の failed_stage と同じ）
 STAGES = frozenset({"job", "collect", "analyze", "verify", "investigate", "post"})
 # usage は ② ④ の AI の1回の呼び出しの使用量・所要時間（agent/invoke.py の AgentUsage）、warning は
-# 失敗ではないが運用者に知らせること（使われたモデルが前回の本番から変わったなど）
+# 失敗ではないが運用者に知らせること（使われたモデルが前回の本番から変わったなど）、input は
+# ② に渡す入力の大きさ（週次の観測の量を測るため）
 EVENTS = frozenset(
     {
         "start",
@@ -31,6 +32,7 @@ EVENTS = frozenset(
         "secret_detected",
         "usage",
         "warning",
+        "input",
     }
 )
 # Issue や ④ の入力に使ってよい項目（許可リスト）。detail・exception は外部由来の文を含みうる
