@@ -196,7 +196,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | reports | 1回の実行で作ったレポート案と検証結果 | ③ | ⑤、④ の入力、不合格 Issue の件数 |
 | report_entries | レポート案の1項目（日次の項目、週次のテーマ・技術的変化・比較・注目テーマ） | ③ | ⑤、D-13 の「載せた」、D-16 の除外、週次の過去のテーマ |
 | issues | 1つの Issue（作った・止めた・作れなかった） | ⑤ | 重複判定（report-templates.md 4.3）、Projects に未登録の Issue の登録（4.4） |
-| meta | DB 全体の情報（いまは投稿先のリポジトリ1つ。`key`・`value`） | ⑤（最初の投稿・補完のとき） | ⑤ の重複判定の前の確認。設定の `GITHUB_ISSUE_REPO` と違えば止める（structure.md 3.6） |
+| meta | DB 全体の情報（いまは投稿先のリポジトリ1つ。`key`・`value`） | ⑤（最初の投稿・補完のとき） | ⑤ の重複判定の前の確認。設定の `GITHUB_ISSUE_REPO` と違えば止める（structure.md 3.6）。別のリポジトリにある Issue（転送など）を見つけたときは書かない。meta が空のままそれを見つけると `needs_review` で止まる：運用者は、この DB が設定の投稿先のものか確かめ（`issues` の `repo` と設定を見る）、そうなら `INSERT INTO meta (key, value) VALUES ('issue_repo', 'owner/repo')` で書く。違えば別の `TR_DATA_DIR` を使う |
 
 ### 3.4 各テーブル
 
@@ -346,7 +346,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `run_id` | TEXT | どの実行で作ろうとしたか |
 | `kind` | TEXT | `report`・`rejected`・`run_error`・`run_error_secret`（秘匿情報検出の定型） |
 | `cadence`・`target` | TEXT | 重複判定に使う |
-| `state` | TEXT | `created`・`blocked_secret`（検査で公開を止めた）・`failed`（GitHub に登録できなかった） |
+| `state` | TEXT | `created`・`blocked_secret`（検査で公開を止めた）・`failed`（GitHub に登録できなかった）・`uncertain`（作成の応答が読めず、Issue が作られたか分からない。運用者が確かめる。report-templates.md 4.3） |
 | `repo`・`number` | TEXT・INTEGER | 作った Issue（`created` のときだけ）。転送（HTTP 301）されていたら転送先で更新する（report-templates.md 4.3） |
 | `created_at` | TEXT | |
 | `projects_state` | TEXT | `pending`・`done`・`issue_missing`（登録しようとした Issue が見つからない。report-templates.md 4.4）。`created` 以外は空 |

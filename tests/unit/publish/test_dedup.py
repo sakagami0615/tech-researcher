@@ -14,6 +14,7 @@ from tech_researcher.publish.dedup import (
     Skipped,
     check_duplicate,
     check_duplicate_from_env,
+    check_recent_from_env,
 )
 from tech_researcher.publish.github_issues import (
     IssueLookup,
@@ -45,7 +46,11 @@ class FakeReader:
             raise out
         return out
 
-    def list_report_issues(self, repo, cadence):
+    def viewer_login(self):
+        return "bot"
+
+    def list_report_issues(self, repo, cadence, creator=None):
+        self.creators = getattr(self, "creators", []) + [creator]
         self.lists += 1
         if self.list_error:
             raise self.list_error
@@ -95,6 +100,16 @@ def test_301_updates_db_to_transfer_target_keeping_run(conn):
     row = find_report_issue(conn, "daily", DAY)
     assert (row.run_id, row.repo, row.number) == (RUN, "new/repo", 7)
     assert reader.lists == 0
+    # 元の記録が設定の投稿先のときは、転送の後も投稿先を記録する
+    assert conn.execute("SELECT value FROM meta").fetchall() == [(REPO,)]
+
+
+def test_301_from_another_repo_does_not_record_the_destination(conn):
+    """元の記録が設定の投稿先ではないときは、投稿先を書かない（試験用の DB を結び付けない）。"""
+    seed(conn, repo="old/repo")
+    reader = FakeReader({11: IssueLookup(IssueRef(REPO, 7), transferred=True)})
+    assert check(conn, reader) == Existing(IssueRef(REPO, 7), "transferred", False)
+    assert conn.execute("SELECT count(*) FROM meta").fetchone() == (0,)
 
 
 @pytest.mark.parametrize("status", [404, 410])
@@ -140,6 +155,40 @@ def test_labels_ignore_other_cadence_and_unmarked_issues(conn):
     assert find_report_issue(conn, "daily", DAY) is None
 
 
+def test_label_search_uses_only_the_token_owners_issues(conn):
+    reader = FakeReader(listed=[listed(30)])
+    check(conn, reader)
+    assert reader.creators == ["bot"]
+
+
+def test_unreadable_owner_stops_the_label_search(conn):
+    class Reader(FakeReader):
+        def viewer_login(self):
+            raise IssueReadError("x", "forbidden", 403)
+
+    with pytest.raises(IssueReadError):
+        check(conn, Reader(listed=[listed(30)]))
+
+
+def test_recent_lookup_is_unconfirmed_when_the_owner_is_unreadable(conn):
+    class Reader(FakeReader):
+        def viewer_login(self):
+            raise IssueReadError("x", "forbidden", 403)
+
+    with pytest.raises(IssueReadError):
+        check_recent_from_env(
+            conn,
+            None,
+            RETRY,
+            "daily",
+            DAY,
+            AT,
+            "2026-10-24T06:00:00Z",
+            environ=ENV,
+            make_reader=lambda token, limits, **kw: Reader(),
+        )
+
+
 def test_no_record_and_nothing_found_creates(conn):
     assert check(conn, FakeReader()) == Create(None)
 
@@ -149,7 +198,7 @@ def test_transferred_record_is_read_from_its_own_repo_on_next_check(conn):
     first = FakeReader({11: IssueLookup(IssueRef("new/repo", 7), transferred=True)})
     check(conn, first)
     second = FakeReader({7: IssueLookup(IssueRef("new/repo", 7))})
-    assert check(conn, second) == Existing(IssueRef("new/repo", 7), "db")
+    assert check(conn, second) == Existing(IssueRef("new/repo", 7), "db", False)
     assert second.gets == [("new/repo", 7)]
     assert second.lists == 0
 
@@ -262,7 +311,7 @@ def test_dry_run_without_issue_token_or_repo_is_skipped(conn, drop):
         AT,
         dry_run=True,
         environ=env,
-        make_reader=lambda *a: made.append(a),
+        make_reader=lambda *a, **kw: made.append(a),
     )
     assert got == Skipped(drop)
     assert made == []
@@ -278,12 +327,63 @@ def test_real_run_without_issue_token_or_repo_fails(conn, drop):
 def test_from_env_builds_reader_with_issue_token_and_lowercased_repo(conn):
     seen = []
 
-    def make(token, limits):
-        seen.append(token)
+    def make(token, limits, deadline=None, clock=None):
+        seen.append((token, deadline))
         return FakeReader(listed=[listed(30)])
 
     got = check_duplicate_from_env(
-        conn, None, RETRY, "daily", DAY, AT, environ=ENV, make_reader=make
+        conn, None, RETRY, "daily", DAY, AT, environ=ENV, make_reader=make, deadline=9.0
     )
     assert got == Existing(IssueRef("o/r", 30), "labels")
-    assert seen == [ENV["GITHUB_ISSUE_TOKEN"]]
+    assert seen == [(ENV["GITHUB_ISSUE_TOKEN"], 9.0)]  # ⑤ の時間の上限を読み取りにも渡す
+
+
+def test_recent_lookup_finds_a_label_stripped_issue_and_records_it(conn):
+    class Reader(FakeReader):
+        def viewer_login(self):
+            return "bot"
+
+        def list_recent_issues(self, repo, since, creator=None):
+            self.args = (repo, since, creator)
+            yield ListedIssue(5, Marker("daily", DAY, RUN))
+
+    reader = Reader()
+    got = check_recent_from_env(
+        conn,
+        None,
+        RETRY,
+        "daily",
+        DAY,
+        AT,
+        "2026-10-24T06:00:00Z",
+        environ=ENV,
+        make_reader=lambda token, limits, **kw: reader,
+    )
+
+    assert got == Existing(IssueRef("o/r", 5), "recent")
+    assert reader.args == ("o/r", "2026-10-24T06:00:00Z", "bot")
+    assert find_report_issue(conn, "daily", DAY).number == 5
+    assert conn.execute("SELECT value FROM meta").fetchall() == [("o/r",)]
+
+
+def test_recent_lookup_returns_none_when_nothing_matches(conn):
+    class Reader(FakeReader):
+        def viewer_login(self):
+            return "bot"
+
+        def list_recent_issues(self, repo, since, creator=None):
+            yield ListedIssue(5, Marker("daily", date(2026, 10, 22), RUN))
+            yield ListedIssue(6, None)
+
+    got = check_recent_from_env(
+        conn,
+        None,
+        RETRY,
+        "daily",
+        DAY,
+        AT,
+        "2026-10-24T06:00:00Z",
+        environ=ENV,
+        make_reader=lambda token, limits, **kw: Reader(),
+    )
+    assert got is None

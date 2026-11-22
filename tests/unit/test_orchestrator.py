@@ -65,6 +65,12 @@ elif service == "agent":
     print(agent["stdout"])
     print(agent.get("stderr", ""), file=sys.stderr)
     sys.exit(agent.get("exit", 0))
+elif command == "compose" and "post" in sys.argv:
+    default = {{"result": "created", "kind": "report", "repo": "o/r", "number": 7}}
+    post = behavior.get("post", default)
+    if post == "fail":
+        sys.exit(1)
+    print("not json" if post == "bad" else json.dumps(post))
 elif command == "compose" and "verify" in sys.argv:
     verify = behavior.get("verify", "report")
     if verify == "fail":
@@ -647,6 +653,8 @@ def test_dry_run_prints_summary_only_and_keeps_it(host, capfd):
         "failed_sources": ["Example", "Qiita"],  # 設定ファイルの表示名にする
         "partial_sources": [],
         "output_dir": str(out_dir),
+        "issue_url": None,
+        "issue_post_failed": None,
     }
     assert json.loads((out_dir / "summary.json").read_text(encoding="utf-8")) == summary
     assert [(r["stage"], r["event"]) for r in host.log(run_id)] == [
@@ -690,21 +698,181 @@ def test_weekly_target_is_monday(host, capfd):
     assert host.calls()[0]["argv"][-3:] == ["weekly", "--run-id", summary["run_id"]]
 
 
-def test_production_ends_as_error_until_later_stages_exist(host, capfd):
+def test_production_posts_the_report_with_stage_post(host, capfd):
     host.behave("ok", lock="daily")
-    assert orchestrator.main(["daily"], host.environ) == 1
+    assert orchestrator.main(["daily"], host.environ) == 0
 
     summary = summary_of(capfd)
     run_id = summary["run_id"]
     assert not run_id.startswith("dry-")
-    assert summary["result"] == "error"
-    assert summary["failed_stage"] == "post"  # ⑤ はまだない
-    assert summary["error_category"] == "not_implemented"
+    assert summary["result"] == "report"
+    assert summary["issue_url"] == "https://github.com/o/r/issues/7"
+    assert (summary["failed_stage"], summary["error_category"]) == (None, None)
     assert summary["items"] == 3
     assert summary["output_dir"] is None
     assert list((host.data / "work").iterdir()) == [host.data / "work" / ".lock"]  # 消した
-    assert ("post", "failure") in [(r["stage"], r["event"]) for r in host.log(run_id)]
     assert host.calls()[0]["locked"]
+
+
+def _post_args(host) -> list[list[str]]:
+    return [c["argv"][c["argv"].index("post") :] for c in host.calls() if "post" in c["argv"]]
+
+
+def test_report_post_receives_kind_and_analyze_retries(host, capfd):
+    host.behave("ok", lock="daily")
+    assert orchestrator.main(["daily"], host.environ) == 0
+    run_id = summary_of(capfd)["run_id"]
+    assert _post_args(host) == [
+        ["post", "daily", "--run-id", run_id, "--kind", "report", "--retry-count", "0"]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("post", "category", "url"),
+    [
+        (
+            {"result": "existing", "kind": "report", "repo": "o/r", "number": 3},
+            None,
+            "o/r/issues/3",
+        ),
+        ({"result": "failed", "kind": "report", "error_category": "http_4xx"}, "http_4xx", None),
+        (
+            {
+                "result": "blocked",
+                "kind": "run_error_secret",
+                "repo": "o/r",
+                "number": 9,
+                "error_category": "secret_detected",
+            },
+            "secret_detected",
+            "o/r/issues/9",
+        ),
+        ("bad", "bad_output", None),
+        ("fail", "exit_1", None),
+        ({"result": "created", "kind": "report", "repo": "../x", "number": 1}, "bad_output", None),
+        ({"result": "created", "kind": "report", "error_category": "a b"}, "bad_output", None),
+    ],
+)
+def test_report_post_results_are_reflected(host, capfd, post, category, url):
+    host.behave("ok", lock="daily", post=post)
+    code = orchestrator.main(["daily"], host.environ)
+    summary = summary_of(capfd)
+    if category is None:
+        assert (code, summary["result"]) == (0, "report")
+    else:
+        assert code == 1
+        assert (summary["result"], summary["failed_stage"]) == ("error", "post")
+        assert summary["error_category"] == category
+    assert summary["issue_url"] == (f"https://github.com/{url}" if url else None)
+
+
+@pytest.mark.parametrize(
+    ("post", "failed"),
+    [
+        ("fail", "exit_1"),
+        ({"result": "failed", "kind": "rejected", "error_category": "http_4xx"}, "http_4xx"),
+        (
+            {
+                "result": "blocked",
+                "kind": "run_error_secret",
+                "error_category": "secret_detected",
+                "write_error": "timeout",
+            },
+            "timeout",
+        ),
+    ],
+)
+def test_failed_failure_issue_keeps_the_result_and_reports_issue_post_failed(
+    host, capfd, post, failed
+):
+    host.behave("ok", lock="daily", verify="rejected", post=post)
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["result"] == "rejected"  # 元の結果のまま
+    assert summary["issue_url"] is None and summary["issue_post_failed"] == failed
+
+
+def test_report_blocked_with_a_failed_notice_reports_the_write_error(host, capfd):
+    post = {
+        "result": "failed",
+        "kind": "run_error_secret",
+        "error_category": "secret_detected",
+        "write_error": "http_4xx",
+    }
+    host.behave("ok", lock="daily", post=post)
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("post", "secret_detected")
+    assert summary["issue_post_failed"] == "http_4xx"
+
+
+@pytest.mark.parametrize(
+    ("post", "category"),
+    [
+        (
+            {
+                "result": "created",
+                "kind": "report",
+                "repo": "o/r",
+                "number": 7,
+                "run_close_failed": True,
+            },
+            "run_close_failed",
+        ),
+        (
+            {
+                "result": "blocked",
+                "kind": "run_error_secret",
+                "repo": "o/r",
+                "number": 9,
+                "error_category": "secret_detected",
+                "run_close_failed": True,
+            },
+            "secret_detected",  # 元の分類のまま
+        ),
+    ],
+)
+def test_run_close_failure_keeps_the_category_and_closes_again(host, capfd, post, category):
+    host.behave("ok", lock="daily", post=post)
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "post",
+        category,
+    )
+    assert summary["issue_url"] is not None  # 公開済み
+    finishes = [c["argv"] for c in host.calls() if "finish" in c["argv"]]
+    assert len(finishes) == 1 and category in finishes[0]  # 元の分類で閉じ直す
+
+
+def test_dry_run_never_posts(host, capfd):
+    host.behave("ok", lock="daily-dry-run")
+    assert orchestrator.main(["daily", "--dry-run"], host.environ) == 0
+    summary_of(capfd)
+    assert _post_args(host) == []
+
+
+def test_rejected_and_secret_issues_are_posted_with_their_kind(host, capfd, monkeypatch):
+    host.behave(
+        "ok",
+        lock="daily",
+        verify="rejected",
+        post={"result": "created", "kind": "rejected", "repo": "o/r", "number": 4},
+    )
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert summary["result"] == "rejected"
+    assert summary["issue_url"] == "https://github.com/o/r/issues/4"
+    assert _post_args(host)[0][4:] == ["--kind", "rejected"]
+
+    (host.fake / "calls.jsonl").unlink()
+    host.behave("ok", lock="daily", verify="secret_detected")
+    assert orchestrator.main(["daily"], host.environ) == 1
+    summary = summary_of(capfd)
+    assert (summary["failed_stage"], summary["error_category"]) == ("verify", "secret_detected")
+    assert _post_args(host)[0][4:] == ["--kind", "run_error_secret", "--stopped", "report"]
 
 
 # --- ② の AI の呼び出し（agent コンテナ。agent/invoke.py、structure.md 3.3） ---
@@ -1125,8 +1293,8 @@ def test_job_timeout_in_production_removes_work_and_releases_lock(
         invoke, "call_agent", lambda body, timeout_s, **_: invoke.AgentResult({"items": []})
     )
     host.behave("ok", lock="daily")
-    assert orchestrator.main(["daily"], host.environ) == 1  # ロックは外れている
-    assert summary_of(capfd)["error_category"] == "not_implemented"
+    assert orchestrator.main(["daily"], host.environ) == 0  # ロックは外れている
+    assert summary_of(capfd)["result"] == "report"
 
 
 def test_container_remove_failure_keeps_stage_result(host, capfd, monkeypatch):
@@ -1208,16 +1376,16 @@ def test_locks_are_per_kind(host, capfd):
     holder = _hold_lock(host.data / "locks" / "daily-dry-run.lock")
     try:
         host.behave("ok", lock="daily")
-        assert orchestrator.main(["daily"], host.environ) == 1  # ドライランが動いていても本番は動く
-        assert summary_of(capfd)["error_category"] == "not_implemented"
+        assert orchestrator.main(["daily"], host.environ) == 0  # ドライランが動いていても本番は動く
+        assert summary_of(capfd)["result"] == "report"
     finally:
         _release(holder)
 
 
 def test_lock_is_released_after_run(host, capfd):
-    assert orchestrator.main(["daily"], host.environ) == 1
+    assert orchestrator.main(["daily"], host.environ) == 0
     summary_of(capfd)
-    assert orchestrator.main(["daily"], host.environ) == 1
+    assert orchestrator.main(["daily"], host.environ) == 0
     summary_of(capfd)
 
 

@@ -39,8 +39,9 @@ class FakeFetch:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def __call__(self, url, limits, *, headers, follow_redirects):
+    def __call__(self, url, limits, *, headers, follow_redirects, **kw):
         assert follow_redirects is False
+        self.kw = kw
         self.calls.append((url, dict(headers)))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -386,3 +387,69 @@ def test_get_issue_too_deeply_nested_json_is_an_invalid_response(limits):
     with pytest.raises(IssueReadError) as e:
         r.get_issue("o/r", 7)
     assert e.value.category == "invalid_response"
+
+
+def test_reads_pass_the_time_limit_to_fetch(limits):
+    fake = FakeFetch({"number": 3})
+    r = IssueReader(TOKEN, limits, fetch_url=fake, deadline=50.0, clock=lambda: 1.0)
+    r.get_issue("o/r", 3)
+    assert fake.kw["deadline"] == 50.0 and fake.kw["clock"]() == 1.0
+
+
+def test_reads_without_a_time_limit_pass_nothing(limits):
+    fake = FakeFetch({"number": 3})
+    IssueReader(TOKEN, limits, fetch_url=fake).get_issue("o/r", 3)
+    assert fake.kw == {}
+
+
+def test_list_recent_issues_reads_without_labels_and_keeps_only_the_creator(limits):
+    def mine(number, body, **extra):
+        return {"number": number, "body": body, "labels": [], "user": {"login": "Bot"}, **extra}
+
+    fake = FakeFetch(
+        [
+            mine(1, MARK + "\n本文"),
+            mine(2, MARK, pull_request={}),
+            mine(3, "識別子なし"),
+            {"number": 4, "body": MARK, "labels": [], "user": {"login": "intruder"}},  # 部外者
+            {"number": 5, "body": MARK, "labels": []},  # 作成者が読めない
+        ]
+    )
+    r = IssueReader(TOKEN, limits, fetch_url=fake)
+    found = list(r.list_recent_issues("o/r", "2026-10-24T06:00:00Z", "bot"))
+
+    assert [(f.number, f.marker is not None) for f in found] == [(1, True), (3, False)]
+    query = parse_qs(urlsplit(fake.calls[0][0]).query)
+    assert "labels" not in query  # ラベルに頼らない
+    assert query["since"] == ["2026-10-24T06:00:00Z"] and query["creator"] == ["bot"]
+    assert query["state"] == ["all"]
+
+
+def test_list_recent_issues_rejects_a_bad_shape(limits):
+    r, _ = reader(limits, {"not": "a list"})
+    with pytest.raises(IssueReadError):
+        list(r.list_recent_issues("o/r", "2026-10-24T06:00:00Z", "bot"))
+
+
+def test_label_search_can_keep_only_the_creator(limits):
+    r, _ = reader(
+        limits,
+        [
+            item(1, MARK, user={"login": "bot"}),
+            item(2, MARK, user={"login": "intruder"}),
+            item(3, MARK),
+        ],
+    )
+    assert [i.number for i in r.list_report_issues("o/r", "daily", "bot")] == [1]
+    r, _ = reader(limits, [item(1, MARK, user={"login": "x"})])
+    assert [i.number for i in r.list_report_issues("o/r", "daily")] == [1]  # 絞らない呼び方
+
+
+def test_viewer_login_is_read_once_and_unreadable_is_an_error(limits):
+    r, fake = reader(limits, {"login": "bot"})
+    assert r.viewer_login() == "bot" and r.viewer_login() == "bot"
+    assert len(fake.calls) == 1
+    for outcome in (http_error(403), {"login": "bad login!"}, {"no": "login"}):
+        r, _ = reader(limits, outcome)
+        with pytest.raises(IssueReadError):
+            r.viewer_login()
