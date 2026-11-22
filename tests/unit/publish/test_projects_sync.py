@@ -236,7 +236,8 @@ def test_missing_projects_settings_fail_every_pending_issue_without_a_request(h)
 
     assert h.registrars == []
     assert outcome.as_dict()["error_category"] == "config"
-    assert [r[1:4] for r in h.rows()] == [("pending", 1, "config")] * 2
+    assert [r[1:4] for r in h.rows()] == [("pending", 1, "config"), ("pending", 0, None)]
+    assert outcome.as_dict()["not_attempted"] == 1
 
 
 def test_projects_failure_is_not_a_run_failure(h):
@@ -284,10 +285,11 @@ def test_404_while_the_issue_exists_is_a_config_failure_and_stays_pending(h):
 
     outcome = h.run()
 
-    assert [r[1:4] for r in h.rows()] == [("pending", 1, "projects_not_found")] * 2
-    assert outcome.as_dict()["failed"] == 2
+    assert h.state(5)[1:4] == ("pending", 1, "projects_not_found")  # 設定の誤りなので止める
+    assert h.state(9)[1:3] == ("pending", 0)
+    assert outcome.as_dict()["failed"] == 1
+    assert outcome.as_dict()["not_attempted"] == 1
     assert outcome.as_dict()["issue_missing"] == 0
-    assert len(h.readers) == 1  # 読み手は1回の実行で使い回す
 
 
 @pytest.mark.parametrize("problem", ["reader_error", "no_issue_token"])
@@ -386,3 +388,18 @@ def test_unusable_issue_record_is_a_failure_without_a_request(h):
 
     assert h.state(9)[1:4] == ("pending", 1, "invalid_issue")
     assert outcome.as_dict()["failed"] == 1
+
+
+def test_issue_read_rate_limit_stops_the_rest(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.failures[5] = http_error(404, category="not_found")
+    h.failures[9] = http_error(404, category="not_found")
+    h.reader_error = IssueReadError("x", "rate_limited")
+
+    outcome = h.run()
+
+    assert h.registrars[0].added == [5]
+    assert h.state(5)[1:4] == ("pending", 1, "projects_not_found_unchecked")
+    assert h.state(9)[1:3] == ("pending", 0)
+    assert outcome.as_dict()["not_attempted"] == 1

@@ -1253,3 +1253,29 @@ def test_pending_issues_of_earlier_runs_are_registered_even_when_this_post_fails
         (RUN, "report", "created", REPO, 100, "done"),
         (RETRY, "run_error", "failed", None, None, None),
     ]
+
+
+def test_no_projects_registration_when_the_destination_does_not_match(env, github):
+    projects_env(env)
+    env.post("report")
+    env.conn.execute("UPDATE issues SET projects_state = 'pending'")
+    env.environ["GITHUB_ISSUE_REPO"] = "other/prod"
+
+    result = env.post("report", run=RETRY)
+
+    assert result["result"] == "failed"
+    assert env.projects is None
+    assert env.issue_rows()[0][-1] == "pending"
+
+
+def test_unexpected_projects_error_does_not_break_the_post_result(env, github, monkeypatch):
+    projects_env(env)
+
+    def boom(self, first=None):
+        raise ValueError("想定外")
+
+    monkeypatch.setattr("tech_researcher.publish.projects_sync.ProjectsSync.run", boom)
+    result = env.poster().run("report") if env.write(report_for()) is None else None
+
+    assert result["result"] == "created"
+    assert result["projects"] == {"error_category": "projects_unexpected"}

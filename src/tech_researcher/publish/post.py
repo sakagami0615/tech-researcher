@@ -184,6 +184,7 @@ class Poster:
         self.deadline = deadline  # 要求を出してよい時間の上限（clock の値。structure.md 6.4）
         self.repo = ""
         self.writer: IssueWriter | None = None
+        self._repo_checked = False  # 投稿先が DB の記録と合うと確かめられたか
         # Issue の作成と Projects の登録で共有する書き込みの予算（structure.md 6.5）
         self.budget = WriteBudget(config.limits.github_write_calls)
         # この実行の作成で、Issue が作られたかもしれない失敗があったか。あれば POST を繰り返さない
@@ -196,7 +197,16 @@ class Poster:
         結果は `projects` に分けて返し、result・error_category には影響させない。
         """
         out = self._post_issue(kind, stopped)
+        if not self._repo_checked:
+            return out  # 投稿先を確かめられていない（設定の食い違いなど）。登録もしない
         ref = IssueRef(out["repo"], out["number"]) if "number" in out else None
+        try:
+            return self._sync_projects(out, ref)
+        except Exception as e:  # 登録の想定外の失敗で、投稿の結果を壊さない
+            self.log.write("post", "failure", error_category="projects_unexpected", exc=e)
+            return {**out, "projects": {"error_category": "projects_unexpected"}}
+
+    def _sync_projects(self, out: dict, ref: IssueRef | None) -> dict:
         sync = ProjectsSync(
             self.conn,
             self.run_id,
@@ -232,6 +242,7 @@ class Poster:
             )
             self.writer.deadline = self.deadline
             check_issue_repo(self.conn, self.repo)
+            self._repo_checked = True
         except (IssueReadError, IssueWriteError, ConfigError) as e:
             return self._stop(kind, _category(e, "config"))
         except sqlite3.Error as e:

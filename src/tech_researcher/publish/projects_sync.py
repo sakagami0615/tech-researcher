@@ -48,7 +48,7 @@ UNCHECKED = "projects_not_found_unchecked"  # 404 で、Issue があるか確か
 INVALID_ISSUE = "invalid_issue"  # 記録の repo・number が使えない形
 DB_ERROR = "db_error"
 # 残りの Issue も同じ理由で失敗するので、そこで止める分類
-_STOP = frozenset({AUTH, FORBIDDEN, RATE_LIMITED, CONFIG, BUDGET})
+_STOP = frozenset({AUTH, FORBIDDEN, RATE_LIMITED, CONFIG, BUDGET, NOT_FOUND_WITH_ISSUE})
 
 
 @dataclass
@@ -119,8 +119,8 @@ class ProjectsSync:
                 projects_config(self.environ), self.limits, self.budget, clock=self.clock
             )
         except ProjectsError as e:
-            for row in rows:
-                self._fail(row, e.category, outcome)
+            self._fail(rows[0], e.category, outcome)  # 残りも同じ理由。要求も記録も1件だけ
+            outcome.not_attempted += len(rows) - 1
             return outcome
         registrar.deadline = self.deadline
         for index, row in enumerate(rows):
@@ -153,13 +153,17 @@ class ProjectsSync:
                 gone = self._issue_gone(ref)
                 if gone is True:
                     return self._finish(row, outcome, missing=True)
-                return self._fail(row, UNCHECKED if gone is None else NOT_FOUND_WITH_ISSUE, outcome)
+                if gone is False:
+                    return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
+                self._fail(row, UNCHECKED, outcome)
+                # Issue 用トークンの認証・権限・レート制限の失敗は、残りの確かめも同じ理由で失敗する
+                return gone if gone in _STOP else UNCHECKED
             return self._fail(row, e.category, outcome)
         return self._finish(row, outcome, missing=False)
 
-    def _issue_gone(self, ref: IssueRef) -> bool | None:
+    def _issue_gone(self, ref: IssueRef) -> bool | str:
         """Issue 用トークンで Issue を読み直す。ない（404・410）なら True、あれば False、確かめ
-        られなければ None。"""
+        られなければ、読み取りの失敗の分類（文字列）。"""
         try:
             if self._reader is None:
                 self._reader = self.make_reader(
@@ -169,8 +173,8 @@ class ProjectsSync:
                     clock=self.clock,
                 )
             return self._reader.get_issue(ref.repo, ref.number).ref is None
-        except IssueReadError:
-            return None
+        except IssueReadError as e:
+            return e.category
 
     def _finish(self, row: IssueRow, outcome: ProjectsOutcome, *, missing: bool) -> str | None:
         try:
