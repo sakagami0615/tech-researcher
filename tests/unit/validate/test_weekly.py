@@ -280,7 +280,8 @@ def test_non_github_row_product_name_must_appear_in_the_collected_title(name, ok
         assert result.verification["unknown_product"] == "failed"
 
 
-def test_product_name_is_checked_against_every_collected_title_of_the_item():
+def test_product_name_is_checked_against_the_title_given_to_the_ai():
+    """AI に渡したタイトルだけと照合する（まとめた別の記事のタイトルは AI が見ていない）。"""
     merged = Item(
         "https://a.example.com/m",
         (
@@ -295,8 +296,10 @@ def test_product_name_is_checked_against_every_collected_title_of_the_item():
     )
     items = {**ITEMS, "i6": merged}
     data = {**DATA, "items": [*DATA["items"], {"id": "i6", "untrusted": {"title": "First title"}}]}
-    result = check(comparisons=[comparison(row("i6", "BarDB"))], data=data, items=items)
-    assert result.excluded == ()
+    ok = check(comparisons=[comparison(row("i6", "First"))], data=data, items=items)
+    assert ok.excluded == ()
+    bad = check(comparisons=[comparison(row("i6", "BarDB"))], data=data, items=items)
+    assert reasons(bad)[0] == ("comparison_row", "unknown_product")
 
 
 # --- D1 出典 ---
@@ -418,7 +421,8 @@ def test_comparison_text_limits(domain, summary, feature, use_case, product, ok)
 
 def test_long_product_name_is_excluded_by_length():
     items = {**ITEMS, "i1": item("https://a.example.com/1", "X" * 100)}
-    result = check(comparisons=[comparison(row("i1", "X" * 81))], items=items)
+    data = {**DATA, "items": [{"id": "i1", "untrusted": {"title": "X" * 100}}]}
+    result = check(comparisons=[comparison(row("i1", "X" * 81))], data=data, items=items)
     assert reasons(result)[0] == ("comparison_row", "too_long")
 
 

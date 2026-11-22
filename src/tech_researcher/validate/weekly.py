@@ -105,6 +105,7 @@ class _Context:
     past_ids: frozenset[str]
     theme_ids: frozenset[str]
     items: Mapping[str, Item]
+    titles: Mapping[str, str]  # ② に渡した今週の観測のタイトル
     past_urls: Mapping[str, str]
     allowed: frozenset[str]
     quote_sources: Sequence[Prepared]
@@ -262,6 +263,7 @@ def _context(
         past_ids=frozenset(p["id"] for p in data["past_observations"]),
         theme_ids=frozenset(t["theme_id"] for t in data["past_themes"]),
         items=items,
+        titles={i["id"]: i["untrusted"]["title"] or "" for i in data["items"]},
         past_urls=past_urls,
         allowed=frozenset(allowed),
         quote_sources=quote_sources(data, meta_terms_by_id(items)),
@@ -329,7 +331,7 @@ def _invalid_source(entry: Entry, ctx: _Context) -> str | None:
 
 
 def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
-    """比較表の GitHub 外の行：製品名が、選んだ項目の収集タイトルに含まれる（2.4）。
+    """比較表の GitHub 外の行：製品名が、選んだ項目の ② に渡したタイトルに含まれる（2.4）。
 
     GitHub のリポジトリの行は、名前をコードが owner/repo で付けるので照合しない。
     """
@@ -341,7 +343,7 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
     name = normalize(entry.product_name or "")
     if not name:
         return "GitHub 外の行に製品名がない"
-    if any(name in normalize(r.title) for r in item.sources if r.title):
+    if name in normalize(ctx.titles.get(entry.item_id, "")):
         return None
     return "製品名が収集タイトルにない"
 

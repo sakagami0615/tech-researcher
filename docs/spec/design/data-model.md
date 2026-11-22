@@ -621,7 +621,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
   - スキーマは日次と同じ決まり（`$schema` なし、使うキーワードは `ALLOWED_KEYWORDS`）。`parse_weekly_output` がスキーマ（D6(a)）で検査してから、セクションごとの項目に分ける
   - `check_weekly` が、項目（比較は行）ごとに次の順で検査し、最初に違反した検査の分類で除外する：`invalid_id`・`invalid_source`・`unknown_product`・`forbidden_link`・`forbidden_html`・`too_long`・`long_quote`。重複（`duplicate_id`）は最後に、残った項目の中で、先に出た項目を残して判定する（item_ids はセクションの中だけ、theme_id は `null` 以外がテーマ間で）。除外したテーマの AI の `theme_id` は除外の記録（`WeeklyExcluded.entry`）に残る
   - D1 の過去の観測の URL は `PastObservation.url`（items の `canonical_url`）。D4 の元のテキストは、入力の items の `title`・`excerpt` と past_observations の `title`
-  - 比較表：行が除外されても、残った行があれば領域は残す。残った行がなければ領域を除外する（`empty_comparison`）。同じ `item_id` の行は、比較のセクションの中で先に出た1行だけを残す。GitHub のリポジトリの行は製品名を照合しない（名前は `owner/repo`）。GitHub 外の行は製品名が必須で、選んだ項目の収集タイトルのどれかに（NFKC・大文字小文字を無視して）含まれることを求める
+  - 比較表：行が除外されても、残った行があれば領域は残す。残った行がなければ領域を除外する（`empty_comparison`）。同じ `item_id` の行は、比較のセクションの中で先に出た1行だけを残す。GitHub のリポジトリの行は製品名を照合しない（名前は `owner/repo`）。GitHub 外の行は製品名が必須で、選んだ項目の、② に渡したタイトル（`untrusted.title`）に（NFKC・大文字小文字を無視して）含まれることを求める（AI が見ていない、まとめた別の記事のタイトルとは照合しない）
   - 文字数は、上限の2倍を超えたら除外する。上限はテーマ名 30・変化 200・比較 120、変化の見出し 40・説明 120、領域名 30・まとめ 150、製品名 40・特徴 80・用途 60、注目テーマ名 30・理由 120（テンプレートに数がない見出し・領域名・製品名・注目テーマ名は近い欄に合わせた値）
   - 新しいテーマの番号は `assign_theme_ids` が、検査を通ったテーマに、`next_theme_id` から出力の順に振る
 
