@@ -11,6 +11,7 @@ from tech_researcher.agent.weekly_output import (
     ThemeEntry,
     WatchEntry,
     WeeklyOutput,
+    assign_theme_ids,
 )
 from tech_researcher.collect.records import GitHubRepo, Item, Record
 from tech_researcher.config import QuoteLimits
@@ -251,11 +252,16 @@ def test_row_excluded_by_another_check_does_not_take_the_id():
 # --- 製品名の照合 ---
 
 
-def test_github_row_needs_no_product_name_and_ignores_it():
+def test_github_row_needs_no_product_name_and_it_is_not_checked():
     result = check(comparisons=[comparison(row("i4"), row("i4", "Whatever"))])
     assert [r.product_name for r in result.output.comparisons[0].rows] == [None]  # 2行目は重複
     assert [x.category for x in result.excluded] == ["duplicate_id"]
     assert check(comparisons=[comparison(row("i4", "Whatever"))]).excluded == ()
+    # 表示に使わないので、URL や長さの検査にもかけない（特徴・用途は対象のまま）
+    long_name = "https://x.example " + "あ" * 500
+    assert check(comparisons=[comparison(row("i4", long_name))]).excluded == ()
+    result = check(comparisons=[comparison(row("i4", "n", feature="https://x.example"))])
+    assert reasons(result)[0] == ("comparison_row", "forbidden_link")
 
 
 @pytest.mark.parametrize(
@@ -420,8 +426,9 @@ def test_comparison_text_limits(domain, summary, feature, use_case, product, ok)
 
 
 def test_long_product_name_is_excluded_by_length():
-    items = {**ITEMS, "i1": item("https://a.example.com/1", "X" * 100)}
-    data = {**DATA, "items": [{"id": "i1", "untrusted": {"title": "X" * 100}}]}
+    title = "X" * 81 + " tail"
+    items = {**ITEMS, "i1": item("https://a.example.com/1", title)}
+    data = {**DATA, "items": [{"id": "i1", "untrusted": {"title": title}}]}
     result = check(comparisons=[comparison(row("i1", "X" * 81))], data=data, items=items)
     assert reasons(result)[0] == ("comparison_row", "too_long")
 
@@ -513,3 +520,44 @@ def test_product_name_must_match_the_title_with_symbols(name):
     assert reasons(result)[0] == ("comparison_row", "unknown_product")
     ok = check(comparisons=[comparison(row("i1", "C# FooDB"))], data=data, items=items)
     assert ok.excluded == ()
+
+
+@pytest.mark.parametrize(
+    "title, name, ok",
+    [
+        ("Intelligence report", "Intel", False),  # 語の途中
+        ("Intel releases chip", "Intel", True),
+        ("Welcome to FooDB 3", "DB", False),
+        ("Welcome to Foo DB 3", "DB", True),
+        ("FooDB (beta)", "FooDB", True),  # 前後が記号
+        ("Use C# today", "C#", True),
+        ("AB", "A", False),  # 1文字は照合しない
+        ("A B", "A", False),
+        ("新製品「サンプルDB」登場", "サンプルDB", True),  # 日本語は部分一致のまま
+        ("新製品サンプルDBを公開", "サンプル", True),
+        ("x2 pro", "x", False),
+    ],
+)
+def test_product_name_matches_as_a_word(title, name, ok):
+    items = {**ITEMS, "i1": item("https://a.example.com/1", title)}
+    data = {**DATA, "items": [{"id": "i1", "untrusted": {"title": title}}]}
+    result = check(comparisons=[comparison(row("i1", name))], data=data, items=items)
+    assert (result.excluded == ()) is ok
+    if not ok:
+        assert reasons(result)[0] == ("comparison_row", "unknown_product")
+
+
+def test_product_name_of_exactly_twice_the_guide_is_kept():
+    title = "X" * 80
+    items = {**ITEMS, "i1": item("https://a.example.com/1", title)}
+    data = {**DATA, "items": [{"id": "i1", "untrusted": {"title": title}}]}
+    result = check(comparisons=[comparison(row("i1", title))], data=data, items=items)
+    assert result.excluded == ()  # 上限 40 の2倍（80）までは残す
+
+
+def test_excluded_theme_does_not_take_a_number_when_assigning_new_ids():
+    bad = theme(None, ["i99"], name="除外")
+    result = check(themes=[bad, theme(None, ["i1"], name="先"), theme("T0002", ["i2"])])
+    numbered = assign_theme_ids(result.output.themes, "T0010")
+    assert [(t.name, t.theme_id) for t in numbered] == [("先", "T0010"), ("テーマ", "T0002")]
+    assert result.excluded[0].entry.theme_id is None  # 除外したテーマは番号を持たない

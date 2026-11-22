@@ -13,6 +13,7 @@ D2（forbidden_link）→ D3（forbidden_html）→ 文字数（too_long）→ D
 （領域）ごと除外する。
 """
 
+import re
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -37,6 +38,9 @@ from tech_researcher.validate.quote import (
 )
 from tech_researcher.validate.sources import item_urls, normalized_urls
 from tech_researcher.validate.text import LIMIT_FACTOR, has_html, has_link
+
+MIN_PRODUCT_NAME = 2  # 製品名の最短の長さ（1文字の名前はどのタイトルにも含まれうる）
+_ALNUM = frozenset("0123456789abcdefghijklmnopqrstuvwxyz")
 
 Entry = ThemeEntry | TechChangeEntry | ComparisonEntry | ComparisonRow | WatchEntry
 
@@ -241,9 +245,9 @@ def _violation(entry: Entry, ctx: _Context) -> tuple[str, str] | None:
         ("invalid_id", lambda: _invalid_id(entry, ctx)),
         ("invalid_source", lambda: _invalid_source(entry, ctx)),
         ("unknown_product", lambda: _unknown_product(entry, ctx)),
-        ("forbidden_link", lambda: _forbidden(entry, has_link, "URL・リンク")),
-        ("forbidden_html", lambda: _forbidden(entry, has_html, "画像・HTML")),
-        ("too_long", lambda: _too_long(entry)),
+        ("forbidden_link", lambda: _forbidden(entry, ctx, has_link, "URL・リンク")),
+        ("forbidden_html", lambda: _forbidden(entry, ctx, has_html, "画像・HTML")),
+        ("too_long", lambda: _too_long(entry, ctx)),
         ("long_quote", lambda: _long_quote(entry, ctx)),
     )
     for category, check in checks:
@@ -284,8 +288,11 @@ def _ids(entry: Entry) -> tuple[Sequence[str], Sequence[str]]:
             return (), ()  # 領域には ID がない（行が持つ）
 
 
-def _texts(entry: Entry) -> Iterator[tuple[str, str]]:
-    """項目の AI の文章を（欄の名前、文章）で返す。"""
+def _texts(entry: Entry, ctx: _Context) -> Iterator[tuple[str, str]]:
+    """項目の AI の文章を（欄の名前、文章）で返す。
+
+    GitHub のリポジトリの行の製品名は、表示に使わない（名前は owner/repo）ので対象にしない。
+    """
     match entry:
         case ThemeEntry():
             yield from (("name", entry.name), ("change", entry.change))
@@ -295,7 +302,7 @@ def _texts(entry: Entry) -> Iterator[tuple[str, str]]:
         case ComparisonEntry():
             yield from (("domain", entry.domain), ("summary", entry.summary))
         case ComparisonRow():
-            if entry.product_name is not None:
+            if entry.product_name is not None and ctx.items[entry.item_id].github is None:
                 yield "product_name", entry.product_name
             yield from (("feature", entry.feature), ("use_case", entry.use_case))
         case WatchEntry():
@@ -343,9 +350,19 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
     name = _fold(entry.product_name or "")
     if not name:
         return "GitHub 外の行に製品名がない"
-    if name in _fold(ctx.titles.get(entry.item_id, "")):
+    if len(name) < MIN_PRODUCT_NAME:
+        return f"製品名が {MIN_PRODUCT_NAME} 文字より短い"
+    if _contains_word(_fold(ctx.titles.get(entry.item_id, "")), name):
         return None
     return "製品名が収集タイトルにない"
+
+
+def _contains_word(title: str, name: str) -> bool:
+    """name が title に語として含まれる。英数字で始まる・終わる名前は、前後が英数字でないこと
+    （Intel は Intelligence に、DB は FooDB に一致させない）。日本語は部分一致のまま。"""
+    before = "(?<![0-9a-z])" if name[0] in _ALNUM else ""
+    after = "(?![0-9a-z])" if name[-1] in _ALNUM else ""
+    return re.search(before + re.escape(name) + after, title) is not None
 
 
 def _fold(text: str) -> str:
@@ -353,15 +370,15 @@ def _fold(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def _forbidden(entry: Entry, found: Callable[[str], bool], label: str) -> str | None:
-    for name, text in _texts(entry):
+def _forbidden(entry: Entry, ctx: _Context, found: Callable[[str], bool], label: str) -> str | None:
+    for name, text in _texts(entry, ctx):
         if found(text):
             return f"{name} に{label}を含む"  # 文章そのものは理由に残さない
     return None
 
 
-def _too_long(entry: Entry) -> str | None:
-    for name, text in _texts(entry):
+def _too_long(entry: Entry, ctx: _Context) -> str | None:
+    for name, text in _texts(entry, ctx):
         size, cap = len(text.strip()), LIMITS[(_kind(entry), name)] * LIMIT_FACTOR
         if size > cap:
             return f"{name} が {size} 文字で、{cap} 文字を超える"
@@ -383,7 +400,7 @@ def _kind(entry: Entry) -> str:
 
 
 def _long_quote(entry: Entry, ctx: _Context) -> str | None:
-    for _, text in _texts(entry):
+    for _, text in _texts(entry, ctx):
         if reason := quote_violation(text, ctx.quote_sources, ctx.limits):
             return reason
     return None
