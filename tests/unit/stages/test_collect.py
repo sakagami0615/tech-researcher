@@ -534,7 +534,7 @@ def test_weekly_skips_star_measurement_and_writes_weekly_items(tmp_path):
     start_run(conn, PROD, weekly, FETCHED)
     calls = []
     summary = run_collect(
-        all_sources_config(),
+        replace(all_sources_config(), feeds=(replace(feed("a"), kind="popular"), feed("c"))),
         weekly,
         tmp_path,
         prod_log(tmp_path, target=weekly),
@@ -550,6 +550,9 @@ def test_weekly_skips_star_measurement_and_writes_weekly_items(tmp_path):
     assert conn.execute("SELECT cadence, target, count(*) FROM items").fetchall() == [
         ("weekly", "2026-10-26", 3)
     ]
+    # 設定で有効な Star の測定・人気型のフィードも、週次はスナップショットを書かない（D-13）
+    for table in ("star_snapshots", "feed_snapshots"):
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
     conn.close()
 
 

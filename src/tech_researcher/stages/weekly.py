@@ -8,10 +8,12 @@ DB がない（開発機のドライラン）ときは、比較対象は空に�
 
 import json
 import sqlite3
+from datetime import date, datetime
 from pathlib import Path
 
 from tech_researcher.agent.daily import InputItem
-from tech_researcher.agent.weekly import WeeklyMaterials, build_weekly_input
+from tech_researcher.agent.weekly import WeeklyInclusion, WeeklyMaterials, build_weekly_input
+from tech_researcher.collect.records import Event
 from tech_researcher.collect.sources import source_names
 from tech_researcher.config import Config
 from tech_researcher.db.history import past_themes
@@ -21,8 +23,9 @@ from tech_researcher.db.weekly import (
     period_star_gains,
     weeks_with_items,
 )
+from tech_researcher.logging import RunLog
 from tech_researcher.periods import Target
-from tech_researcher.stages.collect import COLLECTED, load_collected, load_item_ids
+from tech_researcher.stages.collect import COLLECTED, INCLUSIONS, load_collected, load_item_ids
 from tech_researcher.stages.daily import AGENT_INPUT
 from tech_researcher.stages.weekly_items import daily_days
 
@@ -40,16 +43,47 @@ def weekly_materials(config: Config, target: Target, db: sqlite3.Connection | No
     )
 
 
+def load_inclusions(run_dir: Path) -> list[WeeklyInclusion]:
+    """inclusions.json（collected.json と同じ順の掲載の根拠の出来事と日付）。"""
+    raw = json.loads((run_dir / INCLUSIONS).read_text(encoding="utf-8"))
+    return [
+        WeeklyInclusion(
+            Event(r["type"], datetime.fromisoformat(r["at"]), r["basis"]),
+            date.fromisoformat(r["day"]),
+        )
+        for r in raw
+    ]
+
+
 def write_weekly_input(
-    config: Config, target: Target, run_dir: Path, db: sqlite3.Connection | None = None
+    config: Config,
+    target: Target,
+    run_dir: Path,
+    db: sqlite3.Connection | None = None,
+    log: RunLog | None = None,
 ) -> None:
-    """run_dir/collected.json と item-ids.json から、run_dir/agent-input.json を書く。"""
+    """run_dir/collected.json・item-ids.json・inclusions.json から、agent-input.json を書く。
+
+    log を渡すと、入力の観測の件数（今週・過去）とバイト数を残す（量を測るため）。
+    """
     items = load_collected(run_dir / COLLECTED)
     inputs = [InputItem(i, item) for i, item in zip(load_item_ids(run_dir), items, strict=True)]
     data = build_weekly_input(
-        target, inputs, source_names(config), weekly_materials(config, target, db)
+        target,
+        inputs,
+        load_inclusions(run_dir),
+        source_names(config),
+        weekly_materials(config, target, db),
     )
+    body = json.dumps(data, ensure_ascii=False)
     path = run_dir / AGENT_INPUT
     partial = path.with_name(f"{path.name}.partial")
-    partial.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    partial.write_text(body, encoding="utf-8")
     partial.replace(path)
+    if log is not None:
+        log.write(
+            "collect",
+            "input",
+            count=len(data["items"]),
+            detail=f"past_observations={len(data['past_observations'])} bytes={len(body.encode())}",
+        )

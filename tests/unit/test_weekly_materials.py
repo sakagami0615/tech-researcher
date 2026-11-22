@@ -8,13 +8,15 @@ from pathlib import Path
 import pytest
 
 from tech_researcher.agent.daily import InputItem
-from tech_researcher.agent.weekly import WeeklyMaterials, build_weekly_input
+from tech_researcher.agent.weekly import WeeklyInclusion, WeeklyMaterials, build_weekly_input
 from tech_researcher.collect.aggregate import aggregate
 from tech_researcher.collect.records import Attention, Event, GitHubRepo, Record, SourceResult
 from tech_researcher.config import Feed, load_config
 from tech_researcher.db.history import PastTheme
+from tech_researcher.db.issues import record_issue
 from tech_researcher.db.items import load_item_rows, upsert_items
 from tech_researcher.db.readonly import open_readonly
+from tech_researcher.db.reports import EntryRow, ReportRow, save_report
 from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.db.weekly import (
@@ -28,7 +30,7 @@ from tech_researcher.periods import daily_target, weekly_target
 from tech_researcher.stages.collect import COLLECTED, ITEM_IDS, Collectors, run_collect
 from tech_researcher.stages.collect_store import item_row
 from tech_researcher.stages.weekly import write_weekly_input
-from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows
+from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows, weekly_rows_dated
 from tech_researcher.validate.secret_scan import SecretScanner
 
 CONFIG = replace(
@@ -84,6 +86,11 @@ def hn(day, points, measured):
 def item_of(*records):
     (item,) = aggregate(records)
     return item
+
+
+def published(day):
+    """項目の掲載の根拠を、公開の出来事（JST の正午）にした入力。"""
+    return WeeklyInclusion(Event("published", noon(day)), day)
 
 
 @pytest.fixture
@@ -288,6 +295,7 @@ def test_build_weekly_input_shape_and_untrusted_text():
     data = build_weekly_input(
         WEEK,
         inputs,
+        [published(day), published(day)],
         {"rss:a": "A"},
         WeeklyMaterials([date(2026, 10, 19)], [], past, {"o/repo": 321}),
     )
@@ -348,14 +356,16 @@ def test_write_weekly_input_uses_materials_and_compare_weeks(tmp_path, conn):
     assert (data["past_observations"], data["target"]["compare_weeks"]) == ([], [])
 
 
-def test_weekly_input_uses_the_same_representative_and_inclusion_as_items():
-    """出典の並びや出来事の早さによらず、items の代表の値・掲載の根拠と同じものを渡す。"""
+def test_weekly_input_uses_the_same_representative_as_items_and_the_given_inclusion():
+    """出典の並びによらず、items の代表の値を渡す。出来事と日付は、渡された根拠をそのまま使う。"""
     day = date(2026, 10, 21)
     spike = Event("attention_spike", noon(day - timedelta(days=1)), "feed_entry")
     early_hn = replace(hn(day - timedelta(days=1), 10, noon(day)), events=(spike,), title="HN")
     item = item_of(early_hn, rss(X, day, "公開日時のある記事"))
     assert item.sources[0].source_id == "hackernews"
-    data = build_weekly_input(WEEK, [InputItem("i1", item)], {"rss:a": "A", "hackernews": "HN"})
+    data = build_weekly_input(
+        WEEK, [InputItem("i1", item)], [published(day)], {"rss:a": "A", "hackernews": "HN"}
+    )
     entry = data["items"][0]
     assert entry["untrusted"] == {
         "title": "公開日時のある記事",
@@ -390,7 +400,140 @@ def test_old_article_reposted_stays_a_spike_after_restoring_the_daily_row(conn):
     )
     item = item_of(old, date_only)
     store_daily(conn, day, item)
-    (row,) = weekly_rows(WEEK, [], load_daily_rows(conn, WEEK))
-    assert row.inclusion.type == "attention_spike"
-    data = build_weekly_input(WEEK, [InputItem("i1", row.item)], {"rss:a": "A", "hackernews": "HN"})
+    ((row, row_day),) = weekly_rows_dated(WEEK, [], load_daily_rows(conn, WEEK))
+    assert (row.inclusion.type, row_day) == ("attention_spike", day)
+    names = {"rss:a": "A", "hackernews": "HN"}
+    inclusion = WeeklyInclusion(row.inclusion, row_day)
+    data = build_weekly_input(WEEK, [InputItem("i1", row.item)], [inclusion], names)
     assert data["items"][0]["event"] == {"type": "attention_spike"}
+
+
+def strip_to_legacy(conn):
+    """出典ごとの公開日時・注目度を保存する前の形式の行にする。"""
+    rows = conn.execute("SELECT item_id, sources_json FROM items").fetchall()
+    for item_id, text in rows:
+        old = [
+            {
+                k: v
+                for k, v in s.items()
+                if k not in ("published_at", "published_precision", "attention")
+            }
+            for s in json.loads(text)
+        ]
+        conn.execute(
+            "UPDATE items SET sources_json = ? WHERE item_id = ?", (json.dumps(old), item_id)
+        )
+
+
+def test_legacy_row_keeps_its_stored_inclusion(conn):
+    """出典ごとの公開日時がない古い行は、期間の判定をやり直さず、保存した根拠を使う。"""
+    day = date(2026, 10, 21)
+    old = rss(X, date(2026, 9, 1), "古い記事")
+    midnight = datetime(2026, 10, 21, tzinfo=UTC)
+    spike = Event("attention_spike", noon(day), "threshold")
+    date_only = replace(
+        hn(day, 300, noon(day)),
+        published_precision="date",
+        published_at=midnight,
+        events=(Event("published", midnight), spike),
+    )
+    store_daily(conn, day, item_of(old, date_only))
+    strip_to_legacy(conn)
+    (loaded,) = load_item_rows(conn, "daily", day, day + timedelta(days=1))
+    assert loaded.dated_sources is False
+    ((row, _),) = weekly_rows_dated(WEEK, [], [loaded])
+    assert row.inclusion.type == "attention_spike"  # 日付だけの公開を、時刻ありの公開にしない
+
+
+def test_inclusion_day_of_feed_entry_is_the_daily_target_not_the_measured_time(conn):
+    day = date(2026, 10, 22)
+    seen = Event("attention_spike", noon(day + timedelta(days=1)), "feed_entry")
+    record = replace(rss(X, date(2026, 9, 1), "古い記事"), events=(seen,))
+    store_daily(conn, day, item_of(record))
+    ((row, row_day),) = weekly_rows_dated(WEEK, [], load_daily_rows(conn, WEEK))
+    assert row.inclusion.type == "attention_spike"
+    assert row_day == day  # 時刻（翌日）ではなく、日次の行の対象日
+
+
+def test_attention_is_latest_per_source_and_metric(conn):
+    day = date(2026, 10, 20)
+    first = replace(rss(X, day, "X"), attention=(Attention("feed_rank", 3, noon(day)),))
+    second = replace(hn(day, 100, noon(day)), attention=(Attention("feed_rank", 7, noon(day)),))
+    store_daily(conn, day, item_of(first, second))
+    later = replace(first, attention=(Attention("feed_rank", 1, noon(date(2026, 10, 23))),))
+    (row,) = weekly_rows(WEEK, [item_of(later)], load_daily_rows(conn, WEEK))
+    # 同じ指標でも出典が違えば両方残し、出典ごとに新しい値だけを使う
+    assert sorted(a.value for a in row.item.attention) == [1, 7]
+
+
+def test_events_differing_only_in_microseconds_are_one_event(conn):
+    day = date(2026, 10, 20)
+    store_daily(conn, day, item_of(rss(X, day, "X")))
+    fresh = rss(X, day, "X")
+    shifted = fresh.published_at.replace(microsecond=500)
+    fresh = replace(fresh, published_at=shifted, events=(Event("published", shifted),))
+    (row,) = weekly_rows(WEEK, [item_of(fresh)], load_daily_rows(conn, WEEK))
+    assert [e.type for e in row.item.events] == ["published"]
+
+
+def test_representative_comes_from_the_row_with_the_most_precise_published_time(conn):
+    day = date(2026, 10, 20)
+    store_daily(conn, day, item_of(rss(X, day, "公開日時のある行")))
+    only_posted = replace(hn(day, 50, noon(day)), link_url=X, title="HN だけの行")
+    (row,) = weekly_rows(WEEK, [item_of(only_posted)], load_daily_rows(conn, WEEK))
+    assert (row.title, row.published_precision, row.published_at) == (
+        "公開日時のある行",
+        "datetime",
+        noon(day),
+    )
+    assert row.excerpt == "公開日時のある行の抜粋"
+
+
+def test_write_weekly_input_with_themes_star_gains_and_readonly_db(tmp_path, conn):
+    day = date(2026, 10, 20)
+    repo = GitHubRepo("o/repo", noon(day), 1150, 50, ())
+    page = replace(rss("https://github.com/o/repo", day, "リポジトリ"), github=repo)
+    store_daily(conn, day, item_of(page))
+    ref = store_weekly(conn, date(2026, 10, 19), Y, "先週の Y")
+    # 先週の週次レポートの公開済みのテーマ
+    run_id = "20261019-070000-wy"
+    payload = {"name": "先週のテーマ", "status": "rising"}
+    entry = EntryRow("theme", "published", (ref,), theme_id="T0007", payload=payload)
+    report = ReportRow("weekly", date(2026, 10, 19), "passed", {}, {}, [entry], body_markdown="b")
+    save_report(conn, run_id, report)
+    record_issue(
+        conn, run_id, "report", "weekly", date(2026, 10, 19), "created", STARTED,
+        repo="o/r", number=2,
+    )  # fmt: skip
+    for target_day, stars in [(18, 1000), (19, 1100), (20, 1150), (25, 2000), (26, 5000)]:
+        conn.execute(
+            "INSERT INTO star_snapshots (repo, target, measured_at, stars_total, created_at,"
+            " routes_json) VALUES ('o/repo', ?, ?, ?, '2026-01-01T00:00:00Z', '[\"search\"]')",
+            (f"2026-10-{target_day}", f"2026-10-{target_day}T21:00:00Z", stars),
+        )
+    conn.commit()
+    _, run_dir = collect(tmp_path, "one", conn, "20261026-070000-abcd", [])
+    conn.commit()
+    ro = open_readonly(tmp_path / "tech-researcher.sqlite3")
+    log = RunLog(
+        run_dir / "log2.jsonl", "20261026-070000-abcd", "weekly", WEEK.key, SecretScanner()
+    )
+
+    write_weekly_input(CONFIG, WEEK, run_dir, ro, log)
+    ro.close()
+
+    data = json.loads((run_dir / "agent-input.json").read_text("utf-8"))
+    (item,) = data["items"]
+    # 調査期間（10-19〜10-25）の日次の増分：19 日 +100、20 日 +50（25 日は前日の測定がなく、
+    # 26 日は期間の外）
+    assert item["github"]["star_delta_period"] == 150
+    assert data["past_themes"] == [
+        {
+            "theme_id": "T0007",
+            "name": "先週のテーマ",
+            "history": [{"week": "2026-10-19", "status": "rising", "count": 1}],
+        }
+    ]
+    line = json.loads((run_dir / "log2.jsonl").read_text("utf-8").splitlines()[-1])
+    assert (line["event"], line["count"]) == ("input", 1)
+    assert "past_observations=1" in line["detail"] and "bytes=" in line["detail"]

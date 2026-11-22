@@ -80,11 +80,14 @@ from tech_researcher.stages.collect_store import (
     source_fetch,
     unavailable_sources,
 )
-from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows
+from tech_researcher.stages.weekly_items import load_daily_rows, weekly_rows_dated
 
 OUT_OF_TIME = "収集全体の時間の上限に達した"
 COLLECTED = "collected.json"
 ITEM_IDS = "item-ids.json"  # collected.json の項目と同じ順の ID（② の入力と ③ の照合で使う）
+INCLUSIONS = (
+    "inclusions.json"  # 週次：collected.json と同じ順の掲載の根拠の出来事と日付（② の入力）
+)
 UNAVAILABLE = "unavailable.json"  # 取得できなかった情報源と、取れなかった部分（末尾の表示の元）
 FETCHES = "fetches.json"  # 情報源ごとの取得結果（実行エラー Issue の表と、部分的な失敗の元）
 UNJUDGED = "unjudged.json"  # 前日の記録がなく判定しなかった急上昇（ヘッダの定型文の元。1.6）
@@ -304,8 +307,24 @@ def run_collect(
     stored = observed  # items に書く項目（日次は AI に渡さない項目も含む）
     if target.cadence == "weekly":
         # 週次の材料：取り直した分と、DB にある日次の収集結果を URL でまとめる（3.8）
-        rows = weekly_rows(target, items, load_daily_rows(db, target) if db is not None else [])
+        dated = weekly_rows_dated(
+            target, items, load_daily_rows(db, target) if db is not None else []
+        )
+        rows = [row for row, _ in dated]
         items = stored = [r.item for r in rows]
+        # ② の入力が、items の掲載の根拠と同じ出来事・日付を使えるよう、同じ順で残す
+        _write_json(
+            run_dir / INCLUSIONS,
+            [
+                {
+                    "type": r.inclusion.type,
+                    "at": r.inclusion.at.isoformat(),
+                    "basis": r.inclusion.basis,
+                    "day": day.isoformat(),
+                }
+                for r, day in dated
+            ],
+        )
     refs: dict[str, str] = {}
     if write:
         assert db is not None

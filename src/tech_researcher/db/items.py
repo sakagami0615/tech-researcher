@@ -46,6 +46,9 @@ class ItemRow:
     posted_at: datetime | None = None
     primary_text: str | None = None
     hold_reason: str | None = None
+    # 出典ごとの公開日時・注目度を持つ行か。False は、それらを保存する前の形式の行（読み戻したとき
+    # 出典の公開日時が分からず、期間の判定をやり直せない。保存してある inclusion を使う）
+    dated_sources: bool = True
 
     def __post_init__(self):
         if self.cadence not in CADENCES:
@@ -120,7 +123,9 @@ def load_item_rows(conn: sqlite3.Connection, cadence: str, first: date, end: dat
 
     対象の順、同じ対象の中では主キーの順。読むだけなので、読み取り専用の接続でも使える。
     保存していないもの（一次情報の本文、出典ごとのタイトル・抜粋）は戻らない。出典は重複判定結果の
-    1件ごとに1つのレコードで、タイトル・抜粋は先頭のレコードに戻し、公開日時・精度は出典ごとに戻す（古い行は先頭だけに代表の値）。
+    1件ごとに1つのレコードで、タイトル・抜粋は先頭のレコードに戻し、公開日時・精度・注目度は
+    出典ごとに戻す。これらを保存する前の形式の行は dated_sources が False で、先頭の出典だけに
+    代表の値・項目の注目度を戻す（期間の判定をやり直せないので、保存してある inclusion を使う）。
     """
     rows = conn.execute(
         f"SELECT {', '.join(_ROW_COLUMNS)} FROM items"
@@ -133,6 +138,12 @@ def load_item_rows(conn: sqlite3.Connection, cadence: str, first: date, end: dat
 def _restore(cadence: str, r: dict) -> ItemRow:
     published_at = _time(r["published_at"])
     precision = r["published_precision"]
+    stored = json.loads(r["sources_json"])
+    dated = all("published_at" in s for s in stored)
+    attention = tuple(
+        Attention(a["metric"], a["value"], datetime.fromisoformat(a["measured_at"]))
+        for a in json.loads(r["attention_json"])
+    )
     records = tuple(
         Record(
             source_id=s["source_id"],
@@ -146,8 +157,9 @@ def _restore(cadence: str, r: dict) -> ItemRow:
             if "published_at" in s
             else (published_at if n == 0 else None),
             posted_at=_time(s["posted_at"]),
+            attention=_source_attention(s, attention, n),
         )
-        for n, s in enumerate(json.loads(r["sources_json"]))
+        for n, s in enumerate(stored)
     )
     github = None if r["github_json"] is None else json.loads(r["github_json"])
     item = Item(
@@ -157,10 +169,7 @@ def _restore(cadence: str, r: dict) -> ItemRow:
             Event(e["type"], datetime.fromisoformat(e["at"]), e["basis"])
             for e in json.loads(r["events_json"])
         ),
-        attention=tuple(
-            Attention(a["metric"], a["value"], datetime.fromisoformat(a["measured_at"]))
-            for a in json.loads(r["attention_json"])
-        ),
+        attention=attention,
         links=tuple(json.loads(r["links_json"])),
         meta_terms=tuple(json.loads(r["meta_terms_json"])),
         github=None
@@ -187,7 +196,18 @@ def _restore(cadence: str, r: dict) -> ItemRow:
         published_at=published_at,
         posted_at=_time(r["posted_at"]),
         hold_reason=r["hold_reason"],
+        dated_sources=dated,
     )
+
+
+def _source_attention(source: dict, item_level: tuple[Attention, ...], n: int) -> tuple:
+    # 出典ごとの注目度を持たない古い行は、項目の注目度を先頭の出典のものとして戻す
+    if "attention" in source:
+        return tuple(
+            Attention(a["metric"], a["value"], datetime.fromisoformat(a["measured_at"]))
+            for a in source["attention"]
+        )
+    return item_level if n == 0 else ()
 
 
 def _source_precision(source: dict, fallback: str) -> str:
@@ -291,6 +311,7 @@ def _source(r: Record) -> dict:
         "fetched_at": utc_text(r.fetched_at),
         "published_at": _when(r.published_at),
         "published_precision": r.published_precision,
+        "attention": [_attention(a) for a in r.attention],
     }
 
 

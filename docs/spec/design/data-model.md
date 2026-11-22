@@ -253,7 +253,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | `excerpt` | TEXT | 代表の抜粋（外部由来） |
 | `published_at`・`published_precision`・`posted_at` | TEXT | 2.3 |
 | `inclusion_event`・`inclusion_basis`・`inclusion_at` | TEXT | 掲載の根拠とする出来事（2.4） |
-| `events_json`・`attention_json`・`sources_json`・`links_json`・`github_json`・`meta_terms_json` | TEXT | 2.3 の配列・オブジェクト。`sources_json` が重複判定結果（まとめたレコードの一覧：情報源・URL・投稿日時・取得日時・公開日時・公開日時の精度。公開日時・精度は、週次が日次の行を戻して期間を判定し直すために持つ） |
+| `events_json`・`attention_json`・`sources_json`・`links_json`・`github_json`・`meta_terms_json` | TEXT | 2.3 の配列・オブジェクト。`sources_json` が重複判定結果（まとめたレコードの一覧：情報源・URL・投稿日時・取得日時・公開日時・公開日時の精度・注目度。公開日時・精度・注目度は、週次が日次の行を戻して期間を判定し直し、（出典、指標）ごとの最新の値を選ぶために持つ。これらを持たない古い形式の行は、期間を判定し直さず保存した `inclusion_*` を使う） |
 | `primary_text_hash`・`primary_text_len` | TEXT・INTEGER | 一次情報の本文のハッシュと文字数（本文そのものは保存しない） |
 | `hold_reason` | TEXT | AI に渡さなかった理由。`already_featured`（D-13 で急上昇として再び載せない）・`shown_previous_day`（D-16 で前日の日次レポートに載せた記事）など。渡したものは空 |
 | `first_run_id`・`last_run_id` | TEXT | 最初に書いた実行・最後に更新した実行 |
@@ -422,7 +422,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 - 実装での対応（`stages/weekly_items.py`・`db/weekly.py`・`agent/weekly.py`・`stages/weekly.py`）
   - まとめる日次の items は、対象日が調査期間の日（JST。7日なら M−7〜M−1）に入るもの。日次の `hold_reason` は持ち込まず、AI に渡さなかった項目も観測に入れる。同じ URL は、出典（情報源・URL）・出来事・リンクを和集合にし、注目度は指標ごとに最新の値、代表のタイトル・抜粋・公開日時は時刻まで分かる公開日時を持つ行（取り直した分を先）を使う。掲載の根拠の出来事は、週次の判定の窓に入る出来事から 2.4 の順位で選び、窓に入るものがなければ日次の行の掲載の根拠から選ぶ。日次の行は一次情報の本文を持たない（ハッシュだけ）ので、週次の行のハッシュは取り直した分があるときだけ入る
   - 週次の ① は Star を測らず、`star_snapshots`・`feed_snapshots` を書かない。Star の増分は、② の入力を作るときに `star_snapshots` の日次の差（対象日の測定 − 前日の測定。前日の測定がない日は足さない）を調査期間で合計して、`github.star_delta_period` に入れる（日次の `star_delta_24h` は入れない）
-  - 日次の行に残らないもの（一次情報の本文、出典ごとのタイトル・抜粋）は戻らない。`last_run_id` では絞らず、再実行で消えた URL の行も材料・過去の観測に残る（受け入れる。同じ対象の再実行で内容がほぼ変わらないため）。週次の合計で急上昇の判定をやり直すこと（D-13）は、この材料では行わない（合計の `star_delta_period` を渡すだけ）
+  - 日次の行に残らないもの（一次情報の本文、出典ごとのタイトル・抜粋）は戻らない。`last_run_id` では絞らず、再実行で消えた URL の行も材料・過去の観測に残る（受け入れる。同じ対象の再実行で内容がほぼ変わらないため）。週次の合計で急上昇の判定をやり直すこと（D-13）は、この材料では行わない（合計の `star_delta_period` を渡すだけ。判定のやり直しは #51 で行う）
   - 比較の窓は設定の `weekly.compare_weeks`（初期値 4）。窓の各週に週次の items が1件以上あれば「データあり」とし、`target.compare_weeks` には「データあり」の週だけを新しい順に入れる。過去の観測は、その週の週次の items（今週と同じ作り方）を、新しい週から主キーの順にすべて渡す（絞り込みは未実装。量を測ってから決める）
 
 ### 3.9 保存期間と量の見積もり
@@ -574,6 +574,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 }
 ```
 
+- 今週の項目の `github` は、リポジトリの項目だけが持つ。`full_name`・`created_at`・`stars_total`・`star_delta_period`（調査期間の Star の増分。日次の増分の合計で、測定がなければ `null`）・`mentioned_by`（言及元の今週の項目 ID）。`date` は掲載の根拠の出来事の日付（JST）で、前日の記録と比べて決まる出来事（`feed_entry`・`star_growth`・`new_repo`）は、その出来事を持つ日次の行の対象日
 - `items` は今週の観測、`past_observations` は比較の窓の過去の週の観測（3.8）。`compare_weeks` は比較の窓に入れた週（対象週の月曜）
 - テンプレートの「今週 N 件／前週 N 件／過去4週平均」は、AI が選んだ `item_ids`・`past_ids` をコードが週ごとに数えて出す（report-templates.md 2.2）
 - AI に渡す観測の範囲は、実装後に量を測って決める。全件で入りきらない場合は、今週と過去の両方に同じ絞り込み（例：注目度の値がある項目、一次情報の項目）をかける。量については、標準入力の上限（10MB）より先に、モデルの文脈の長さとサブスクリプションの利用量が問題になると見込んでいる（推測）

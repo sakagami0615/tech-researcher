@@ -119,7 +119,7 @@ def _run(
         if args.cadence == "daily":
             write_daily_input(config, target, files.dir)
         else:
-            write_weekly_input(config, target, files.dir, conn)
+            write_weekly_input(config, target, files.dir, conn, log)
 
     with closing(conn) if conn is not None else nullcontext():
         if files.dry_run:

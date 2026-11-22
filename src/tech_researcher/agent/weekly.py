@@ -10,16 +10,23 @@ from dataclasses import dataclass
 from datetime import date
 
 from tech_researcher.agent.daily import InputItem
-from tech_researcher.collect.period_filter import window_events
 from tech_researcher.collect.records import Event, Item
 from tech_researcher.collect.urls import normalize_url
 from tech_researcher.db.history import PastTheme
 from tech_researcher.db.weekly import PastObservation
 from tech_researcher.periods import JST, Target
-from tech_researcher.stages.collect_store import INCLUSION_ORDER, item_kind, representative
+from tech_researcher.stages.collect_store import item_kind, representative
 
 # 日次の増分は日ごとの値で、週次には合わない。期間の合計を github の star_delta_period に入れる
 _DAILY_ONLY_METRICS = frozenset({"star_delta_24h"})
+
+
+@dataclass(frozen=True)
+class WeeklyInclusion:
+    """項目の掲載の根拠の出来事と、その日付（JST）。週次の items の inclusion と同じものを渡す。"""
+
+    event: Event
+    day: date
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,7 @@ class WeeklyMaterials:
 def build_weekly_input(
     target: Target,
     inputs: Sequence[InputItem],
+    inclusions: Sequence[WeeklyInclusion],
     display_names: Mapping[str, str],
     materials: WeeklyMaterials | None = None,
 ) -> dict:
@@ -56,7 +64,10 @@ def build_weekly_input(
             },
             "compare_weeks": [w.isoformat() for w in materials.compare_weeks],
         },
-        "items": [_item(i, target, display_names, ids_by_url, gains) for i in inputs],
+        "items": [
+            _item(i, e, display_names, ids_by_url, gains)
+            for i, e in zip(inputs, inclusions, strict=True)
+        ],
         "past_observations": [
             {
                 "id": p.item_id,
@@ -83,18 +94,18 @@ def build_weekly_input(
 
 def _item(
     entry: InputItem,
-    target: Target,
+    inclusion: WeeklyInclusion,
     names: Mapping[str, str],
     ids_by_url: Mapping[str, str],
     gains: Mapping[str, int],
 ) -> dict:
     item, first = entry.item, entry.item.sources[0]
     rep = representative(item)  # items の代表の値と同じ出典（週次の items と食い違わせない）
-    event = _event(item, target)
+    event = inclusion.event
     github = item.github
     return {
         "id": entry.item_id,
-        "date": event.at.astimezone(JST).date().isoformat(),
+        "date": inclusion.day.isoformat(),
         "source": names.get(first.source_id, first.source_id),
         "kind": item_kind(item),
         "event": {"type": event.type},
@@ -118,13 +129,6 @@ def _item(
         },
         "untrusted": {"title": rep.title or _title(item), "excerpt": rep.excerpt or _excerpt(item)},
     }
-
-
-def _event(item: Item, target: Target) -> Event:
-    """掲載の根拠とする出来事（items の inclusion と同じ順位。2.4）。判定の窓に入るものから選び、
-    なければ（日次の行に由来する項目など）すべての出来事から選ぶ。"""
-    events = window_events(item, target) or item.events
-    return min(events, key=lambda e: (INCLUSION_ORDER[e.type], e.at))
 
 
 def _normalized(url: str) -> str:
