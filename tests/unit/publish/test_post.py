@@ -14,6 +14,7 @@ from tech_researcher.db.runs import start_run
 from tech_researcher.db.schema import open_db
 from tech_researcher.logging import RunLog
 from tech_researcher.periods import daily_target
+from tech_researcher.publish.dedup import RecordError
 from tech_researcher.publish.github_issues import (
     IssueLookup,
     IssueReadError,
@@ -1069,3 +1070,70 @@ def test_failing_to_clear_the_uncertain_record_is_not_a_success(env, github, mon
         "db_error",
         100,
     )
+
+
+def _label_stripped_lost_writer(github):
+    class Lost(FakeWriter):
+        def create_issue(self, repo, title, body, labels):
+            github.attempts.append(1)
+            github.created.append(
+                {"repo": repo, "title": title, "body": body, "labels": (), "number": 70}
+            )
+            raise _error("timeout", False)
+
+    return lambda token, limits, clock=None: Lost(github)
+
+
+def test_found_by_the_unlabeled_lookup_but_not_recorded_stays_uncertain(env, github, monkeypatch):
+    """次の実行はラベルが外れた Issue を見つけられない。自動作成を止める記録を残す。"""
+    github.make_writer = _label_stripped_lost_writer(github)
+
+    def broken(*a, **k):
+        raise RecordError(IssueRef(REPO, 70))
+
+    monkeypatch.setattr("tech_researcher.publish.post.check_recent_from_env", broken)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "issue_record_failed",
+        70,
+    )  # 番号は結果（要約・ログ）に出す
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+    assert env.run_row()[:3] == ("failed", "post", "issue_record_failed")
+    # 次の実行は、ラベルを外された Issue を見つけられず、自動で作り直さない
+    assert env.post("report", run=RETRY)["error_category"] == "needs_review"
+
+
+def test_unrecordable_uncertain_after_the_unlabeled_lookup_is_a_db_error(env, github, monkeypatch):
+    github.make_writer = _label_stripped_lost_writer(github)
+
+    def broken(*a, **k):
+        raise RecordError(IssueRef(REPO, 70))
+
+    def no_write(*a, **k):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr("tech_researcher.publish.post.check_recent_from_env", broken)
+    monkeypatch.setattr("tech_researcher.publish.post.record_issue", no_write)
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "db_error",
+        70,
+    )
+    assert env.run_row()[:3] == ("failed", "post", "db_error")
+
+
+def test_record_failure_without_a_maybe_created_failure_stays_issue_record_failed(
+    env, github, monkeypatch
+):
+    def broken(*a, **k):
+        raise RecordError(IssueRef(REPO, 70))
+
+    monkeypatch.setattr("tech_researcher.publish.post.check_duplicate_from_env", broken)
+    result = env.post("report")
+
+    assert result["error_category"] == "issue_record_failed"
+    assert env.issue_rows() == []  # uncertain にしない（作成を試みていない）

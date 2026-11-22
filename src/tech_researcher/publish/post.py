@@ -262,9 +262,17 @@ class Poster:
             return self._write_failed(kind, category, close, state)
         except RecordError as e:  # 見つけたが、DB に記録できなかった
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e.__cause__)
+            category = "issue_record_failed"
+            if kind == REPORT and self._maybe_created:
+                # 作られたかもしれない失敗の後に見つけた Issue。ラベルが外れていると、次の実行は
+                # 見つけられず重複して作りうるので、次の自動作成を止める記録（uncertain）を残す。
+                # 番号は uncertain の行に持てないので、結果に載せる（要約・ログ）。記録まで失敗したら
+                # db_error
+                if not self._record_failed(kind, "uncertain"):
+                    category = "db_error"
             if close:
-                self._close("failed", "issue_record_failed")
-            return _result(FAILED, kind, ref=e.ref, error_category="issue_record_failed")
+                self._close("failed", category)
+            return _result(FAILED, kind, ref=e.ref, error_category=category)
         except NeedsReview:
             self.log.write("post", "failure", error_category="needs_review")
             return self._write_failed(kind, "needs_review", close)
@@ -476,11 +484,12 @@ class Poster:
             self._close("failed", category)
         return _result(FAILED, kind, error_category=category)
 
-    def _record_failed(self, kind: str, state: str = "failed") -> None:
+    def _record_failed(self, kind: str, state: str = "failed") -> bool:
+        """issues に failed・uncertain を記録する。記録できた（守りで書かなかった場合を含む）か。"""
         try:
             current = find_issue(self.conn, self.run_id, kind)
             if current is not None and current.state == "uncertain" and state == "failed":
-                return  # 作られたか分からない記録を、確かめないまま上書きしない
+                return True  # 作られたか分からない記録を、確かめないまま上書きしない
             if state == "uncertain" and current is not None and current.state == "created":
                 # 同じ実行に、古い番号（404・410）の作成済みの行がある。もう存在しない番号なので、
                 # 作られたか分からない記録に直す（record_issue は作成済みの行を戻さない）
@@ -489,7 +498,7 @@ class Poster:
                     " projects_state = NULL WHERE run_id = ? AND kind = ?",
                     (self.run_id, kind),
                 )
-                return
+                return True
             record_issue(
                 self.conn,
                 self.run_id,
@@ -501,6 +510,8 @@ class Poster:
             )
         except Exception as e:
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e)
+            return False
+        return True
 
     def _stop(self, kind: str, category: str) -> dict:
         """投稿の準備で止まった失敗（設定・トークン・issue.md）。何も作らず、runs だけ閉じる。"""
