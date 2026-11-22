@@ -253,16 +253,61 @@ def test_projects_failure_is_not_a_run_failure(h):
 # --- 404・410 ---
 
 
-def test_410_marks_issue_missing_without_asking_the_reader(h):
+def test_410_is_checked_with_the_reader_like_404(h):
     h.add(OLD, "report", 5)
     h.failures[5] = http_error(410)
 
     outcome = h.run()
 
+    assert h.readers[0].calls == [(REPO, 5)]
     assert h.state(5)[1] == "issue_missing"
-    assert h.readers == []
     assert outcome.as_dict()["issue_missing"] == 1
     assert outcome.as_dict()["failed"] == 0
+
+
+def test_410_while_the_issue_exists_stays_pending_and_stops(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.existing = {5, 9}
+    h.failures[5] = http_error(410)
+
+    outcome = h.run()
+
+    assert h.state(5)[1:4] == ("pending", 1, "projects_not_found")
+    assert outcome.as_dict()["not_attempted"] == 1
+
+
+def test_redirect_from_projects_stops_the_rest(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.failures[5] = http_error(301, category="redirect")
+
+    outcome = h.run()
+
+    assert h.registrars[0].added == [5]
+    assert h.state(9)[1:3] == ("pending", 0)
+    assert outcome.as_dict()["not_attempted"] == 1
+
+
+def test_a_row_finished_by_another_run_is_not_a_failure(h):
+    h.add(RUN, "report", 9)
+
+    def make(config, limits, budget, clock=None):
+        registrar = FakeRegistrar(budget)
+        add = registrar.add_issue
+
+        def add_and_finish_elsewhere(ref):
+            add(ref)  # 登録している間に、ほかの実行が done にした
+            h.conn.execute("UPDATE issues SET projects_state = 'done'")
+
+        registrar.add_issue = add_and_finish_elsewhere
+        return registrar
+
+    outcome = h.run(make_registrar=make)
+
+    assert outcome.as_dict()["failed"] == 0
+    assert "error_category" not in outcome.as_dict()
+    assert h.state(9)[1] == "done"
 
 
 def test_404_with_a_confirmed_missing_issue_is_issue_missing(h):
@@ -405,7 +450,15 @@ def test_issue_read_rate_limit_stops_the_rest(h):
     assert outcome.as_dict()["not_attempted"] == 1
 
 
-def test_a_transferred_issue_does_not_stop_the_other_registrations(h):
+def moved_row(h, run, kind="report"):
+    return h.conn.execute(
+        "SELECT repo, number, projects_state, projects_attempts FROM issues"
+        " WHERE run_id = ? AND kind = ?",
+        (run, kind),
+    ).fetchone()
+
+
+def test_a_transferred_issue_is_updated_to_its_destination_and_registered(h):
     h.add(OLD, "report", 5)
     h.add(RUN, "report", 9)
     h.failures[5] = http_error(404, category="not_found")
@@ -413,9 +466,42 @@ def test_a_transferred_issue_does_not_stop_the_other_registrations(h):
 
     outcome = h.run(first=IssueRef(REPO, 9))
 
-    assert h.state(5)[1:4] == ("pending", 1, "issue_transferred")
-    assert h.state(9)[1] == "done"
-    assert outcome.as_dict()["failed"] == 1
+    assert moved_row(h, OLD) == ("tester/moved", 1005, "done", 1)
+    assert h.registrars[0].added == [9, 5, 1005]
+    assert outcome.as_dict()["registered"] == 2
+    assert outcome.as_dict()["failed"] == 0
+
+
+def test_many_transfers_do_not_starve_the_later_rows(h):
+    h.add(OLD, "report", 5)
+    h.add(OLD, "rejected", 6)
+    h.add(OLD, "run_error", 7)
+    h.add(OLD_WEEKLY, "report", 8)
+    h.add(RUN, "report", 9)
+    for number in (5, 6, 7):
+        h.failures[number] = http_error(404, category="not_found")
+    h.make_reader = lambda token, limits, **kw: TransferredReader()
+
+    outcome = h.run()
+
+    assert [r[1] for r in h.rows()] == ["done"] * 5
+    assert outcome.as_dict()["registered"] == 5
+
+
+def test_a_transfer_that_cannot_be_registered_is_abandoned_after_three_attempts(h):
+    h.add(OLD, "report", 5)
+    h.add(RUN, "report", 9)
+    h.failures[5] = http_error(404, category="not_found")
+    h.failures[1005] = http_error(404, category="not_found")  # 転送先でも登録できない
+    h.make_reader = lambda token, limits, **kw: TransferredReader(fixed=1005)
+
+    for expected in ("pending", "pending", "abandoned"):
+        outcome = h.run()
+        assert moved_row(h, OLD)[2] == expected
+
+    assert moved_row(h, OLD)[3] == 4  # 失敗の記録3回と、外すときの1回
+    assert outcome.as_dict()["abandoned"] == 1
+    assert h.run() is None  # 外れた行は、もう試さない
 
 
 def test_an_unexpected_error_is_recorded_on_the_row_and_stops(h):
@@ -431,5 +517,9 @@ def test_an_unexpected_error_is_recorded_on_the_row_and_stops(h):
 
 
 class TransferredReader:
+    def __init__(self, fixed=None):
+        self.fixed = fixed
+
     def get_issue(self, repo, number):
-        return IssueLookup(IssueRef("tester/moved", number), transferred=True)
+        moved = self.fixed or number + 1000
+        return IssueLookup(IssueRef("tester/moved", moved), transferred=True)

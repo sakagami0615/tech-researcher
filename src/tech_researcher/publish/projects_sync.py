@@ -18,12 +18,14 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from tech_researcher.collect.http import AUTH, BUDGET, FORBIDDEN, RATE_LIMITED
+from tech_researcher.collect.http import AUTH, BUDGET, FORBIDDEN, RATE_LIMITED, REDIRECT
 from tech_researcher.config import Limits
 from tech_researcher.db.issues import (
     IssueRow,
+    mark_projects_abandoned,
     mark_projects_done,
     mark_projects_issue_missing,
+    move_issue,
     pending_projects,
     record_projects_failure,
 )
@@ -49,7 +51,8 @@ UNCHECKED = "projects_not_found_unchecked"  # 404 で、Issue があるか確か
 INVALID_ISSUE = "invalid_issue"  # 記録の repo・number が使えない形
 DB_ERROR = "db_error"
 # 残りの Issue も同じ理由で失敗するので、そこで止める分類
-_STOP = frozenset({AUTH, FORBIDDEN, RATE_LIMITED, CONFIG, BUDGET, NOT_FOUND_WITH_ISSUE})
+MAX_TRANSFER_ATTEMPTS = 3  # 転送先に更新できない・転送先でも登録できない Issue を諦める回数
+_STOP = frozenset({AUTH, FORBIDDEN, RATE_LIMITED, CONFIG, BUDGET, REDIRECT, NOT_FOUND_WITH_ISSUE})
 
 
 @dataclass
@@ -58,6 +61,7 @@ class ProjectsOutcome:
 
     registered: int = 0
     issue_missing: int = 0
+    abandoned: int = 0  # 転送先でも登録できず、試行の上限で pending から外した分
     failed: int = 0
     not_attempted: int = 0  # 予算・時間の上限や、止める失敗のため要求しなかった分
     error_categories: list[str] = field(default_factory=list)
@@ -69,6 +73,8 @@ class ProjectsOutcome:
             "failed": self.failed,
             "not_attempted": self.not_attempted,
         }
+        if self.abandoned:
+            out["abandoned"] = self.abandoned
         if self.error_categories:
             out["error_category"] = self.error_categories[0]
         return out
@@ -145,34 +151,68 @@ class ProjectsSync:
         return self.deadline is not None and self.clock() >= self.deadline
 
     def _register(
-        self, registrar: ProjectsRegistrar, row: IssueRow, outcome: ProjectsOutcome
+        self,
+        registrar: ProjectsRegistrar,
+        row: IssueRow,
+        outcome: ProjectsOutcome,
+        ref: IssueRef | None = None,
+        moved: bool = False,
     ) -> str | None:
-        """1件を登録する。失敗の分類（成功・issue_missing なら None）を返す。"""
-        ref = IssueRef(str(row.repo), int(row.number or 0))
+        """1件を登録する。失敗の分類（成功・issue_missing なら None）を返す。moved は、転送先に
+        更新した後の登録のとき。"""
+        ref = ref or IssueRef(str(row.repo), int(row.number or 0))
         try:
             registrar.add_issue(ref)
         except ValueError:
             return self._fail(row, INVALID_ISSUE, outcome)
         except ProjectsError as e:
-            if e.status == 410:
-                return self._finish(row, outcome, missing=True)
-            if e.status == 404:
-                gone = self._issue_gone(ref)
-                if gone is True:
-                    return self._finish(row, outcome, missing=True)
-                if gone is False:
-                    return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
-                if gone == TRANSFERRED:  # 設定の誤りとは言えない。この1件だけ pending のまま続ける
-                    return self._fail(row, TRANSFERRED, outcome)
-                self._fail(row, UNCHECKED, outcome)
-                # Issue 用トークンの認証・権限・レート制限の失敗は、残りの確かめも同じ理由で失敗する
-                return gone if gone in _STOP else UNCHECKED
+            if e.status in (404, 410):  # Issue がないとは限らない。読み直して確かめる
+                return self._not_found(registrar, row, outcome, ref, moved)
             return self._fail(row, e.category, outcome)
         return self._finish(row, outcome, missing=False)
 
-    def _issue_gone(self, ref: IssueRef) -> bool | str:
-        """Issue 用トークンで Issue を読み直す。ない（404・410）なら True、あれば False、確かめ
-        られなければ、読み取りの失敗の分類（文字列）。"""
+    def _not_found(
+        self,
+        registrar: ProjectsRegistrar,
+        row: IssueRow,
+        outcome: ProjectsOutcome,
+        ref: IssueRef,
+        moved: bool,
+    ) -> str | None:
+        gone = self._issue_gone(ref)
+        if gone is True:
+            return self._finish(row, outcome, missing=True)
+        if gone is False:
+            return self._fail(row, NOT_FOUND_WITH_ISSUE, outcome)
+        if isinstance(gone, IssueRef):  # 転送されている。記録を転送先に更新して、登録し直す
+            if not moved:
+                try:
+                    move_issue(self.conn, row.id, gone.repo, gone.number)
+                except (sqlite3.Error, LookupError) as e:
+                    self.log.write("post", "failure", error_category=DB_ERROR, exc=e)
+                else:
+                    self.log.write("post", "warning", error_category=TRANSFERRED, detail=_name(row))
+                    return self._register(registrar, row, outcome, gone, moved=True)
+            return self._give_up_transfer(row, outcome)
+        self._fail(row, UNCHECKED, outcome)
+        # Issue 用トークンの認証・権限・レート制限の失敗は、残りの確かめも同じ理由で失敗する
+        return gone if gone in _STOP else UNCHECKED
+
+    def _give_up_transfer(self, row: IssueRow, outcome: ProjectsOutcome) -> str:
+        """転送先に更新できない・転送先でも登録できない。この1件だけ pending のまま続け、上限を
+        超えたら pending から外す（毎回の予算を使い続けないため）。"""
+        self._fail(row, TRANSFERRED, outcome)
+        if row.projects_attempts + 1 >= MAX_TRANSFER_ATTEMPTS:
+            try:
+                mark_projects_abandoned(self.conn, row.id, self.run_id)
+                outcome.abandoned += 1
+            except (sqlite3.Error, LookupError) as e:
+                self.log.write("post", "failure", error_category=DB_ERROR, exc=e)
+        return TRANSFERRED
+
+    def _issue_gone(self, ref: IssueRef) -> bool | str | IssueRef:
+        """Issue 用トークンで Issue を読み直す。ない（404・410）なら True、あれば False、転送されて
+        いれば転送先の IssueRef、確かめられなければ、読み取りの失敗の分類（文字列）。"""
         try:
             if self._reader is None:
                 self._reader = self.make_reader(
@@ -182,7 +222,9 @@ class ProjectsSync:
                     clock=self.clock,
                 )
             found = self._reader.get_issue(ref.repo, ref.number)
-            return TRANSFERRED if found.transferred else found.ref is None
+            if found.transferred and found.ref is not None:
+                return found.ref
+            return found.ref is None
         except IssueReadError as e:
             return e.category
 
@@ -192,7 +234,10 @@ class ProjectsSync:
                 mark_projects_issue_missing(self.conn, row.id, self.run_id)
             else:
                 mark_projects_done(self.conn, row.id, self.run_id)
-        except (sqlite3.Error, LookupError) as e:
+        except LookupError:  # もう pending でない。ほかの実行（日次・週次の重なり）が済ませた
+            self.log.write("post", "warning", error_category="projects_already_done")
+            return None
+        except sqlite3.Error as e:
             self.log.write("post", "failure", error_category=DB_ERROR, exc=e)
             outcome.failed += 1
             outcome.error_categories.append(DB_ERROR)
@@ -217,7 +262,9 @@ class ProjectsSync:
         )
         try:
             record_projects_failure(self.conn, row.id, self.run_id, category)
-        except (sqlite3.Error, LookupError) as e:
+        except LookupError:  # もう pending でない（ほかの実行が済ませた）
+            pass
+        except sqlite3.Error as e:
             self.log.write("post", "failure", error_category=DB_ERROR, exc=e)
         return category
 
