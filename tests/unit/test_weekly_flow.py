@@ -14,7 +14,7 @@ from tech_researcher.db.history import past_themes
 from tech_researcher.db.schema import open_db
 from tech_researcher.periods import JST
 from tech_researcher.runfiles import db_path, new_run_id
-from tests.unit.test_daily_flow import FEED, ISSUE_REPO, Host, host  # noqa: F401
+from tests.unit.test_daily_flow import EMPTY_FEED, FEED, ISSUE_REPO, Host, host  # noqa: F401
 
 MONDAY = datetime(2026, 10, 26, 7, 0, tzinfo=JST)  # 対象週は 2026-10-26（10-19〜10-25 を調べる）
 NEXT_MONDAY = datetime(2026, 11, 2, 7, 0, tzinfo=JST)
@@ -165,3 +165,39 @@ def test_rejected_week_closes_the_run_without_posting(weekly):
     assert query(
         weekly, "SELECT status, rejected_checks FROM reports WHERE run_id = ?", run_id
     ) == [("rejected", '["invalid_output"]')]
+
+
+def test_week_without_observations_still_asks_the_ai_about_past_themes(weekly):
+    """今週の観測が0件でも、過去のテーマがあれば ② を呼ぶ（沈静したテーマを出す）。"""
+    weekly.run_weekly()
+    weekly.start(NEXT_MONDAY)
+    weekly.feed = EMPTY_FEED
+
+    def fading(data):
+        past, observation = data["past_themes"][0], data["past_observations"][0]
+        theme = _theme(past["theme_id"], past["name"], [], [observation["id"]])
+        return {
+            "themes": [{**theme, "status": "fading"}],
+            "tech_changes": [],
+            "comparisons": [],
+            "watch": [],
+        }
+
+    weekly.ai = fading
+    code, summary = weekly.run_weekly()
+
+    assert code == 0 and summary["result"] == "report"
+    assert weekly.calls("agent")[-1]["items"] == []
+    assert query(
+        weekly,
+        "SELECT status, theme_id FROM report_entries WHERE run_id = ?",
+        summary["run_id"],
+    ) == [("published", "T0001")]
+
+
+def test_week_with_nothing_at_all_does_not_call_the_ai(weekly):
+    weekly.feed = EMPTY_FEED
+    code, summary = weekly.run_weekly()
+
+    assert code == 0 and summary["result"] == "report"
+    assert weekly.calls("agent") == []

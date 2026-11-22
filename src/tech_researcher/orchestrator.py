@@ -748,7 +748,9 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
         return "bad_input", (), 0
     models: tuple[str, ...] = ()
     retries = 0
-    if data["items"]:
+    # 週次は、今週の観測が0件でも、過去のテーマ・観測があれば呼ぶ（沈静のテーマを出すため）
+    call = bool(data["items"] or data.get("past_themes") or data.get("past_observations"))
+    if call:
         began = _now()
         total = job.limits.analyze * MINUTE
         while True:
@@ -805,7 +807,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
     except (OSError, TypeError, ValueError) as e:  # 書けない、または JSON にできない値
         job.log.write("analyze", "failure", error_category="output_write_failed", exc=e)
         return "output_write_failed", (), retries
-    if data["items"]:
+    if call:
         job.log.write("analyze", "end", count=len(data["items"]))
     else:
         job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")

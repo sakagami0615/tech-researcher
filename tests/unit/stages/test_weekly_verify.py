@@ -267,3 +267,38 @@ def test_body_too_long_is_rejected_but_burns_the_theme_numbers(week, conn, monke
     assert len(rows(conn)) == 7
     assert next_theme_id(conn) == "T0003"  # 公開していない週でも、番号は再利用しない
     assert not (week.run_dir / "issue.md").exists()
+
+
+def test_secret_found_only_in_the_body_keeps_no_entries_or_body(week, conn, monkeypatch):
+    token = "ghp" + "_" + "q" * 36
+    monkeypatch.setattr(weekly_verify, "issue_text", lambda report: f"{report.title}\n{token}")
+    result = week.verify(full_output(week))
+
+    assert result["result"] == "secret_detected"
+    status, checks, counts, body, ai_output = report(conn)
+    assert (status, json.loads(checks), body, ai_output) == (
+        "rejected",
+        ["secret_detected"],
+        None,
+        None,
+    )
+    assert json.loads(counts)["published"] == 0
+    assert rows(conn) == []
+    assert not (week.run_dir / "issue.md").exists()
+    assert json.loads((week.run_dir / "secret-scan.json").read_text())["detected"] is True
+
+
+def test_comparison_excluded_by_its_own_text_is_saved_with_its_rows(week, conn):
+    a = week.by_url[A]
+    row = {"item_id": a, "product_name": "FooDB", "feature": "特徴", "use_case": "用途"}
+    out = output(
+        comparisons=[{"domain": "領域", "rows": [row], "summary": "あ" * 400}],
+        watch=[{"name": "注目", "reason": "理由", "item_ids": [a]}],
+    )
+    result = week.verify(out)
+
+    assert result == {"result": "report", "entries": 1, "excluded": 1}
+    comparison = [r for r in rows(conn) if r[1] == "comparison"]
+    assert [(r[2], json.loads(r[3])) for r in comparison] == [("excluded", ["too_long"])]
+    assert json.loads(comparison[0][6])["rows"][0]["item_id"] == a
+    assert json.loads(comparison[0][5]) == [a]

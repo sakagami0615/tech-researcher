@@ -281,6 +281,11 @@ class _Store:
             rows.append(self._row("watch", w.item_ids, {"name": w.name, "reason": w.reason}, x))
             if x is None:
                 next(watch)
+        # 反復子を使い切り、掲載＋除外（行を除く）が AI の出力の数と合うこと。ずれたら保存しない
+        leftover = [next(it, None) for it in (themes, changes, comparisons, watch)]
+        top = [r for r in rows if r.payload.get("row") is None]
+        if any(x is not None for x in leftover) or len(top) != _entry_count(parsed):
+            raise ValueError("掲載した項目と除外した項目が、AI の出力と対応しない")
         return rows
 
     def _theme(
