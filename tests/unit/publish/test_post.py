@@ -288,14 +288,14 @@ def test_dedup_read_failure_is_a_failed_post(env, github):
 
 
 def test_transient_failure_is_retried_after_waiting_and_redoing_the_dedup(env, github):
-    github.failures = [IssueWriteError("x", "http_5xx", 503)]
+    github.failures = [_error("dns", True)]  # 送る前の失敗だけ再試行する
     result = env.post("report")
 
     assert (result["result"], result["number"]) == ("created", 100)
     assert len(github.attempts) == 2
     assert env.sleeps == [5]
     events = [(r["event"], r.get("error_category")) for r in env.log_lines()]
-    assert ("retry", "http_5xx") in events
+    assert ("retry", "dns") in events
 
 
 def test_lost_response_is_found_by_the_dedup_before_retrying(env, github):
@@ -317,15 +317,14 @@ def test_lost_response_is_found_by_the_dedup_before_retrying(env, github):
 
 
 def test_retries_are_limited_and_exhausted_failure_is_recorded(env, github):
-    github.failures = [IssueWriteError("x", "timeout") for _ in range(5)]
+    github.failures = [_error("dns", True) for _ in range(5)]
     result = env.post("report")
 
-    assert (result["result"], result["error_category"]) == ("failed", "timeout")
+    assert (result["result"], result["error_category"]) == ("failed", "dns")
     assert len(github.attempts) == 3  # 初回 + 再試行2回（http_retry_waits_s の数）
     assert env.sleeps == [5, 20]
-    # 送った後のタイムアウトは、作られたか分からない（最後の重複判定でも見つからない）
-    assert env.issue_rows() == [(RUN, "report", "uncertain", None, None, None)]
-    assert env.run_row() == ("failed", "post", "timeout", None)
+    assert env.issue_rows() == [(RUN, "report", "failed", None, None, None)]  # 送っていない
+    assert env.run_row() == ("failed", "post", "dns", None)
 
 
 def test_client_error_is_not_retried(env, github):
@@ -577,9 +576,32 @@ def test_failure_issue_is_retried_when_it_was_certainly_not_sent(env, github, ca
     assert len(github.attempts) == 2 and env.sleeps == [5]
 
 
-def test_report_is_retried_even_when_the_response_may_be_lost(env, github):
-    github.failures = [_error("timeout", False)]
-    assert env.post("report")["result"] == "created"
+@pytest.mark.parametrize("category", ["timeout", "network", "http_5xx", "invalid_response"])
+def test_report_is_not_posted_again_after_a_maybe_created_failure(env, github, category):
+    """ラベルが外れた Issue は重複判定で見つからない。POST を繰り返すと2件になるので出さない。"""
+    github.failures = [_error(category, False)]
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", category)
+    assert len(github.attempts) == 1 and env.sleeps == []
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+def test_unsent_failure_then_maybe_created_failure_stops_posting(env, github):
+    github.failures = [_error("dns", True), _error("timeout", False), _error("dns", True)]
+    result = env.post("report")
+
+    assert (result["result"], result["error_category"]) == ("failed", "timeout")
+    assert len(github.attempts) == 2  # 3回目は出さない
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
+
+
+@pytest.mark.parametrize("later", ["budget", "http_4xx"])
+def test_uncertain_even_if_the_last_failure_kind_is_certain(env, github, later):
+    """作られたかもしれない失敗の後は、後続の失敗の種類によらず uncertain（POST は出さない）。"""
+    github.failures = [_error("timeout", False), _error(later, later == "budget")]
+    env.post("report")
+    assert [row[1:3] for row in env.issue_rows()] == [("report", "uncertain")]
 
 
 def test_invalid_response_for_a_report_runs_the_dedup_once(env, github):
@@ -839,9 +861,6 @@ def test_report_ending_with_a_certain_failure_is_failed(env, github, category):
 def test_last_look_finds_an_issue_created_by_the_final_attempt(env, github):
     class Lost(FakeWriter):
         def create_issue(self, repo, title, body, labels):
-            if len(github.attempts) < 2:
-                github.attempts.append(1)
-                raise _error("timeout", False)
             github.attempts.append(1)
             github.created.append(
                 {"repo": repo, "title": title, "body": body, "labels": labels, "number": 70}
@@ -885,3 +904,29 @@ def test_uncertain_record_is_cleared_when_the_issue_is_found(env, github):
     assert [row[:5] for row in env.issue_rows() if row[0] == RUN] == [
         (RUN, "report", "created", REPO, 8)
     ]
+
+
+def test_close_failure_after_the_stop_notice_is_run_close_failed(env, github, monkeypatch):
+    def broken(*a, **k):
+        raise OSError("disk")
+
+    monkeypatch.setattr("tech_researcher.publish.post.finish_run", broken)
+    result = env.post("report", report_for(text=f"キーは {SECRET}"))
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "run_close_failed",
+        100,
+    )
+
+
+def test_failing_to_clear_the_uncertain_record_is_not_a_success(env, github, monkeypatch):
+    env.post("report")
+    monkeypatch.setattr(Poster, "_clear_uncertain", lambda self: False)
+    result = env.post("report", run=RETRY)
+
+    assert (result["result"], result["error_category"], result["number"]) == (
+        "failed",
+        "db_error",
+        100,
+    )

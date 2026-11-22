@@ -714,7 +714,7 @@ AI による調査結果を掲載できませんでした。
    - 見つからない：3 へ進む
 3. レポート Issue を作り、DB に番号を記録してから Projects に登録する
 
-- 作成の応答が読めず（`invalid_response`）、1 の重複判定でも見つからなかったときは、Issue が作られたか分からない。issues に `uncertain`（対象のレポート）を記録し、その実行は失敗にする。次の実行の重複判定で、同じ `cadence`・`target` に `uncertain` の記録があり、Issue も見つからなければ、自動で作り直さず `needs_review` の失敗にする（人がラベルを外していた場合などに、二重に作らないため）。Issue が見つかったときは、同じ対象の `uncertain` の行を `failed` にする。運用者が GitHub で確かめ、Issue があれば `uncertain` の行を `created`（`repo`・`number` を書き、`projects_state` は `pending`、`projects_attempts` は 0 にする）に直し、なければ行を削除する。次の実行から通常どおりに進む
+- 作られたかもしれない失敗（応答が読めない・応答の読み取りのタイムアウト・送った後の通信の失敗・5xx）で、最後の重複判定でも見つからなかったときは、Issue が作られたか分からない。このような失敗が1回でもあったら、同じ実行の中では POST を繰り返さない（ラベルが外れた Issue は重複判定で見つからず、2件になるため）。最後に重複判定を1回だけ行う。issues に `uncertain`（対象のレポート）を記録し、その実行は失敗にする。次の実行の重複判定で、同じ `cadence`・`target` に `uncertain` の記録があり、Issue も見つからなければ、自動で作り直さず `needs_review` の失敗にする（人がラベルを外していた場合などに、二重に作らないため）。Issue が見つかったときは、同じ対象の `uncertain` の行を `failed` にする。運用者が GitHub で確かめ、Issue があれば `uncertain` の行を `created`（`repo`・`number` を書き、`projects_state` は `pending`、`projects_attempts` は 0 にする）に直し、なければ行を削除する。次の実行から通常どおりに進む
 - 2 を行うのは、「Issue は作れたが DB への記録の前に落ちた」場合に、自動の再試行（US-E6-02）で重複させないため。DB だけを正にすると、この隙間で重複する
 - 1 で GitHub から取得するのは、DB の記録だけでは Issue が削除されたことが分からないため
 - DB に記録がなく、人がラベルを外していた場合は、2 で見つからず重複しうる

@@ -95,7 +95,15 @@ def test_301_updates_db_to_transfer_target_keeping_run(conn):
     row = find_report_issue(conn, "daily", DAY)
     assert (row.run_id, row.repo, row.number) == (RUN, "new/repo", 7)
     assert reader.lists == 0
-    # 設定の投稿先ではないリポジトリへの転送では、投稿先を記録しない（試験用の DB を結び付けない）
+    # 元の記録が設定の投稿先のときは、転送の後も投稿先を記録する
+    assert conn.execute("SELECT value FROM meta").fetchall() == [(REPO,)]
+
+
+def test_301_from_another_repo_does_not_record_the_destination(conn):
+    """元の記録が設定の投稿先ではないときは、投稿先を書かない（試験用の DB を結び付けない）。"""
+    seed(conn, repo="old/repo")
+    reader = FakeReader({11: IssueLookup(IssueRef(REPO, 7), transferred=True)})
+    assert check(conn, reader) == Existing(IssueRef(REPO, 7), "transferred")
     assert conn.execute("SELECT count(*) FROM meta").fetchone() == (0,)
 
 

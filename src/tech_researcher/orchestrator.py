@@ -131,7 +131,8 @@ class Summary:
     observed（D-13 の観測。observe.py）。
     failed_sources は取得に失敗した情報源、partial_sources は一部だけ取れなかった情報源（取れた分は
     使った部分レポート。US-E6-03）の、設定ファイルの表示名。issue_url は ⑤ で作った
-    （すでにあった）Issue の URL（不合格・実行エラー・公開停止の Issue も）。
+    （すでにあった）Issue の URL（不合格・実行エラー・公開停止の Issue も）。issue_url があれば
+    公開済み（result が error でも、runs を閉じられなかっただけのことがある）。
     """
 
     run_id: str

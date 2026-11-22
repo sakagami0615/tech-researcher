@@ -196,7 +196,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 | reports | 1回の実行で作ったレポート案と検証結果 | ③ | ⑤、④ の入力、不合格 Issue の件数 |
 | report_entries | レポート案の1項目（日次の項目、週次のテーマ・技術的変化・比較・注目テーマ） | ③ | ⑤、D-13 の「載せた」、D-16 の除外、週次の過去のテーマ |
 | issues | 1つの Issue（作った・止めた・作れなかった） | ⑤ | 重複判定（report-templates.md 4.3）、Projects に未登録の Issue の登録（4.4） |
-| meta | DB 全体の情報（いまは投稿先のリポジトリ1つ。`key`・`value`） | ⑤（最初の投稿・補完のとき） | ⑤ の重複判定の前の確認。設定の `GITHUB_ISSUE_REPO` と違えば止める（structure.md 3.6） |
+| meta | DB 全体の情報（いまは投稿先のリポジトリ1つ。`key`・`value`） | ⑤（最初の投稿・補完のとき） | ⑤ の重複判定の前の確認。設定の `GITHUB_ISSUE_REPO` と違えば止める（structure.md 3.6）。別のリポジトリにある Issue（転送など）を見つけたときは書かない。meta が空のままそれを見つけると `needs_review` で止まる：運用者は、この DB が設定の投稿先のものか確かめ（`issues` の `repo` と設定を見る）、そうなら `INSERT INTO meta (key, value) VALUES ('issue_repo', 'owner/repo')` で書く。違えば別の `TR_DATA_DIR` を使う |
 
 ### 3.4 各テーブル
 

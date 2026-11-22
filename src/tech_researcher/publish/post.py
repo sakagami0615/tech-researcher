@@ -175,6 +175,8 @@ class Poster:
         self.deadline = deadline  # 要求を出してよい時間の上限（clock の値。structure.md 6.4）
         self.repo = ""
         self.writer: IssueWriter | None = None
+        # この実行の作成で、Issue が作られたかもしれない失敗があったか。あれば POST を繰り返さない
+        self._maybe_created = False
 
     def run(self, kind: str, stopped: str | None = None) -> dict:
         """issue.md を投稿して記録し、結果（result・kind・repo・number・error_category）を返す。
@@ -214,7 +216,8 @@ class Poster:
             stop = secret_stop_report(self.target, "post")
             if self._secret_kinds(stop) is None:
                 posted = self._post(RUN_ERROR_SECRET, stop, close=False)
-                self._close("failed", "secret_detected")
+                if not self._close("failed", "secret_detected"):
+                    return {**posted, "result": FAILED, "error_category": "run_close_failed"}
                 if posted["result"] in (CREATED, EXISTING):
                     return {**posted, "result": BLOCKED, "error_category": "secret_detected"}
                 # 定型の投稿に失敗した。要約の分類は検出のまま、書き込みの分類は別に残す
@@ -240,7 +243,9 @@ class Poster:
         try:
             found = self._create(kind, report)
         except IssueReadError as e:
-            return self._write_failed(kind, _category(e, "read_failed", prefix="dedup_"), close)
+            state = "uncertain" if kind == REPORT and self._maybe_created else "failed"
+            category = _category(e, "read_failed", prefix="dedup_")
+            return self._write_failed(kind, category, close, state)
         except RecordError as e:  # 見つけたが、DB に記録できなかった
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e.__cause__)
             if close:
@@ -251,7 +256,7 @@ class Poster:
             return self._write_failed(kind, "needs_review", close)
         except IssueWriteError as e:
             self.log.write("post", "failure", error_category=e.category, detail=str(e))
-            state = "uncertain" if kind == REPORT and e.maybe_created else "failed"
+            state = "uncertain" if kind == REPORT and self._maybe_created else "failed"
             return self._write_failed(kind, _category(e, "write_failed"), close, state)
         except (sqlite3.Error, OSError) as e:
             self.log.write("post", "failure", error_category="db_error", exc=e)
@@ -308,8 +313,11 @@ class Poster:
             if close:
                 self._close("failed", "issue_record_failed")
             return _result(FAILED, kind, ref=ref, error_category="issue_record_failed")
-        if kind == REPORT:
-            self._clear_uncertain()
+        if kind == REPORT and not self._clear_uncertain():
+            self.log.write("post", "failure", error_category="db_error")
+            if close:
+                self._close("failed", "db_error")
+            return _result(FAILED, kind, ref=ref, error_category="db_error")
         if close and not self._close("succeeded", None):
             return _result(FAILED, kind, ref=ref, error_category="run_close_failed")
         self.log.write("post", "end", detail=f"existing via {via}")
@@ -341,6 +349,7 @@ class Poster:
         limits = self.config.limits
         waits = limits.http_retry_waits_s
         replaces: str | None = None
+        self._maybe_created = False
         for attempt in range(len(waits) + 1):
             if kind == REPORT:
                 decision = self._decide()
@@ -353,6 +362,11 @@ class Poster:
                 )
                 return created, replaces
             except IssueWriteError as e:
+                if kind == REPORT and e.maybe_created:
+                    # ラベルが外れた Issue は重複判定で見つからず、POST を繰り返すと2件になる。
+                    # 同じ実行の中では出さず、最後に重複判定を1回だけ行って終える
+                    self._maybe_created = True
+                    return self._give_up(kind, e)
                 if not e.retryable or attempt == len(waits):
                     return self._give_up(kind, e)
                 if kind != REPORT and not e.unsent:
@@ -367,9 +381,10 @@ class Poster:
         raise AssertionError("ここには来ない")
 
     def _give_up(self, kind: str, error: IssueWriteError) -> Existing:
-        """作れなかった。Issue が作られたかもしれないレポートは、最後に重複判定を1回だけ行い、
-        見つかれば existing にする。確かめられなければ、元の失敗を投げる（uncertain になる）。"""
-        if kind == REPORT and error.maybe_created:
+        """作れなかった。Issue が作られたかもしれないレポート（旗が立っている）は、最後に重複判定を
+        1回だけ行い、見つかれば existing にする。見つからない・確かめられないときは、元の失敗を
+        投げる（最後の失敗の種類によらず uncertain になる）。"""
+        if kind == REPORT and self._maybe_created:
             try:
                 again = self._decide()
             except IssueReadError:
@@ -451,7 +466,7 @@ class Poster:
         except Exception as e:  # 記録できなくても、公開は止まっている
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e)
 
-    def _clear_uncertain(self) -> None:
+    def _clear_uncertain(self) -> bool:
         """Issue が見つかったので、同じ対象の作られたか分からない記録を failed にする。"""
         try:
             self.conn.execute(
@@ -461,6 +476,8 @@ class Poster:
             )
         except Exception as e:
             self.log.write("post", "failure", error_category="issue_record_failed", exc=e)
+            return False
+        return True
 
     def _close(self, status: str, category: str | None) -> bool:
         """まだ閉じていない（running の）実行だけを閉じる。閉じられたか（閉じる必要がなければ
