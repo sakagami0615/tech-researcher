@@ -47,7 +47,7 @@ description: tech-researcher の ④ 失敗時の調査。この依頼に続く 
 - `failure`：コードが作った失敗の定型の項目。`kind` が `run_error` なら実行エラー、`rejected` なら不合格
 - `lines`：調べる材料。1行1要素で、`id`（`L` と番号）で指す。時刻と日付はすべて日本時間（JST）
   - `log`：この実行のログ。`時刻 段階 出来事` に続けて、`source`（情報源）・`error_category`（失敗の分類）・`count`（件数）・`attempt`（試行の番号）がある。出来事は `start`・`end`・`failure`・`retry`・`source_result`（情報源の結果）・`excluded`（③ が項目を除外した。`error_category` が除外の分類）・`secret_detected`・`usage`（AI の呼び出しの記録）・`warning`
-  - `verification`：③ の結果。`result`（`report`・`rejected`・`secret_detected`）・`reason`（不合格の分類。`invalid_output` は ② の出力の形が不正、`all_excluded` は検査ですべての項目が除外された）・件数と、除外した項目の ID（`malformed_ids` は、AI が返した ID のうち形が正しくなく、コードが伏せたものの数）
+  - `verification`：③ の結果。`result`（`report`・`rejected`・`secret_detected`）・`reason`（不合格の分類。`invalid_output` は ② の出力の形が不正、`all_excluded` は検査ですべての項目が除外された、`body_too_long` は本文が上限を超えた。週次は `unknown_product`（比較の製品名が収集した項目にない）・`empty_comparison`（比較の行がすべて除外された）も）・件数と、除外した項目の ID（`malformed_ids` は、AI が返した ID のうち形が正しくなく、コードが伏せたものの数）
   - `history`：この実行より前の直近の実行の記録。開始時刻・種類・対象・状態（`succeeded`・`rejected`・`failed`・`running`（途中で止まった）・`observed`）・失敗の段階と分類・情報源の取得の状態ごとの数・失敗した情報源
     - 取得の状態：`ok`（1件以上取れた）・`no_results`（取れたが0件）・`failed`（取得に失敗した）・`skipped`（その実行では取得しない情報源）
 - 除外した記事の本文・タイトルは、コードが材料から外している。記事の中身は分からない前提で調べる

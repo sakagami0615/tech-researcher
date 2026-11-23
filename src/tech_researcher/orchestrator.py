@@ -21,14 +21,15 @@ worker.env の中身は compose が worker にだけ、agent.env の中身は ag
 
 日次は ① 収集（worker）→ ② 評価・要約（agent コンテナ。agent/invoke.py）→ ③ 検証・検査（worker）
 とつなぐ。② で使われたモデルの名前は ③ に渡し、本番では worker が runs の model に記録して前回の
-本番と比べる（structure.md 3.3）。日次の ① 〜 ③ の失敗（実行エラー・不合格・秘匿情報の検出）は
+本番と比べる（structure.md 3.3）。日次・週次の ① 〜 ③ の失敗（実行エラー・不合格・秘匿情報の検出）は
 failures.py が ④ の調査・本文（issue.md）・本番の runs の終わりへつなぎ、本文を ⑤ で投稿する。
 レポートが合格したときも ⑤ で投稿する。⑤ は worker の `post` で、Issue 用トークンは worker だけが
 持つ（publish/post.py）。投稿した Issue の URL は要約の issue_url に出す。投稿できなかったときは
 実行エラー（failed_stage は post）。ドライランは ⑤ を飛ばす。
 週次も同じ流れで、② は週次の分析スキル、③ は検査・テーマ番号の確定・保存（weekly_verify.py）、
-⑤ は日次と同じ投稿（重複防止・Projects 登録）。週次の失敗の分岐（④・不合格 Issue・実行エラー）は
-週次の失敗分岐の Issue で足す（いまは ③ の不合格・公開停止で、本番の runs を閉じるだけ）。
+⑤ は日次と同じ投稿（重複防止・Projects 登録）。失敗の分岐（④・不合格 Issue・実行エラー Issue・
+公開停止）も日次と同じ部品（failures.py）を使う。ドライランも ④ を呼んで investigation.json を
+残す（DB には書かず、⑤ は飛ばし、不合格の後に ② を呼び直さない）。
 
 終了コード：0 は最後まで動いた（レポート・ドライラン）、1 は実行エラー・不合格（ジョブ全体の上限で
 止めたときを含む）、2 は起動の誤り（引数・設定・環境）、3 は同じ種類の実行が動いている。
@@ -570,17 +571,10 @@ def _run_stages(job: Job) -> Summary:
         return _fail(job, "verify", category, fields)
     if verified["result"] == REJECTED:  # 不合格（US-E7-02）。不合格の後に再生成はしない
         outcome = failures.Outcome(failures.REJECTED, category=_validation_reason(job))
-        if job.cadence == "weekly":
-            return _weekly_stop(job, outcome, job.summary("rejected", **fields))
         posting = failures.handle(job, outcome, MINUTE)
         return job.summary("rejected", **fields, **_publish_failure(job, posting))
     if verified["result"] == SECRET_DETECTED:  # 本文を公開しない（US-E7-05）
         outcome = failures.Outcome(failures.SECRET_STOP, "verify", SECRET_DETECTED)
-        if job.cadence == "weekly":
-            stopped = job.summary(
-                "error", failed_stage="verify", error_category=SECRET_DETECTED, **fields
-            )
-            return _weekly_stop(job, outcome, stopped)
         posting = failures.handle(job, outcome, MINUTE)
         return job.summary(
             "error",
@@ -592,17 +586,6 @@ def _run_stages(job: Job) -> Summary:
     if job.files.dry_run:  # ドライランは ⑤ だけを飛ばす（D-04）
         return job.summary("dry_run", **fields)
     return _publish_report(job, fields, retries)
-
-
-def _weekly_stop(job: Job, outcome: failures.Outcome, summary: Summary) -> Summary:
-    """週次の ③ の不合格・公開停止。本番の runs だけを閉じ、Issue は作らない。
-
-    週次の失敗の分岐（④ の調査・不合格 Issue・実行エラー Issue。D-07）は、週次の失敗分岐の Issue
-    （#53）で足す。
-    """
-    if not job.files.dry_run:
-        failures.close_run(job, outcome, MINUTE)
-    return summary
 
 
 def _publish_report(job: Job, fields: Mapping, retries: int) -> Summary:
@@ -677,20 +660,12 @@ def _fail(
     models: tuple[str, ...] = (),
     retries: int = 0,
 ) -> Summary:
-    """日次の ① 〜 ③ の実行エラー：④ の調査・本文・本番の runs の終わりを行い、要約にする。
-
-    週次は本番の runs を閉じるだけ（④ と失敗の Issue は週次の失敗分岐の Issue で足す）。
-    """
+    """日次・週次の ① 〜 ③ の実行エラー：④ の調査・本文・本番の runs の終わりを行い、要約にする。"""
     assert category is not None
-    if job.cadence == "weekly":  # 失敗の Issue は週次の失敗分岐の Issue で足す。runs だけ閉じる
-        if not job.files.dry_run:
-            outcome = failures.Outcome(failures.RUN_ERROR, stage, category, models, retries)
-            failures.close_run(job, outcome, MINUTE)
-    if job.cadence == "daily":
-        posting = failures.handle(
-            job, failures.Outcome(failures.RUN_ERROR, stage, category, models, retries), MINUTE
-        )
-        fields = {**(fields or {}), **_publish_failure(job, posting)}
+    posting = failures.handle(
+        job, failures.Outcome(failures.RUN_ERROR, stage, category, models, retries), MINUTE
+    )
+    fields = {**(fields or {}), **_publish_failure(job, posting)}
     return job.summary("error", failed_stage=stage, error_category=category, **(fields or {}))
 
 
@@ -724,8 +699,10 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
 
     入力は worker が書いた agent-input.json。上限を超えたら AI を呼ばない（D-21）。ファイルの
     大きさを読み込む前に確かめ、読み込んだ後も標準入力に渡すバイト列で確かめる（worker は同じ
-    形の JSON で書くので、2つは同じ大きさになる）。収集結果が0件の日も AI を呼ばず、項目のない
-    出力をコードが作る（③ が「該当なし」の本文にする。report-templates.md 1.5）。
+    形の JSON で書くので、2つは同じ大きさになる）。日次は収集結果が0件の日も AI を呼ばず、項目の
+    ない出力をコードが作る（③ が「該当なし」の本文にする。report-templates.md 1.5）。週次は、
+    今週の観測が0件でも、過去のテーマか過去の観測があれば呼ぶ（沈静のテーマを出すため）。どれも
+    なければ呼ばず、空の出力をコードが作る。
     AI を呼んだら、成否によらず1回分の使用量・所要時間・モデル・入力量をログ（usage）に残す。
     """
     job.log.write("analyze", "start")
@@ -810,7 +787,7 @@ def _analyze(job: Job) -> tuple[str | None, tuple[str, ...], int]:
     if call:
         job.log.write("analyze", "end", count=len(data["items"]))
     else:
-        job.log.write("analyze", "end", count=0, detail="収集結果が0件なので AI を呼ばない")
+        job.log.write("analyze", "end", count=0, detail="分析する材料が0件なので AI を呼ばない")
     return None, models, retries
 
 

@@ -1,7 +1,7 @@
 """統括スクリプトの失敗の分岐（structure.md 3.3・6.3・7.4、data-model.md 3.4・4.4、
 report-templates.md 3章）。
 
-日次の ① 〜 ③ の実行エラー・不合格・秘匿情報の検出（公開停止）のあとに、次を行う。
+日次・週次の ① 〜 ③ の実行エラー・不合格・秘匿情報の検出（公開停止）のあとに、次を行う。
 （公開停止にした本文の runs は、元の結果のまま閉じる。公開停止はログの `post` の
 `secret_detected` に残す。issues の `blocked_secret` に残すのは ⑤ で行う。data-model.md 3.4）
 
@@ -75,6 +75,8 @@ CHECK_LABELS = {
     "long_quote": "D4 長い引用",
     "missing_period_event": "期間内の出来事の欠落",
     "too_long": "文字数・要点数の超過",
+    "unknown_product": "週次の比較の製品名が収集した項目にない",
+    "empty_comparison": "週次の比較の行がすべて除外された",
     "all_excluded": "すべての項目を除外",
     "body_too_long": "本文が 60,000 文字を超えた",
     "secret_detected": "秘匿情報の検査",
