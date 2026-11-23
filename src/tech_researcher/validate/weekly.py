@@ -114,6 +114,7 @@ class _Context:
     theme_ids: frozenset[str]
     items: Mapping[str, Item]
     titles: Mapping[str, str]  # ② に渡した今週の観測のタイトル
+    repos: Mapping[str, str]  # ② に渡したリリースの項目の owner/repo（なければ項目がない）
     past_urls: Mapping[str, str]
     allowed: frozenset[str]
     quote_sources: Sequence[Prepared]
@@ -278,6 +279,7 @@ def _context(
         titles={i["id"]: i["untrusted"]["title"] or "" for i in data["items"]},
         past_urls=past_urls,
         allowed=frozenset(allowed),
+        repos={i["id"]: i["repo"] for i in data["items"] if i.get("repo")},
         quote_sources=quote_sources(data, meta_terms_by_id(items)),
         limits=limits,
     )
@@ -351,7 +353,8 @@ def _invalid_source(entry: Entry, ctx: _Context) -> str | None:
 
 
 def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
-    """比較表の GitHub 外の行：製品名が、選んだ項目の ② に渡したタイトルに含まれる（2.4）。
+    """比較表の GitHub 外の行：製品名が、選んだ項目の ② に渡したタイトル
+    （リリースの項目は、`owner/repo` の repo の部分の全体との一致も）に含まれる（2.4）。
 
     GitHub のリポジトリの行は、名前をコードが owner/repo で付けるので照合しない。
     """
@@ -367,7 +370,16 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
         return f"製品名が {MIN_PRODUCT_NAME} 文字より短い"
     if _contains_word(_fold(ctx.titles.get(entry.item_id, "")), name):
         return None
-    return "製品名が収集タイトルにない"
+    # リリースの項目は、リポジトリ名の全体との一致も許す（一部の語では通さない）
+    repo_name = ctx.repos.get(entry.item_id, "").rpartition("/")[2]
+    if repo_name and _separators(_fold(repo_name)) == _separators(name):
+        return None
+    return "製品名が収集タイトル・リポジトリ名にない"
+
+
+def _separators(text: str) -> str:
+    """`-`・`_`・`.` と空白の並びを1つの空白にそろえる（pkg-tool と pkg tool を同じにする）。"""
+    return re.sub(r"[-_.\s]+", " ", text)
 
 
 def _is_word_char(text: str) -> bool:
