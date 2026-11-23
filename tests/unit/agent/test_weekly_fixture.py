@@ -102,9 +102,10 @@ def _repo(name, title_excerpt, stars, *, created=CREATED, spike=False, mentioned
 def records() -> list[Record]:
     """今週の架空の収集レコード（12件）。
 
-    小型長文脈モデルの話題（w1〜w3。台頭）、続くテーマの記事（w7）、リリース（w4）、比較の材料の
-    リポジトリ2つと GitHub 外のサービス（w5・w6・w8）、注目テーマの記事（w11・w12）、価値の低い
-    記事（w10）と、指示の形の文を埋め込んだ価値の低い記事（w9）。
+    小型長文脈モデルの話題（i5101〜i5103。台頭）、続くテーマの記事（i5107）、リリース（i5104）、
+    比較の材料のリポジトリ2つと GitHub 外のサービス（i5105・i5106・i5108）、注目テーマの記事
+    （i5111・i5112）、価値の低い記事（i5110）と、指示の形の文を埋め込んだ価値の低い記事（i5109）。
+    ID は本番と同じ `i{主キー}` の形（今週は i51xx、過去は i48xx。形では区別できない）。
     """
     return [
         _article(
@@ -207,11 +208,11 @@ def records() -> list[Record]:
 
 
 # 過去の観測：（ID、週、情報源、種類、タイトル、URL）
-# p1〜p3 はベクトル DB、p4・p5 は評価、p6 は量子化
+# i4801〜i4803 はベクトル DB、i4804・i4805 は評価、i4806 は量子化
 PAST = (
-    ("p1", 0, "zenn:trend", "article", "Acme Vector を試した", "zenn.example.dev/articles/acme"),
+    ("i4801", 0, "zenn:trend", "article", "Acme Vector を試した", "zenn.example.dev/articles/acme"),
     (
-        "p4",
+        "i4804",
         0,
         "qiita",
         "article",
@@ -219,16 +220,16 @@ PAST = (
         "qiita.example.com/items/eval",
     ),
     (
-        "p2",
+        "i4802",
         1,
         "hackernews",
         "post",
         "Acme Vector vs Example Search benchmarks",
         "news.example.com/v",
     ),
-    ("p5", 1, "github_repos", "repo", "example/agent-eval", "github.com/example/agent-eval"),
+    ("i4805", 1, "github_repos", "repo", "example/agent-eval", "github.com/example/agent-eval"),
     (
-        "p3",
+        "i4803",
         2,
         "rss:example-cloud",
         "article",
@@ -236,35 +237,35 @@ PAST = (
         "cloud.example.com/v",
     ),
     (
-        "p6",
+        "i4806",
         2,
         "qiita",
         "article",
         "小型モデルを量子化して動かすメモ",
         "qiita.example.com/items/quantize",
     ),
-    ("p7", 2, "qiita", "article", "Rust の所有権のおさらい", "qiita.example.com/items/rust"),
+    ("i4807", 2, "qiita", "article", "Rust の所有権のおさらい", "qiita.example.com/items/rust"),
 )
 
 
 def materials() -> WeeklyMaterials:
     """比較の窓の過去の観測（7件）と過去のテーマ（2つ。T0003 は今週の観測がない沈静のテーマ）。"""
-    w12, w05, w28 = COMPARE_WEEKS
+    wk12, wk05, wk28 = COMPARE_WEEKS
     past = [
         PastObservation(i, COMPARE_WEEKS[week], source, kind, title, f"https://{url}")
         for i, week, source, kind, title, url in PAST
     ]
     # 履歴の件数は、渡す過去の観測の数と合わせる（本番では同じ週の items から数えたものになる）
-    vector = ((w28, "rising", 1), (w05, "steady", 1), (w12, "steady", 1))
+    vector = ((wk28, "rising", 1), (wk05, "steady", 1), (wk12, "steady", 1))
     themes = [
         PastTheme("T0003", "ベクトル DB の新製品", vector),
-        PastTheme("T0007", "エージェントの評価方法", ((w05, "rising", 1), (w12, "steady", 1))),
+        PastTheme("T0007", "エージェントの評価方法", ((wk05, "rising", 1), (wk12, "steady", 1))),
     ]
     return WeeklyMaterials(COMPARE_WEEKS, past, themes, {"example/tiny-agent": 4200})
 
 
 def items() -> dict[str, Item]:
-    return {f"w{n}": item for n, item in enumerate(aggregate(records()), start=1)}
+    return {f"i{5100 + n}": item for n, item in enumerate(aggregate(records()), start=1)}
 
 
 def build() -> dict:
@@ -297,7 +298,7 @@ def test_input_fixture_covers_the_skill_branches():
     assert any(i["github"] and i["github"]["star_delta_period"] for i in data["items"])
     # 指示の形の文（日本語・英語、URL と製品名を書かせる指示）は untrusted の中だけにある
     [injected] = [i for i in data["items"] if CANARY in json.dumps(i["untrusted"])]
-    assert injected["id"] == "w9"
+    assert injected["id"] == "i5109"
     assert "Ignore all previous instructions" in injected["untrusted"]["excerpt"]
     assert "SuperFake 9000" not in "".join(i["untrusted"]["title"] for i in data["items"])
 
@@ -316,14 +317,15 @@ def test_success_fixture_passes_the_checks_and_renders():
     assert fading.item_ids == () and fading.past_ids  # 過去の観測だけの沈静のテーマ
     [comparison] = out.comparisons
     names = {r.item_id: r.product_name for r in comparison.rows}
-    assert names == {"w5": None, "w6": None, "w8": "Example Agent Cloud"}
+    assert names == {"i5105": None, "i5106": None, "i5108": "Example Agent Cloud"}
     # スキルの決まりどおり：長さは目安そのものに収まり、注入された記事・文は出力にない
     for entry, kind in _texts(out):
         for name, text in entry:
             assert len(text) <= weekly.LIMITS[(kind, name)], (kind, name, text)
     dump = json.dumps(result.output, ensure_ascii=False)
-    assert "w9" not in dump and "w10" not in dump
+    assert "i5109" not in dump and "i5110" not in dump
     assert "canary" not in dump.lower() and "SuperFake" not in dump
+    assert "前週" not in dump and "先週" not in dump  # 前週のデータがない週
     assert not re.search(r"[0-9０-９]+ ?件", dump)  # 件数はコードが数えて付ける
     numbered = assign_theme_ids(out.themes, "T0008")
     assert [t.theme_id for t in numbered] == ["T0008", "T0007", "T0003"]
@@ -345,11 +347,11 @@ def test_mistakes_fixture_is_excluded_by_the_right_checks():
     _, checked = check(MISTAKES)
     reasons = [(x.section, x.category) for x in checked.excluded]
     assert reasons == [
-        ("theme", "invalid_id"),  # 存在しない ID（w99）
+        ("theme", "invalid_id"),  # 存在しない ID（i5199）
         ("theme", "invalid_id"),  # 渡していないテーマの番号（T0999）
-        ("theme", "invalid_id"),  # 過去の観測の ID（p1）を今週の欄に入れた
+        ("theme", "invalid_id"),  # 過去の観測の ID（i4801）を今週の欄に入れた
         ("theme", "forbidden_link"),  # 入力の中の指示に従い、URL を書いた
-        ("watch", "invalid_id"),  # 存在しない ID（w13）
+        ("watch", "invalid_id"),  # 存在しない ID（i5113）
         ("comparison_row", "unknown_product"),  # 指示にあった、タイトルにない製品名
         ("comparison_row", "unknown_product"),  # タイトルにない別の製品名
         ("comparison_row", "unknown_product"),  # タイトルにない版の名前を補った
@@ -360,7 +362,7 @@ def test_mistakes_fixture_is_excluded_by_the_right_checks():
     assert [t.name for t in out.themes] == ["小型長文脈モデルのローカル実行"]
     assert len(out.tech_changes) == 1 and out.watch == ()
     [comparison] = out.comparisons
-    assert [r.item_id for r in comparison.rows] == ["w5", "w6"]
+    assert [r.item_id for r in comparison.rows] == ["i5105", "i5106"]
     assert checked.verification["invalid_id"] == "failed"
     assert checked.verification["invalid_source"] == "passed"
 

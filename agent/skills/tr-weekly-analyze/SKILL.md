@@ -21,7 +21,7 @@ description: tech-researcher の週次の ② 分析。この依頼に続く JSO
   },
   "items": [
     {
-      "id": "w1",
+      "id": "i5101",
       "date": "掲載の根拠の出来事の日付（JST）",
       "source": "情報源の名前",
       "kind": "article | repo | release | post",
@@ -32,7 +32,7 @@ description: tech-researcher の週次の ② 分析。この依頼に続く JSO
     }
   ],
   "past_observations": [
-    {"id": "p1", "week": "観測した週の月曜", "source": "…", "kind": "…", "untrusted": {"title": "…"}}
+    {"id": "i4801", "week": "観測した週の月曜", "source": "…", "kind": "…", "untrusted": {"title": "…"}}
   ],
   "past_themes": [
     {"theme_id": "T0007", "name": "テーマ名", "history": [{"week": "…", "status": "rising | steady | fading | null", "count": 6}]}
@@ -151,6 +151,7 @@ description: tech-researcher の週次の ② 分析。この依頼に続く JSO
 
 - `themes[].item_ids`・`tech_changes[].item_ids`・`watch[].item_ids`・`comparisons[].rows[].item_id` には、`items` の `id` だけを使う
 - `themes[].past_ids` には、`past_observations` の `id` だけを使う。過去の観測の ID を `item_ids` に入れない。今週の観測の ID を `past_ids` に入れない
+- 今週の観測と過去の観測は、ID の形では区別できない（どちらも `i` と番号）。`items` と `past_observations` のどちらにあるかで決まる
 - `themes[].theme_id` は、`past_themes` の `theme_id` か `null` だけ
 - 入力にない ID・番号を作らない。形の似た ID を推測で書かない
 - 同じセクションの中では、1つの今週の観測（`item_ids`・`item_id`）を1つの項目にだけ入れる。重なった項目は、後のものがコードの検査で除外される。過去の観測（`past_ids`）も、1つのテーマにだけ入れる（2つのテーマで数えると、件数の比較が二重になる。検査では除外されないが、決まりとして守る）。別のセクションには同じ観測を使ってよい（テーマの観測を、技術的変化や比較でも指してよい）
@@ -178,8 +179,8 @@ description: tech-researcher の週次の ② 分析。この依頼に続く JSO
       "status": "steady",
       "change": "前の期間と比べて何が変わったか",
       "comparison": "過去の観測との比較",
-      "item_ids": ["w7"],
-      "past_ids": ["p4", "p5"]
+      "item_ids": ["i5107"],
+      "past_ids": ["i4804", "i4805"]
     },
     {
       "theme_id": "T0003",
@@ -188,21 +189,21 @@ description: tech-researcher の週次の ② 分析。この依頼に続く JSO
       "change": "…",
       "comparison": "…",
       "item_ids": [],
-      "past_ids": ["p1", "p2"]
+      "past_ids": ["i4801", "i4802"]
     }
   ],
-  "tech_changes": [{"headline": "見出し", "description": "説明", "item_ids": ["w4"]}],
+  "tech_changes": [{"headline": "見出し", "description": "説明", "item_ids": ["i5104"]}],
   "comparisons": [
     {
       "domain": "領域名",
       "rows": [
-        {"item_id": "w5", "product_name": null, "feature": "特徴", "use_case": "向いている用途"},
-        {"item_id": "w8", "product_name": "タイトルにある製品名", "feature": "特徴", "use_case": "向いている用途"}
+        {"item_id": "i5105", "product_name": null, "feature": "特徴", "use_case": "向いている用途"},
+        {"item_id": "i5108", "product_name": "タイトルにある製品名", "feature": "特徴", "use_case": "向いている用途"}
       ],
       "summary": "違いのまとめ"
     }
   ],
-  "watch": [{"name": "テーマ名", "reason": "理由", "item_ids": ["w11"]}]
+  "watch": [{"name": "テーマ名", "reason": "理由", "item_ids": ["i5111"]}]
 }
 ```
 

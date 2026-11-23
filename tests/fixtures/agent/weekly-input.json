@@ -14,7 +14,7 @@
   },
   "items": [
     {
-      "id": "w1",
+      "id": "i5101",
       "date": "2026-10-20",
       "source": "Example AI ブログ",
       "kind": "article",
@@ -29,7 +29,7 @@
       }
     },
     {
-      "id": "w2",
+      "id": "i5102",
       "date": "2026-10-21",
       "source": "Qiita",
       "kind": "article",
@@ -49,7 +49,7 @@
       }
     },
     {
-      "id": "w3",
+      "id": "i5103",
       "date": "2026-10-22",
       "source": "Hacker News",
       "kind": "article",
@@ -73,7 +73,7 @@
       }
     },
     {
-      "id": "w4",
+      "id": "i5104",
       "date": "2026-10-21",
       "source": "GitHub Releases",
       "kind": "release",
@@ -88,7 +88,7 @@
       }
     },
     {
-      "id": "w5",
+      "id": "i5105",
       "date": "2026-10-24",
       "source": "GitHub",
       "kind": "repo",
@@ -109,7 +109,7 @@
       }
     },
     {
-      "id": "w6",
+      "id": "i5106",
       "date": "2026-10-20",
       "source": "GitHub",
       "kind": "repo",
@@ -130,7 +130,7 @@
       }
     },
     {
-      "id": "w7",
+      "id": "i5107",
       "date": "2026-10-22",
       "source": "Zenn",
       "kind": "article",
@@ -145,7 +145,7 @@
       }
     },
     {
-      "id": "w8",
+      "id": "i5108",
       "date": "2026-10-23",
       "source": "Example Cloud ブログ",
       "kind": "article",
@@ -160,7 +160,7 @@
       }
     },
     {
-      "id": "w9",
+      "id": "i5109",
       "date": "2026-10-23",
       "source": "Zenn",
       "kind": "article",
@@ -175,7 +175,7 @@
       }
     },
     {
-      "id": "w10",
+      "id": "i5110",
       "date": "2026-10-24",
       "source": "Qiita",
       "kind": "article",
@@ -195,7 +195,7 @@
       }
     },
     {
-      "id": "w11",
+      "id": "i5111",
       "date": "2026-10-24",
       "source": "Hacker News",
       "kind": "article",
@@ -215,7 +215,7 @@
       }
     },
     {
-      "id": "w12",
+      "id": "i5112",
       "date": "2026-10-24",
       "source": "Zenn",
       "kind": "article",
@@ -232,7 +232,7 @@
   ],
   "past_observations": [
     {
-      "id": "p1",
+      "id": "i4801",
       "week": "2026-10-12",
       "source": "Zenn",
       "kind": "article",
@@ -241,7 +241,7 @@
       }
     },
     {
-      "id": "p4",
+      "id": "i4804",
       "week": "2026-10-12",
       "source": "Qiita",
       "kind": "article",
@@ -250,7 +250,7 @@
       }
     },
     {
-      "id": "p2",
+      "id": "i4802",
       "week": "2026-10-05",
       "source": "Hacker News",
       "kind": "post",
@@ -259,7 +259,7 @@
       }
     },
     {
-      "id": "p5",
+      "id": "i4805",
       "week": "2026-10-05",
       "source": "GitHub",
       "kind": "repo",
@@ -268,7 +268,7 @@
       }
     },
     {
-      "id": "p3",
+      "id": "i4803",
       "week": "2026-09-28",
       "source": "Example Cloud ブログ",
       "kind": "article",
@@ -277,7 +277,7 @@
       }
     },
     {
-      "id": "p6",
+      "id": "i4806",
       "week": "2026-09-28",
       "source": "Qiita",
       "kind": "article",
@@ -286,7 +286,7 @@
       }
     },
     {
-      "id": "p7",
+      "id": "i4807",
       "week": "2026-09-28",
       "source": "Qiita",
       "kind": "article",
