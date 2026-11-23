@@ -345,15 +345,20 @@ def test_weekly_secret_stop_closes_the_run_and_posts_the_fixed_issue(weekly):
     [created] = weekly.github.created
     assert created["title"] == "[実行エラー][週次] 2026-10-26（月）号（公開停止）"
     assert secret not in created["body"] and "公開を停止しました" in created["body"]
-    print(query(weekly, "SELECT kind, state FROM issues WHERE run_id = ?", summary["run_id"]))
+    assert query(
+        weekly, "SELECT kind, state FROM issues WHERE run_id = ? ORDER BY kind", summary["run_id"]
+    ) == [("report", "blocked_secret"), ("run_error_secret", "created")]
 
 
 def test_weekly_dry_run_secret_stop_writes_only_the_fixed_issue(weekly):
     secret = weekly.worker_env["GITHUB_ISSUE_TOKEN"]
-    weekly.ai = lambda data: {
-        **weekly_ai(data),
-        "watch": [{"item_id": data["items"][0]["id"], "reason": secret}],
-    }
+
+    def leaking(data):
+        output = weekly_ai(data)
+        output["themes"][0]["change"] = f"値は {secret} です"
+        return output
+
+    weekly.ai = leaking
     code, summary = weekly.run_weekly("--dry-run")
 
     assert code == 1 and summary["error_category"] == "secret_detected"
@@ -398,3 +403,21 @@ def test_week_with_nothing_at_all_does_not_call_the_ai(weekly):
 
     assert code == 0 and summary["result"] == "report"
     assert weekly.calls("agent") == []
+
+
+def test_weekly_rejection_shows_readable_check_names(weekly):
+    """週次だけの検査名も表示名にする（生の分類名を出さない）。"""
+
+    def unknown_ids(data):
+        output = weekly_ai(data)
+        output["themes"] = output["themes"][:1]
+        output["themes"][0]["item_ids"] = ["i999"]
+        return output
+
+    weekly.ai = unknown_ids
+    code, summary = weekly.run_weekly()
+
+    assert code == 1 and summary["result"] == "rejected"
+    [created] = weekly.github.created
+    for name in ("unknown_product", "empty_comparison", "invalid_id", "all_excluded"):
+        assert name not in created["body"]

@@ -75,6 +75,8 @@ CHECK_LABELS = {
     "long_quote": "D4 長い引用",
     "missing_period_event": "期間内の出来事の欠落",
     "too_long": "文字数・要点数の超過",
+    "unknown_product": "週次の比較の製品名が収集した項目にない",
+    "empty_comparison": "週次の比較の行がすべて除外された",
     "all_excluded": "すべての項目を除外",
     "body_too_long": "本文が 60,000 文字を超えた",
     "secret_detected": "秘匿情報の検査",
