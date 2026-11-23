@@ -22,7 +22,10 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pytest
+
 from tech_researcher.agent import invoke
+from tech_researcher.agent import weekly as agent_weekly
 from tech_researcher.agent.daily import InputItem
 from tech_researcher.agent.weekly import WeeklyInclusion, WeeklyMaterials, build_weekly_input
 from tech_researcher.agent.weekly_output import assign_theme_ids, parse_weekly_output
@@ -289,6 +292,30 @@ def test_input_fixture_is_what_the_code_builds():
     assert json.loads(INPUT.read_text(encoding="utf-8")) == build()
 
 
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/Example/PkgTool/releases/tag/v5.0.0", "example/pkgtool"),
+        ("https://github.com/example/pkgtool/releases", "example/pkgtool"),
+        ("https://github.com/example/pkgtool", None),  # リリースのページではない
+        ("https://github.com/example/pkgtool/issues/1", None),
+        ("https://news.example.com/pkgtool/releases/v5", None),  # GitHub ではない
+        ("https://github.com/settings/releases/x", None),  # owner にならない名前
+    ],
+)
+def test_release_repo_comes_only_from_a_release_url(url, expected):
+    record = Record(
+        source_id="github_releases",
+        url=url,
+        title="v5",
+        published_precision="datetime",
+        fetched_at=FETCHED,
+        published_at=_at(21, 2),
+        events=(Event("released", _at(21, 2)),),
+    )
+    assert agent_weekly._release_repo(Item(url, (record,), (), (), (), (), None)) == expected
+
+
 def test_input_fixture_covers_the_skill_branches():
     data = json.loads(INPUT.read_text(encoding="utf-8"))
     # 前週（7日前の 10-19）の観測がない（欠測）。先頭は対象週の14日前
@@ -296,6 +323,11 @@ def test_input_fixture_covers_the_skill_branches():
     assert {t["theme_id"] for t in data["past_themes"]} == {"T0003", "T0007"}
     assert {i["kind"] for i in data["items"]} >= {"article", "release", "repo"}
     assert any(i["github"] and i["github"]["star_delta_period"] for i in data["items"])
+    # リリースの項目だけが repo（owner/repo）を持つ
+    assert {i["id"]: i["repo"] for i in data["items"] if "repo" in i} == {
+        "i5104": "example/pkgtool"
+    }
+    assert {i["kind"] for i in data["items"] if "repo" in i} == {"release"}
     # 指示の形の文（日本語・英語、URL と製品名を書かせる指示）は untrusted の中だけにある
     [injected] = [i for i in data["items"] if CANARY in json.dumps(i["untrusted"])]
     assert injected["id"] == "i5109"

@@ -8,8 +8,10 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from urllib.parse import urlsplit
 
 from tech_researcher.agent.daily import InputItem
+from tech_researcher.collect.github_candidates import repo_from_url
 from tech_researcher.collect.records import Event, Item
 from tech_researcher.collect.urls import normalize_url
 from tech_researcher.db.history import PastTheme
@@ -103,11 +105,12 @@ def _item(
     rep = representative(item)  # items の代表の値と同じ出典（週次の items と食い違わせない）
     event = inclusion.event
     github = item.github
-    return {
+    kind = item_kind(item)
+    out = {
         "id": entry.item_id,
         "date": inclusion.day.isoformat(),
         "source": names.get(first.source_id, first.source_id),
-        "kind": item_kind(item),
+        "kind": kind,
         "event": {"type": event.type},
         "attention": [
             {"metric": a.metric, "value": a.value}
@@ -129,6 +132,20 @@ def _item(
         },
         "untrusted": {"title": rep.title or _title(item), "excerpt": rep.excerpt or _excerpt(item)},
     }
+    if kind == "release":
+        # タイトルがタグだけのことがあるので、リポジトリ名を渡す（他の kind は持たない）
+        out["repo"] = _release_repo(item)
+    return out
+
+
+def _release_repo(item: Item) -> str | None:
+    """リリースのページの URL（`https://github.com/{owner}/{repo}/releases/...`）の `owner/repo`。
+
+    形が合わなければ None（推測しない）。名前の形は repo_from_url が確かめる。
+    """
+    repo = repo_from_url(item.url)
+    parts = urlsplit(item.url).path.split("/")
+    return repo if repo is not None and len(parts) > 3 and parts[3] == "releases" else None
 
 
 def _normalized(url: str) -> str:

@@ -85,7 +85,8 @@
       "untrusted": {
         "title": "pkgtool 5.0.0",
         "excerpt": "The lockfile format changed to v3. pkgtool 4.x cannot read v3 lockfiles."
-      }
+      },
+      "repo": "example/pkgtool"
     },
     {
       "id": "i5105",

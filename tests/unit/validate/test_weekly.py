@@ -315,6 +315,41 @@ def test_product_name_is_checked_against_the_title_given_to_the_ai():
     assert reasons(bad)[0] == ("comparison_row", "unknown_product")
 
 
+@pytest.mark.parametrize(
+    "name, ok",
+    [
+        ("pkgtool", True),  # タイトルは版のタグだけ。repo の名前の部分と一致
+        ("PkgTool", True),
+        ("example", False),  # owner の部分は見ない
+        ("example/pkgtool", False),  # repo の名前の部分だけと照合する
+        ("pkg", False),  # 語の境界は title と同じ
+        ("other", False),
+    ],
+)
+def test_release_row_product_name_may_match_the_repo_name_part(name, ok):
+    items = {
+        **ITEMS,
+        "i7": item("https://github.com/example/pkgtool/releases/tag/v5.0.0", "v5.0.0"),
+    }
+    entry = {
+        "id": "i7",
+        "untrusted": {"title": "v5.0.0", "excerpt": None},
+        "repo": "example/pkgtool",
+    }
+    data = {**DATA, "items": [*DATA["items"], entry]}
+    result = check(comparisons=[comparison(row("i7", name))], data=data, items=items)
+    assert (result.excluded == ()) is ok
+
+
+def test_repo_name_is_ignored_for_items_without_repo():
+    """repo を持たない項目（リリース以外、URL から取れないリリース）は、タイトルだけと照合する。"""
+    items = {**ITEMS, "i7": item("https://a.example.com/r/v5", "v5.0.0")}
+    entry = {"id": "i7", "untrusted": {"title": "v5.0.0", "excerpt": None}, "repo": None}
+    data = {**DATA, "items": [*DATA["items"], entry]}
+    result = check(comparisons=[comparison(row("i7", "pkgtool"))], data=data, items=items)
+    assert reasons(result)[0] == ("comparison_row", "unknown_product")
+
+
 # --- D1 出典 ---
 
 
