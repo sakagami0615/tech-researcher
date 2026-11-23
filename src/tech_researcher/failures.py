@@ -1,7 +1,7 @@
 """統括スクリプトの失敗の分岐（structure.md 3.3・6.3・7.4、data-model.md 3.4・4.4、
 report-templates.md 3章）。
 
-日次の ① 〜 ③ の実行エラー・不合格・秘匿情報の検出（公開停止）のあとに、次を行う。
+日次・週次の ① 〜 ③ の実行エラー・不合格・秘匿情報の検出（公開停止）のあとに、次を行う。
 （公開停止にした本文の runs は、元の結果のまま閉じる。公開停止はログの `post` の
 `secret_detected` に残す。issues の `blocked_secret` に残すのは ⑤ で行う。data-model.md 3.4）
 

@@ -5,11 +5,13 @@
 """
 
 import contextlib
+import json
 from datetime import date, datetime
 
 import pytest
 
 from tech_researcher import orchestrator
+from tech_researcher.agent import invoke
 from tech_researcher.db.history import past_themes
 from tech_researcher.db.schema import open_db
 from tech_researcher.periods import JST
@@ -153,18 +155,183 @@ def test_weekly_dry_run_goes_through_verify_without_writing(weekly):
     assert weekly.github.created == []
 
 
-def test_rejected_week_closes_the_run_without_posting(weekly):
-    weekly.ai = lambda data: {"themes": []}  # スキーマに合わない出力（D6(a)）
+def _theme_ai(data):
+    return {"themes": []}  # スキーマに合わない出力（D6(a)）
+
+
+def test_rejected_week_posts_a_rejected_issue_and_closes_the_run(weekly):
+    weekly.ai = _theme_ai
     code, summary = weekly.run_weekly()
 
     assert code == 1 and summary["result"] == "rejected"
-    assert weekly.github.created == []
-    assert [c["args"][0] for c in weekly.calls("compose")] == ["collect", "verify", "finish"]
     run_id = summary["run_id"]
-    assert query(weekly, "SELECT status FROM runs WHERE run_id = ?", run_id) == [("rejected",)]
+    # 不合格の後に ② を呼び直さず、④ を1回だけ呼ぶ。runs を閉じてから、不合格 Issue を投稿する
+    assert [c["task"] for c in weekly.calls("agent")] == ["weekly", "investigate"]
+    assert [c["args"][0] for c in weekly.calls("compose")] == [
+        "collect",
+        "verify",
+        "finish",
+        "post",
+    ]
+    [created] = weekly.github.created
+    assert created["labels"] == ("type:rejected", "cadence:weekly")
+    assert created["title"].startswith("[不合格][週次] 2026-10-26（月）号のレポート")
+    assert "## 調査結果" in created["body"]
+    assert summary["issue_url"] == f"https://github.com/{ISSUE_REPO}/issues/100"
     assert query(
         weekly, "SELECT status, rejected_checks FROM reports WHERE run_id = ?", run_id
     ) == [("rejected", '["invalid_output"]')]
+    [(status, error_category, investigation)] = query(
+        weekly,
+        "SELECT status, error_category, investigation_json FROM runs WHERE run_id = ?",
+        run_id,
+    )
+    assert (status, error_category) == ("rejected", "invalid_output")
+    assert json.loads(investigation)["confidence"] == "medium"
+    assert query(weekly, "SELECT kind, state FROM issues WHERE run_id = ?", run_id) == [
+        ("rejected", "created")
+    ]
+
+
+def test_weekly_dry_run_rejection_calls_investigation_but_writes_nothing(weekly):
+    """ドライランは ④ を呼んで結果を残し、DB に書かず、⑤ を実行せず、再生成もしない。"""
+    weekly.ai = _theme_ai
+    code, summary = weekly.run_weekly("--dry-run")
+
+    assert code == 1 and summary["result"] == "rejected" and summary["issue_url"] is None
+    assert [c["task"] for c in weekly.calls("agent")] == ["weekly", "investigate"]
+    assert [c["args"][0] for c in weekly.calls("compose")] == ["collect", "verify"]
+    out = weekly.data / "dry-run" / summary["run_id"]
+    assert json.loads((out / "investigation.json").read_text("utf-8"))["confidence"] == "medium"
+    issue = (out / "issue.md").read_text("utf-8")
+    assert issue.splitlines()[0].startswith("[不合格][週次] 2026-10-26（月）号のレポート")
+    assert not (weekly.data / "db").exists()  # DB を作らない（D-22）
+    assert weekly.github.created == []
+
+
+def test_all_sources_failed_week_posts_a_run_error_issue(weekly):
+    weekly.feed = None
+    code, summary = weekly.run_weekly()
+
+    assert code == 1
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "collect",
+        "all_sources_failed",
+    )
+    assert summary["failed_sources"] == ["Example"]
+    assert [c["task"] for c in weekly.calls("agent")] == ["investigate"]  # ② は呼ばない
+    assert [c["args"][0] for c in weekly.calls("compose")] == ["collect", "finish", "post"]
+    [created] = weekly.github.created
+    assert created["labels"] == ("type:run-error", "cadence:weekly")
+    assert created["title"].startswith("[実行エラー][週次] 2026-10-26（月）号（① 収集")
+    assert "## 調査結果" in created["body"]
+    assert query(
+        weekly,
+        "SELECT status, failed_stage, error_category FROM runs WHERE run_id = ?",
+        summary["run_id"],
+    ) == [("failed", "collect", "all_sources_failed")]
+
+
+def test_weekly_dry_run_collect_failure_calls_investigation_without_writing(weekly):
+    weekly.feed = None
+    code, summary = weekly.run_weekly("--dry-run")
+
+    assert code == 1 and summary["failed_stage"] == "collect"
+    assert [c["args"][0] for c in weekly.calls("compose")] == ["collect"]
+    out = weekly.data / "dry-run" / summary["run_id"]
+    assert (out / "investigation.json").exists() and (out / "issue.md").exists()
+    assert not (weekly.data / "db").exists()
+    assert weekly.github.created == []
+
+
+def test_weekly_ai_failure_closes_the_run_with_the_model_and_posts(weekly):
+    def broken(data):
+        raise invoke.AgentError("agent_failed", models=("claude-x",))
+
+    weekly.ai = broken
+    code, summary = weekly.run_weekly()
+
+    assert (code, summary["failed_stage"], summary["error_category"]) == (
+        1,
+        "analyze",
+        "agent_failed",
+    )
+    assert [c["task"] for c in weekly.calls("agent")] == ["weekly", "investigate"]
+    assert query(
+        weekly,
+        "SELECT status, failed_stage, error_category, model FROM runs WHERE run_id = ?",
+        summary["run_id"],
+    ) == [("failed", "analyze", "agent_failed", "claude-x")]
+    [created] = weekly.github.created
+    assert created["labels"] == ("type:run-error", "cadence:weekly")
+
+
+@pytest.mark.parametrize("category", ["usage_limit", "missing_skill"])
+def test_weekly_ai_unavailable_skips_investigation_and_uses_the_template(weekly, category):
+    def broken(data):
+        raise invoke.AgentError(category)
+
+    weekly.ai = broken
+    code, summary = weekly.run_weekly("--dry-run")
+
+    assert (code, summary["error_category"]) == (1, category)
+    assert [c["task"] for c in weekly.calls("agent")] == ["weekly"]  # ④ を呼ばない
+    out = weekly.data / "dry-run" / summary["run_id"]
+    assert not (out / "investigation.json").exists()
+    issue = (out / "issue.md").read_text("utf-8")
+    assert "AI による調査結果を掲載できませんでした。" in issue and "## 調査結果" not in issue
+
+
+def test_weekly_secret_stop_closes_the_run_and_posts_the_fixed_issue(weekly):
+    secret = weekly.worker_env["GITHUB_ISSUE_TOKEN"]
+
+    def leaking(data):
+        output = weekly_ai(data)
+        output["themes"][0]["change"] = f"値は {secret} です"
+        return output
+
+    weekly.ai = leaking
+    code, summary = weekly.run_weekly()
+
+    assert code == 1
+    assert (summary["result"], summary["failed_stage"], summary["error_category"]) == (
+        "error",
+        "verify",
+        "secret_detected",
+    )
+    assert [c["task"] for c in weekly.calls("agent")] == ["weekly"]  # ④ は呼ばない
+    assert [c["args"][0] for c in weekly.calls("compose")] == [
+        "collect",
+        "verify",
+        "finish",
+        "post",
+    ]
+    assert query(
+        weekly,
+        "SELECT status, failed_stage, error_category FROM runs WHERE run_id = ?",
+        summary["run_id"],
+    ) == [("failed", "verify", "secret_detected")]
+    [created] = weekly.github.created
+    assert created["title"] == "[実行エラー][週次] 2026-10-26（月）号（公開停止）"
+    assert secret not in created["body"] and "公開を停止しました" in created["body"]
+    print(query(weekly, "SELECT kind, state FROM issues WHERE run_id = ?", summary["run_id"]))
+
+
+def test_weekly_dry_run_secret_stop_writes_only_the_fixed_issue(weekly):
+    secret = weekly.worker_env["GITHUB_ISSUE_TOKEN"]
+    weekly.ai = lambda data: {
+        **weekly_ai(data),
+        "watch": [{"item_id": data["items"][0]["id"], "reason": secret}],
+    }
+    code, summary = weekly.run_weekly("--dry-run")
+
+    assert code == 1 and summary["error_category"] == "secret_detected"
+    out = weekly.data / "dry-run" / summary["run_id"]
+    assert "（公開停止）" in (out / "issue.md").read_text("utf-8").splitlines()[0]
+    assert not (out / "investigation.json").exists()
+    assert [c["args"][0] for c in weekly.calls("compose")] == ["collect", "verify"]
+    assert not (weekly.data / "db").exists()
 
 
 def test_week_without_observations_still_asks_the_ai_about_past_themes(weekly):
