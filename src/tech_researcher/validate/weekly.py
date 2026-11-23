@@ -379,7 +379,7 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
 
 def _separators(text: str) -> str:
     """`-`・`_`・`.` と空白の並びを1つの空白にそろえる（pkg-tool と pkg tool を同じにする）。"""
-    return re.sub(r"[-_.\s]+", " ", text).strip()
+    return re.sub(r"[-_.\s]+", " ", text)
 
 
 def _is_word_char(text: str) -> bool:

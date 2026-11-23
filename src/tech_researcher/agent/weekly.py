@@ -144,7 +144,7 @@ def _release_repo(item: Item) -> str | None:
     形が合わなければ None（推測しない）。名前の形は repo_from_url が確かめる。
     """
     repo = repo_from_url(item.url)
-    parts = urlsplit(item.url).path.split("/")
+    parts = urlsplit(_normalized(item.url)).path.split("/")
     return repo if repo is not None and len(parts) > 3 and parts[3] == "releases" else None
 
 

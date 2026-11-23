@@ -351,6 +351,7 @@ def test_release_row_product_name_may_match_the_repo_name_part(name, ok):
         ("someone/claude-proxy", "Claude", False),  # 別製品の名前の語だけでは通さない
         ("openai/openai-python", "Python", False),
         ("someone/pkgtool-cli", "pkgtool", False),
+        ("someone/pkgtool", "-pkgtool-", False),  # 前後の記号は残る
     ],
 )
 def test_release_row_needs_the_whole_repo_name(repo, name, ok):

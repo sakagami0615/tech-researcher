@@ -431,10 +431,6 @@ def _texts(out):
         yield (("name", w.name), ("reason", w.reason)), "watch"
 
 
-if __name__ == "__main__":  # 入力の形を変えたときに作り直す
-    INPUT.write_text(json.dumps(build(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
 def test_release_item_without_a_release_url_has_repo_null():
     url = "https://news.example.com/pkgtool/v5"
     record = Record(
@@ -450,3 +446,7 @@ def test_release_item_without_a_release_url_has_repo_null():
     inclusion = WeeklyInclusion(record.events[0], date(2026, 10, 21))
     [out] = build_weekly_input(TARGET, [entry], [inclusion], NAMES)["items"]
     assert out["kind"] == "release" and out["repo"] is None
+
+
+if __name__ == "__main__":  # 入力の形を変えたときに作り直す
+    INPUT.write_text(json.dumps(build(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
