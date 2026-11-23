@@ -151,11 +151,11 @@ bin/tr-run daily --dry-run   # 日次のドライラン。weekly で週次
 /tr-weekly --dry-run  # 週次のドライラン
 ```
 
-- スキルは `.claude/skills/tr-daily/SKILL.md`・`tr-weekly/SKILL.md` です。`bin/tr-run daily|weekly [--dry-run]` を1回だけ実行し、出力の要約（JSON 1行）をそのまま報告します。許可（`allowed-tools`）は、この2つのコマンドだけです。実行ファイルや内側のスキルは読ませません。共通の起動スキルはありません
-- 本番の手動実行は運用サーバーだけで行います（本番の DB が運用サーバーにしかないため。D-22）。ドライランは、agent.env（Claude のトークン）と収集用のトークンがあれば、どこでも動きます
+- スキルは `.claude/skills/tr-daily/SKILL.md`・`tr-weekly/SKILL.md` です。`bin/tr-run daily|weekly [--dry-run]` を1回だけ実行し、出力の要約（JSON 1行）をそのまま報告します。許可（`allowed-tools`）は、各スキルの本番とドライランの2つのコマンドだけです。実行ファイルや内側のスキルは、本文で開かないよう指示します（許可のルールは境界ではないため、実行データを作業ディレクトリに置かないことでも防ぎます）。共通の起動スキルはありません
+- 本番の手動実行は運用サーバーだけで行います（本番の DB が運用サーバーにしかないため。D-22）。ドライランは、ホストの uv と Docker、agent イメージ、worker.env・agent.env（Claude のトークンと収集用のトークン。使わない値は空でよい）があれば、どこでも動きます
 - 外側の Claude Code のログインは、統括スクリプトの agent には渡りません。agent は agent.env のトークンだけを使います
 - 処理は長いので、Bash の道具がタイムアウトしてバックグラウンドに移ります。移った後に完了を待って結果を受け取れるかは、日次の実際のドライランで確かめます（structure.md 3.8 の9）。それまでは、受け取れなければ `bin/tr-run` を端末で直接実行してください
-- スキルの文書と引数の検査は `tests/unit/test_outer_skills.py` です（偽の `bin/tr-run` で、引数と要約の受け取りを確かめます）
+- スキルの文書と引数の検査は `tests/unit/test_outer_skills.py` です（文書のコマンドと許可の一致を調べ、そのコマンドを偽の `bin/tr-run` で動かして、引数と要約の受け取りを確かめます。Claude Code がスキルを実際に展開する動きは確かめません）
 
 ## 観測（一時的。D-13）
 

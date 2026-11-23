@@ -61,8 +61,8 @@ def test_body_commands_match_allowed_tools(kind):
     for command in commands:
         assert f"Bash({command})" in meta["allowed-tools"]
     # 内側のスキル・共通の起動スキルを呼ばせない
-    assert "/tr-daily-evaluate" not in body
-    assert "/tr-weekly-analyze" not in body
+    for inner in ("tr-daily-evaluate", "tr-weekly-analyze", "tr-investigate"):
+        assert inner not in body
     assert "Skill" not in meta["allowed-tools"]
 
 
@@ -106,6 +106,9 @@ def test_documented_command_calls_entrypoint_once_and_returns_summary(project, k
     # スキルが報告の対象にする項目は、要約に実在する
     names = {f.name for f in dataclasses.fields(Summary)}
     _, body = _skill(kind)
-    for key in re.findall(r"`(\w+)`", body):
-        if key in {"result", "issue_url", "output_dir", "failed_sources", "partial_sources"}:
-            assert key in names
+    for key in ("result", "issue_url", "output_dir", "failed_sources", "partial_sources"):
+        assert f"`{key}`" in body
+        assert key in names
+    for key in ("failed_stage", "error_category"):
+        assert f"`{key}`" in body
+        assert key in names
