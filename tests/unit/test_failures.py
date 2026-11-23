@@ -115,6 +115,23 @@ def test_retries_per_stage():
     assert failures.retries(CONFIG, "verify", fetches) == (0, 0)
 
 
+def test_counts_read_the_weekly_comparison_rows_separately():
+    counts = failures._counts(
+        {
+            "counts": {
+                "collected": 9,
+                "ai_output": 4,
+                "excluded_by_reason": {"invalid_id": 1},
+                "excluded_rows_by_reason": {"unknown_product": 2, "x": "bad"},
+                "published": 3,
+            }
+        }
+    )
+    assert counts.excluded == {"D6(b) ID が存在しない": 1}
+    assert counts.excluded_rows == {"週次の比較の製品名が収集した項目にない": 2, "x": 0}
+    assert failures._counts({"counts": {}}).excluded_rows == {}  # 日次は持たない
+
+
 def test_shrink_sources_halves_the_table_until_the_body_fits(monkeypatch):
     from tech_researcher.render.common import Report
 

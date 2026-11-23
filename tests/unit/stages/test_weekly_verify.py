@@ -149,6 +149,7 @@ def test_saves_report_entries_in_ai_order_with_theme_numbers(week, conn):
         "excluded": 1,
         "excluded_by_reason": {"invalid_id": 1},
         "excluded_rows": 1,
+        "excluded_rows_by_reason": {"too_long": 1},
         "published": 5,
     }
     assert json.loads(ai_output) == full_output(week)

@@ -13,7 +13,7 @@
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from tech_researcher.periods import JST, Target
@@ -83,12 +83,17 @@ class Investigation:
 
 @dataclass(frozen=True)
 class Counts:
-    """不合格の件数（3.3）。excluded は除外の理由（コードの分類）から件数への対応。"""
+    """不合格の件数（3.3）。excluded は除外の理由（コードの分類）から件数への対応。
+
+    excluded_rows は週次の比較の行の除外（理由 → 件数）。項目（領域）と単位が違うので、excluded と
+    別に数えて別に出す（AI の出力 − 除外 = 掲載の計算に入れない）。
+    """
 
     collected: int
     ai_output: int
     excluded: Mapping[str, int]
     published: int
+    excluded_rows: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -268,13 +273,18 @@ def _stage(stage: str) -> str:
 
 
 def _counts(counts: Counts) -> str:
-    excluded = sum(counts.excluded.values())
-    reasons = "、".join(f"{plain_text(r)} {n} 件" for r, n in counts.excluded.items() if n)
-    detail = f"（{reasons}）" if reasons else ""
+    rows = sum(counts.excluded_rows.values())
+    row_text = f"／比較の行の除外 {rows} 件{_reasons(counts.excluded_rows)}" if rows else ""
     return (
         f"収集 {counts.collected} 件／AI の出力 {counts.ai_output} 件／"
-        f"除外 {excluded} 件{detail}／掲載 {counts.published} 件"
+        f"除外 {sum(counts.excluded.values())} 件{_reasons(counts.excluded)}{row_text}／"
+        f"掲載 {counts.published} 件"
     )
+
+
+def _reasons(by_reason: Mapping[str, int]) -> str:
+    reasons = "、".join(f"{plain_text(r)} {n} 件" for r, n in by_reason.items() if n)
+    return f"（{reasons}）" if reasons else ""
 
 
 def _table(header: Sequence[str], rows: Sequence[Sequence[str]], cell: Callable[[str], str]) -> str:

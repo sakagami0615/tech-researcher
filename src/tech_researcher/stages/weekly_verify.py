@@ -218,12 +218,14 @@ class _Store:
         """
         # 比較の行の除外は、項目（領域）の数と単位が違うので別に数える（AI の出力 − 除外 = 掲載）
         items = [x for x in excluded if x.section != "comparison_row"]
+        rows = [x for x in excluded if x.section == "comparison_row"]
         counts = {
             "collected": self.collected,
             "ai_output": ai_count,
             "excluded": len(items),
             "excluded_by_reason": dict(Counter(x.category for x in items)),
-            "excluded_rows": len(excluded) - len(items),
+            "excluded_rows": len(rows),
+            "excluded_rows_by_reason": dict(Counter(x.category for x in rows)),
             "published": verified.checked.published if body is not None and verified else 0,
         }
         facts = {
