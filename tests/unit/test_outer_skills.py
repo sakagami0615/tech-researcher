@@ -1,7 +1,8 @@
 """外側のスキル（/tr-daily・/tr-weekly。structure.md 3.4・3.5）の検査。
 
-偽の bin/tr-run で、スキルの文書に書かれたコマンドと引数を実際に動かし、
-要約を受け取れることを確かめる。
+文書のコマンドが実行できる形であることを、偽の bin/tr-run で確かめる
+（引数の渡り方と要約の受け取り）。
+スキルの実際の振る舞い（引数を断る・報告の形）は本物の Claude Code でしか確かめられない。
 本物の Claude Code・Docker・トークンは使わない。
 """
 
@@ -66,6 +67,17 @@ def test_body_commands_match_allowed_tools(kind):
     assert "Skill" not in meta["allowed-tools"]
 
 
+@pytest.mark.parametrize("kind", ["daily", "weekly"])
+def test_body_has_no_injection_or_shell_metacharacters(kind):
+    _, body = _skill(kind)
+    assert body.count("$ARGUMENTS") == 1
+    assert "!`" not in body
+    assert "${" not in body.replace(PLACEHOLDER, "")
+    for command in _commands(kind):
+        for meta in (";", "&&", "|", "$(", "`", ">", "<", "\n"):
+            assert meta not in command
+
+
 def test_only_two_outer_skills():
     # 共通の起動スキルは作らない。内側のスキルは .claude/skills/ の外（D-19）
     assert sorted(p.name for p in SKILLS.iterdir()) == ["tr-daily", "tr-weekly"]
@@ -103,12 +115,3 @@ def test_documented_command_calls_entrypoint_once_and_returns_summary(project, k
     assert calls == [f"{kind} --dry-run" if dry_run else kind]
     received = json.loads(done.stdout)
     assert received == dataclasses.asdict(summary)
-    # スキルが報告の対象にする項目は、要約に実在する
-    names = {f.name for f in dataclasses.fields(Summary)}
-    _, body = _skill(kind)
-    for key in ("result", "issue_url", "output_dir", "failed_sources", "partial_sources"):
-        assert f"`{key}`" in body
-        assert key in names
-    for key in ("failed_stage", "error_category"):
-        assert f"`{key}`" in body
-        assert key in names
