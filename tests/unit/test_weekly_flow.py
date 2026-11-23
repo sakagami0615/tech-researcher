@@ -10,7 +10,7 @@ from datetime import date, datetime
 
 import pytest
 
-from tech_researcher import orchestrator
+from tech_researcher import failures, orchestrator
 from tech_researcher.agent import invoke
 from tech_researcher.db.history import past_themes
 from tech_researcher.db.schema import open_db
@@ -243,6 +243,36 @@ def test_weekly_dry_run_collect_failure_calls_investigation_without_writing(week
     assert (out / "investigation.json").exists() and (out / "issue.md").exists()
     assert not (weekly.data / "db").exists()
     assert weekly.github.created == []
+
+
+def _partial_fetches(monkeypatch):
+    fetch = {
+        "source_id": "rss:example",
+        "status": "ok",
+        "category": None,
+        "attempts": 1,
+        "parts": [{"name": "一部", "category": "http_5xx"}],
+    }
+    monkeypatch.setattr(failures, "load_fetches", lambda run_dir: [fetch])
+
+
+def test_weekly_partial_failure_still_posts_the_report(weekly, monkeypatch):
+    """一部だけ取れなかった情報源は全失敗にせず、取れた分で週次レポートを作る（US-E6-03）。"""
+    _partial_fetches(monkeypatch)
+    code, summary = weekly.run_weekly()
+
+    assert code == 0 and summary["result"] == "report"
+    assert summary["partial_sources"] == ["Example"] and summary["failed_sources"] == []
+    assert len(weekly.github.created) == 1
+
+
+def test_weekly_partial_failure_is_kept_in_a_rejected_summary(weekly, monkeypatch):
+    _partial_fetches(monkeypatch)
+    weekly.ai = _theme_ai
+    code, summary = weekly.run_weekly()
+
+    assert code == 1 and summary["result"] == "rejected"
+    assert summary["partial_sources"] == ["Example"]
 
 
 def test_weekly_ai_failure_closes_the_run_with_the_model_and_posts(weekly):
