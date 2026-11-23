@@ -303,17 +303,17 @@
         {
           "week": "2026-09-28",
           "status": "rising",
-          "count": 5
+          "count": 1
         },
         {
           "week": "2026-10-05",
           "status": "steady",
-          "count": 6
+          "count": 1
         },
         {
           "week": "2026-10-12",
           "status": "steady",
-          "count": 4
+          "count": 1
         }
       ]
     },
@@ -324,12 +324,12 @@
         {
           "week": "2026-10-05",
           "status": "rising",
-          "count": 3
+          "count": 1
         },
         {
           "week": "2026-10-12",
           "status": "steady",
-          "count": 4
+          "count": 1
         }
       ]
     }

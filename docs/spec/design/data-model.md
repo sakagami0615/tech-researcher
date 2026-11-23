@@ -628,7 +628,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
   - 週次のスキーマが CLI に受け付けられるか（トークンなし、2026-11-22、Claude Code 2.1.311）：agent のイメージで `claude -p … --tools "" --output-format json --json-schema <週次のスキーマ>` を起動し、起動の検査を通って API の段階まで進むことを確かめた（比べた `$schema` 付きのスキーマは `--json-schema is not a valid JSON Schema` で止まる）。AI が実際にこのスキーマで構造化出力を返せるかは、トークンで確かめる
   - 製品名の照合は、NFKC・大文字小文字の統一・空白の圧縮だけを行い、記号は消さない（`Foo|DB` を `FooDB` と一致させない）
   - 新しいテーマの番号は `assign_theme_ids` が、検査を通ったテーマに、`next_theme_id` から出力の順に振る
-  - 週次の `counts_json` は、日次の項目に加えて、比較表の行の除外を `excluded_rows`（件数）・`excluded_rows_by_reason`（分類 → 件数）で別に持つ（`excluded`・`excluded_by_reason` は領域を含む項目の数で、行を入れない）。不合格 Issue の件数の出し方は report-templates.md 3.3
+  - 週次の `counts_json` は、日次の項目に加えて、比較表の行の除外を `excluded_rows`（件数）・`excluded_rows_by_reason`（分類 → 件数）で別に持つ（`excluded`・`excluded_by_reason` は領域を含む項目の数で、行を入れない）。不合格 Issue の件数の出し方は report-templates.md 3.2・3.3
   - AI への指示は `agent/skills/tr-weekly-analyze/SKILL.md`。文章の長さの目安は `LIMITS` と同じ値で、単体テスト（`tests/unit/agent/test_weekly_fixture.py`）が一致を確かめる。偽の AI の出力（決まりどおりのものと、入力の中の指示に従った文・存在しない ID・タイトルにない製品名を含むもの）が ③ を通る、または正しい分類で除外されることも同じテストで確かめる
 
 ### 4.4 失敗時の調査（④）

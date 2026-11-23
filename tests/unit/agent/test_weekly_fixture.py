@@ -9,9 +9,11 @@
 - weekly-success.json：その入力に対する Claude Code の成功の結果の JSON の例（形は
   daily-success.json と同じ）。structured_output はスキルの決まりどおりに書いたもので、スキーマと
   ③ の検査をすべて通り、本文を作れる
-- weekly-mistakes.json：スキルの決まりを破った出力の例（入力の中の指示に従った文、存在しない ID・
-  テーマの番号、過去の観測の ID を今週の欄に入れたもの、タイトルにない製品名）。③ がそれぞれを
-  正しい分類で除外し、決まりを守った項目だけが残ることを確かめる
+- weekly-mistakes.json：スキルの決まりを破った出力の例（入力の中の指示に従って URL を書いた文、
+  存在しない ID・テーマの番号、過去の観測の ID を今週の欄に入れたもの、タイトルにない製品名）。③ が
+  それぞれを正しい分類で除外し、決まりを守った項目だけが残ることを確かめる。指示に従っても URL・
+  HTML・長い引用・タイトルにない製品名を含まない文（テーマ名に合言葉を書くなど）は ③ では
+  止められないので、トークンを使った確認（README）で、指示に従わないことを確かめる
 """
 
 import json
@@ -252,10 +254,11 @@ def materials() -> WeeklyMaterials:
         PastObservation(i, COMPARE_WEEKS[week], source, kind, title, f"https://{url}")
         for i, week, source, kind, title, url in PAST
     ]
-    vector = ((w28, "rising", 5), (w05, "steady", 6), (w12, "steady", 4))
+    # 履歴の件数は、渡す過去の観測の数と合わせる（本番では同じ週の items から数えたものになる）
+    vector = ((w28, "rising", 1), (w05, "steady", 1), (w12, "steady", 1))
     themes = [
         PastTheme("T0003", "ベクトル DB の新製品", vector),
-        PastTheme("T0007", "エージェントの評価方法", ((w05, "rising", 3), (w12, "steady", 4))),
+        PastTheme("T0007", "エージェントの評価方法", ((w05, "rising", 1), (w12, "steady", 1))),
     ]
     return WeeklyMaterials(COMPARE_WEEKS, past, themes, {"example/tiny-agent": 4200})
 
@@ -334,7 +337,8 @@ def test_success_fixture_passes_the_checks_and_renders():
         window,
         observed=12,
     )
-    assert "前週" in report.body and "—" in report.body  # 欠測の前週は「—」
+    assert "／前週 —／" in report.body  # 欠測の前週は、テーマの括弧書きも「—」
+    assert "主な出典（最後に観測した記事）" in report.body  # 過去の観測だけの沈静のテーマ
 
 
 def test_mistakes_fixture_is_excluded_by_the_right_checks():
