@@ -577,6 +577,7 @@ SQLite のテーブル、共通収集データのスキーマ、AI（② 評価�
 ```
 
 - 今週の項目の `repo`（`owner/repo`。小文字）は、`kind` が `release` の項目だけが持つ（ほかの項目にはキーを置かない）。GitHub Releases のタイトルはタグ（`v5.0.0`）だけのことがあり、本文も URL も渡さないので、どのリポジトリのリリースかを伝えるため。コードがリリースのページの URL（`https://github.com/{owner}/{repo}/releases/...`）から取り、形が合わなければ `null`（推測しない）。日次の入力には足さない
+- リリースの行の名前（`repo` から書いた製品名）は小文字で出る。リポジトリの行（`owner/repo` を大文字・小文字のまま付ける）と表記がそろわないことがあるが、受け入れる
 - 今週の項目の `github` は、リポジトリの項目だけが持つ。`full_name`・`created_at`・`stars_total`・`star_delta_period`（調査期間の Star の増分。日次の増分の合計で、測定がなければ `null`）・`mentioned_by`（言及元の今週の項目 ID）。`date` は掲載の根拠の出来事の日付（JST）で、前日の記録と比べて決まる出来事（`feed_entry`・`star_growth`・`new_repo`）は、その出来事を持つ日次の行の対象日
 - `items` は今週の観測、`past_observations` は比較の窓の過去の週の観測（3.8）。`compare_weeks` は比較の窓に入れた週（対象週の月曜）
 - テンプレートの「今週 N 件／前週 N 件／過去4週平均」は、AI が選んだ `item_ids`・`past_ids` をコードが週ごとに数えて出す（report-templates.md 2.2）
