@@ -470,14 +470,18 @@ def load_validation(run_dir: Path) -> dict:
 def _counts(validation: Mapping) -> Counts:
     counts = validation.get("counts")
     counts = counts if isinstance(counts, dict) else {}
-    by_reason = counts.get("excluded_by_reason")
-    by_reason = by_reason if isinstance(by_reason, dict) else {}
     return Counts(
         collected=_int(counts.get("collected")),
         ai_output=_int(counts.get("ai_output")),
-        excluded={CHECK_LABELS.get(str(k), str(k)): _int(v) for k, v in by_reason.items()},
+        excluded=_by_reason(counts.get("excluded_by_reason")),
         published=_int(counts.get("published")),
+        excluded_rows=_by_reason(counts.get("excluded_rows_by_reason")),  # 週次の比較の行
     )
+
+
+def _by_reason(found: object) -> dict[str, int]:
+    found = found if isinstance(found, dict) else {}
+    return {CHECK_LABELS.get(str(k), str(k)): _int(v) for k, v in found.items()}
 
 
 def _verification(validation: Mapping) -> dict[str, str]:

@@ -61,6 +61,15 @@ def test_rejected_title_and_labels():
     assert weekly.labels == ("type:rejected", "cadence:weekly")
 
 
+def test_weekly_comparison_rows_are_counted_apart_from_the_items():
+    counts = Counts(9, 4, {"ID 不正": 1}, 3, {"製品名の不一致": 2, "なし": 0})
+    body = rejected_report(WEEKLY, RUN, RUN_AT, ["x"], counts, [], INV).body
+    assert (
+        "| 件数 | 収集 9 件／AI の出力 4 件／除外 1 件（ID 不正 1 件）／"
+        "比較の行の除外 2 件（製品名の不一致 2 件）／掲載 3 件 |"
+    ) in body
+
+
 def test_rejected_body_has_template_items():
     body = rejected().body
     assert f"| 対象期間 | {PERIOD} |" in body
@@ -73,6 +82,7 @@ def test_rejected_body_has_template_items():
     )
     for heading in ("### 発生した事象", "### 推定される原因と根拠", "### 調査内容", "### 対策案"):
         assert heading in body
+    assert "比較の行" not in body  # 行の除外がなければ出さない（日次は持たない）
     assert "確度：高。" in body
     assert "<summary>検証結果の詳細</summary>\n\n| 検証項目 | 結果 |" in body
     assert "| D6\\(a\\) | 不合格 |" in body
