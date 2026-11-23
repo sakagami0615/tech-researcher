@@ -354,7 +354,7 @@ def _invalid_source(entry: Entry, ctx: _Context) -> str | None:
 
 def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
     """比較表の GitHub 外の行：製品名が、選んだ項目の ② に渡したタイトル
-    （リリースの項目は、リポジトリ名 `owner/repo` の repo の部分も）に含まれる（2.4）。
+    （リリースの項目は、`owner/repo` の repo の部分の全体との一致も）に含まれる（2.4）。
 
     GitHub のリポジトリの行は、名前をコードが owner/repo で付けるので照合しない。
     """
@@ -370,12 +370,16 @@ def _unknown_product(entry: Entry, ctx: _Context) -> str | None:
         return f"製品名が {MIN_PRODUCT_NAME} 文字より短い"
     if _contains_word(_fold(ctx.titles.get(entry.item_id, "")), name):
         return None
-    repo_name = ctx.repos.get(entry.item_id, "").rpartition("/")[
-        2
-    ]  # リリースの項目は repo の名前も
-    if repo_name and _contains_word(_fold(repo_name), name):
+    # リリースの項目は、リポジトリ名の全体との一致も許す（一部の語では通さない）
+    repo_name = ctx.repos.get(entry.item_id, "").rpartition("/")[2]
+    if repo_name and _separators(_fold(repo_name)) == _separators(name):
         return None
     return "製品名が収集タイトル・リポジトリ名にない"
+
+
+def _separators(text: str) -> str:
+    """`-`・`_`・`.` と空白の並びを1つの空白にそろえる（pkg-tool と pkg tool を同じにする）。"""
+    return re.sub(r"[-_.\s]+", " ", text).strip()
 
 
 def _is_word_char(text: str) -> bool:

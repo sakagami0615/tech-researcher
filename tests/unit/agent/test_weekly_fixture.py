@@ -433,3 +433,20 @@ def _texts(out):
 
 if __name__ == "__main__":  # 入力の形を変えたときに作り直す
     INPUT.write_text(json.dumps(build(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def test_release_item_without_a_release_url_has_repo_null():
+    url = "https://news.example.com/pkgtool/v5"
+    record = Record(
+        source_id="rss:a",
+        url=url,
+        title="v5",
+        published_precision="datetime",
+        fetched_at=FETCHED,
+        published_at=_at(21, 2),
+        events=(Event("released", _at(21, 2)),),
+    )
+    entry = InputItem("i9001", Item(url, (record,), record.events, (), (), (), None))
+    inclusion = WeeklyInclusion(record.events[0], date(2026, 10, 21))
+    [out] = build_weekly_input(TARGET, [entry], [inclusion], NAMES)["items"]
+    assert out["kind"] == "release" and out["repo"] is None

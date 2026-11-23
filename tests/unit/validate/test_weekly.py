@@ -322,7 +322,8 @@ def test_product_name_is_checked_against_the_title_given_to_the_ai():
         ("PkgTool", True),
         ("example", False),  # owner の部分は見ない
         ("example/pkgtool", False),  # repo の名前の部分だけと照合する
-        ("pkg", False),  # 語の境界は title と同じ
+        ("pkg", False),  # repo の名前の一部の語では通さない
+        ("tool", False),
         ("other", False),
     ],
 )
@@ -336,6 +337,25 @@ def test_release_row_product_name_may_match_the_repo_name_part(name, ok):
         "untrusted": {"title": "v5.0.0", "excerpt": None},
         "repo": "example/pkgtool",
     }
+    data = {**DATA, "items": [*DATA["items"], entry]}
+    result = check(comparisons=[comparison(row("i7", name))], data=data, items=items)
+    assert (result.excluded == ()) is ok
+
+
+@pytest.mark.parametrize(
+    "repo, name, ok",
+    [
+        ("someone/pkg-tool", "pkg-tool", True),
+        ("someone/pkg-tool", "Pkg Tool", True),  # 区切りは同じとみなす
+        ("someone/pkg_tool", "pkg.tool", True),
+        ("someone/claude-proxy", "Claude", False),  # 別製品の名前の語だけでは通さない
+        ("openai/openai-python", "Python", False),
+        ("someone/pkgtool-cli", "pkgtool", False),
+    ],
+)
+def test_release_row_needs_the_whole_repo_name(repo, name, ok):
+    items = {**ITEMS, "i7": item("https://github.com/x/y/releases/tag/v1", "v1")}
+    entry = {"id": "i7", "untrusted": {"title": "v1", "excerpt": None}, "repo": repo}
     data = {**DATA, "items": [*DATA["items"], entry]}
     result = check(comparisons=[comparison(row("i7", name))], data=data, items=items)
     assert (result.excluded == ()) is ok
